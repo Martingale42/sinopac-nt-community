@@ -17,17 +17,17 @@ import asyncio
 from collections.abc import Callable
 from typing import Protocol
 
-from nautilus_trader.adapters.sinopac.config import SinopacDataClientConfig
-from nautilus_trader.adapters.sinopac.constants import SINOPAC
-from nautilus_trader.adapters.sinopac.constants import SINOPAC_VENUE
-from nautilus_trader.adapters.sinopac.providers import SinopacInstrumentProvider
+from sinopac_nt.config import SinopacDataClientConfig
+from sinopac_nt.constants import SINOPAC
+from sinopac_nt.constants import SINOPAC_VENUE
+from sinopac_nt.providers import SinopacInstrumentProvider
 from nautilus_trader.cache.cache import Cache
 from nautilus_trader.common.component import LiveClock
 from nautilus_trader.common.component import MessageBus
 from nautilus_trader.common.enums import LogColor
 from nautilus_trader.core import nautilus_pyo3
-from nautilus_trader.core.nautilus_pyo3 import sinopac as pyo3_sinopac
-from nautilus_trader.core.nautilus_pyo3.sinopac import SinopacQuoteType
+from sinopac_nt import _sinopac as pyo3_sinopac
+from sinopac_nt._sinopac import SinopacQuoteType
 from nautilus_trader.data.messages import RequestBars
 from nautilus_trader.data.messages import RequestQuoteTicks
 from nautilus_trader.data.messages import RequestTradeTicks

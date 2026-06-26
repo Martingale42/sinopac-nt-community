@@ -26,24 +26,24 @@ from decimal import Decimal
 from typing import Any
 from typing import Protocol
 
-from nautilus_trader.adapters.sinopac.config import SinopacExecClientConfig
-from nautilus_trader.adapters.sinopac.constants import SINOPAC
-from nautilus_trader.adapters.sinopac.constants import SINOPAC_VENUE
-from nautilus_trader.adapters.sinopac.providers import SinopacInstrumentProvider
-from nautilus_trader.adapters.sinopac.tags import SinopacOrderTags
+from sinopac_nt.config import SinopacExecClientConfig
+from sinopac_nt.constants import SINOPAC
+from sinopac_nt.constants import SINOPAC_VENUE
+from sinopac_nt.providers import SinopacInstrumentProvider
+from sinopac_nt.tags import SinopacOrderTags
 from nautilus_trader.cache.cache import Cache
 from nautilus_trader.common.component import LiveClock
 from nautilus_trader.common.component import MessageBus
 from nautilus_trader.common.enums import LogColor
 from nautilus_trader.core import nautilus_pyo3
-from nautilus_trader.core.nautilus_pyo3 import sinopac as pyo3_sinopac
-from nautilus_trader.core.nautilus_pyo3.sinopac import SinopacAction
-from nautilus_trader.core.nautilus_pyo3.sinopac import SinopacMarket
-from nautilus_trader.core.nautilus_pyo3.sinopac import SinopacOCType
-from nautilus_trader.core.nautilus_pyo3.sinopac import SinopacOrderCond
-from nautilus_trader.core.nautilus_pyo3.sinopac import SinopacOrderLot
-from nautilus_trader.core.nautilus_pyo3.sinopac import SinopacOrderType
-from nautilus_trader.core.nautilus_pyo3.sinopac import SinopacPriceType
+from sinopac_nt import _sinopac as pyo3_sinopac
+from sinopac_nt._sinopac import SinopacAction
+from sinopac_nt._sinopac import SinopacMarket
+from sinopac_nt._sinopac import SinopacOCType
+from sinopac_nt._sinopac import SinopacOrderCond
+from sinopac_nt._sinopac import SinopacOrderLot
+from sinopac_nt._sinopac import SinopacOrderType
+from sinopac_nt._sinopac import SinopacPriceType
 from nautilus_trader.core.uuid import UUID4
 from nautilus_trader.execution.messages import BatchCancelOrders
 from nautilus_trader.execution.messages import CancelAllOrders

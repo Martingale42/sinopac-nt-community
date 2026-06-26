@@ -18,10 +18,11 @@ from typing import Any
 
 from nautilus_trader.common.providers import InstrumentProvider
 from nautilus_trader.config import InstrumentProviderConfig
-from nautilus_trader.core import nautilus_pyo3
 from nautilus_trader.core.correctness import PyCondition
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.instruments import instruments_from_pyo3
+
+from sinopac_nt import _sinopac
 
 
 class SinopacInstrumentProvider(InstrumentProvider):
@@ -33,7 +34,7 @@ class SinopacInstrumentProvider(InstrumentProvider):
 
     Parameters
     ----------
-    client : nautilus_pyo3.sinopac.SinopacHttpClient
+    client : _sinopac.SinopacHttpClient
         The Sinopac gateway HTTP client.
     config : InstrumentProviderConfig, optional
         The instrument provider configuration, by default None.
@@ -42,7 +43,7 @@ class SinopacInstrumentProvider(InstrumentProvider):
 
     def __init__(
         self,
-        client: nautilus_pyo3.sinopac.SinopacHttpClient,
+        client: _sinopac.SinopacHttpClient,
         config: InstrumentProviderConfig | None = None,
     ) -> None:
         super().__init__(config=config)
@@ -56,7 +57,7 @@ class SinopacInstrumentProvider(InstrumentProvider):
 
         Returns
         -------
-        list[nautilus_pyo3.Instrument]
+        list[Instrument]
 
         """
         return self._instruments_pyo3

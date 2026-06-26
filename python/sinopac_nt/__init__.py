@@ -25,7 +25,7 @@ the authoritative validator. Field names mirror the Shioaji SDK verbatim.
 
 Attach a tag by appending ``SinopacOrderTags(...).value`` to the order's ``tags``::
 
-    from nautilus_trader.adapters.sinopac import SinopacOrderTags
+    from sinopac_nt import SinopacOrderTags
 
     # Intraday odd lot (pan-zhong ling-gu): 37 shares, must be LIMIT + DAY(ROD)
     order = self.order_factory.limit(
@@ -110,20 +110,20 @@ fully supported.
 
 """
 
-from nautilus_trader.adapters.sinopac.config import SinopacDataClientConfig
-from nautilus_trader.adapters.sinopac.config import SinopacExecClientConfig
-from nautilus_trader.adapters.sinopac.constants import SINOPAC
-from nautilus_trader.adapters.sinopac.constants import SINOPAC_CLIENT_ID
-from nautilus_trader.adapters.sinopac.constants import SINOPAC_VENUE
-from nautilus_trader.adapters.sinopac.data import SinopacDataClient
-from nautilus_trader.adapters.sinopac.execution import SinopacExecutionClient
-from nautilus_trader.adapters.sinopac.factories import SinopacLiveDataClientFactory
-from nautilus_trader.adapters.sinopac.factories import SinopacLiveExecClientFactory
-from nautilus_trader.adapters.sinopac.factories import get_sinopac_http_client
-from nautilus_trader.adapters.sinopac.factories import get_sinopac_instrument_provider
-from nautilus_trader.adapters.sinopac.factories import get_sinopac_ws_client
-from nautilus_trader.adapters.sinopac.providers import SinopacInstrumentProvider
-from nautilus_trader.adapters.sinopac.tags import SinopacOrderTags
+from sinopac_nt.config import SinopacDataClientConfig
+from sinopac_nt.config import SinopacExecClientConfig
+from sinopac_nt.constants import SINOPAC
+from sinopac_nt.constants import SINOPAC_CLIENT_ID
+from sinopac_nt.constants import SINOPAC_VENUE
+from sinopac_nt.data import SinopacDataClient
+from sinopac_nt.execution import SinopacExecutionClient
+from sinopac_nt.factories import SinopacLiveDataClientFactory
+from sinopac_nt.factories import SinopacLiveExecClientFactory
+from sinopac_nt.factories import get_sinopac_http_client
+from sinopac_nt.factories import get_sinopac_instrument_provider
+from sinopac_nt.factories import get_sinopac_ws_client
+from sinopac_nt.providers import SinopacInstrumentProvider
+from sinopac_nt.tags import SinopacOrderTags
 
 
 __all__ = [

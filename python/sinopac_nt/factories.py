@@ -17,16 +17,16 @@ import asyncio
 from collections.abc import Callable
 from functools import lru_cache
 
-from nautilus_trader.adapters.sinopac.config import SinopacDataClientConfig
-from nautilus_trader.adapters.sinopac.config import SinopacExecClientConfig
-from nautilus_trader.adapters.sinopac.data import SinopacDataClient
-from nautilus_trader.adapters.sinopac.execution import SinopacExecutionClient
-from nautilus_trader.adapters.sinopac.providers import SinopacInstrumentProvider
+from sinopac_nt.config import SinopacDataClientConfig
+from sinopac_nt.config import SinopacExecClientConfig
+from sinopac_nt.data import SinopacDataClient
+from sinopac_nt.execution import SinopacExecutionClient
+from sinopac_nt.providers import SinopacInstrumentProvider
 from nautilus_trader.cache.cache import Cache
 from nautilus_trader.common.component import LiveClock
 from nautilus_trader.common.component import MessageBus
 from nautilus_trader.config import InstrumentProviderConfig
-from nautilus_trader.core.nautilus_pyo3 import sinopac as pyo3_sinopac
+from sinopac_nt import _sinopac as pyo3_sinopac
 from nautilus_trader.live.factories import LiveDataClientFactory
 from nautilus_trader.live.factories import LiveExecClientFactory
 
