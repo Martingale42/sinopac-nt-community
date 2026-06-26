@@ -11,7 +11,7 @@ rest (auto-tag → build → publish), mirroring NautilusTrader's release pipeli
 3. Merge to `main`.
 
 `release.yml` then:
-- creates the `vX.Y.Z` git tag (only when the version changed) and a GitHub Release with
+- creates the `vX.Y.Z` git tag (when this version has no tag yet) and a GitHub Release with
   auto-generated notes;
 - builds 9 wheels (linux + macOS + Windows × py3.12/3.13/3.14) + an sdist and attaches
   them to the Release;

@@ -1,8 +1,8 @@
 # Release pipeline — aligned with NautilusTrader's build.yml release path.
 #
 # Flow: bump `version` in BOTH pyproject.toml and Cargo.toml -> merge to `main`.
-#   1. tag-release: verify the two versions match, then salsify auto-creates `vX.Y.Z`
-#      (only when the version changed) and opens a GitHub Release.
+#   1. tag-release: verify the two versions match, then create `vX.Y.Z` if this version
+#      has no tag yet (self-bootstraps the first release), and open a GitHub Release.
 #   2. build-{linux,macos,windows}: 9 wheels via maturin (3 OS x py3.12/3.13/3.14).
 #   3. build-sdist.
 #   4. github-release-assets: attach wheels + sdist to the Release.
@@ -10,8 +10,8 @@
 #   6. publish-crates: crates.io Trusted Publishing (OIDC)            — gated on var CRATES_PUBLISH.
 # See RELEASING.md for the one-time PyPI / crates.io setup and the publish toggles.
 #
-# NOTE: the 5 actions pinned to commit SHAs match NautilusTrader's pins. The remaining
-# actions use version tags; pin them to SHAs as a hardening follow-up (see RELEASING.md).
+# NOTE: all third-party actions are pinned to commit SHAs, except dtolnay/rust-toolchain@1.96.0
+# (its tag selects the Rust toolchain version).
 
 name: release
 
@@ -48,12 +48,19 @@ jobs:
           if [ "$PY" != "$CG" ]; then
             echo "::error::version mismatch — pyproject=$PY cargo=$CG (bump both)"; exit 1
           fi
-      - name: Detect new version and tag
+          echo "VERSION=$PY" >> "$GITHUB_ENV"
+      - name: Create tag if this version has none yet
         id: detect
-        uses: salsify/action-detect-and-tag-new-version@b1778166f13188a9d478e2d1198f993011ba9864 # v2.0.3
-        with:
-          version-command: |
-            grep -m1 '^version' pyproject.toml | sed -E 's/.*"([^"]+)".*/\1/'
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/v${VERSION}" >/dev/null 2>&1; then
+            echo "tag v${VERSION} already exists — nothing to release"
+            echo "tag=" >> "$GITHUB_OUTPUT"
+          else
+            git tag "v${VERSION}"
+            git push origin "v${VERSION}"
+            echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+            echo "created and pushed tag v${VERSION}"
+          fi
       - name: Create GitHub Release
         if: steps.detect.outputs.tag
         uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
