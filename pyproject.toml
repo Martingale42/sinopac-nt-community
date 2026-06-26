@@ -13,10 +13,21 @@ authors = [{ name = "Martingale42", email = "wcmc9527@gmail.com" }]
 dependencies = ["nautilus_trader==1.228.0"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+# pytest-asyncio is pinned to 0.23.8 (the version NautilusTrader 1.228.0 is tested
+# against); it requires pytest<9 and still provides the `event_loop` fixture the
+# ported integration tests depend on.
+dev = ["pytest>=8,<9", "pytest-asyncio==0.23.8"]
+
+# Installed by `uv run`/`uv sync` by default so `uv run pytest` finds the test deps.
+[dependency-groups]
+dev = ["sinopac-nt-community[dev]"]
 
 [tool.maturin]
 manifest-path = "Cargo.toml"
 module-name = "sinopac_nt._sinopac"
 python-source = "python"
 features = ["extension-module"]
+
+[tool.pytest.ini_options]
+testpaths = ["python/tests"]
+asyncio_mode = "strict"
