@@ -39,7 +39,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
-          persist-credentials: true # salsify pushes the tag with this token
+          persist-credentials: true # the tag step pushes vX.Y.Z with this token
       - name: Verify pyproject and Cargo versions match
         run: |
           PY=$(grep -m1 '^version' pyproject.toml | sed -E 's/.*"([^"]+)".*/\1/')
