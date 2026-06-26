@@ -21,3 +21,10 @@ pub mod websocket;
 
 #[cfg(feature = "python")]
 pub mod python;
+
+// Convenience re-exports so Rust consumers can write `sinopac_nt::SinopacHttpClient`
+// and `sinopac_nt::SinopacWebSocketClient` directly (the wheel's cdylib and this rlib
+// are two artifacts of the same crate; pure-Rust users consume the rlib).
+pub use crate::common::enums;
+pub use crate::http::client::SinopacHttpClient;
+pub use crate::websocket::client::SinopacWebSocketClient;

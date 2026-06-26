@@ -8,6 +8,8 @@ license = "LGPL-3.0-or-later"
 description = "Independent community Sinopac (Taiwan markets) adapter for NautilusTrader"
 repository = "https://github.com/Martingale42/sinopac-nt-community"
 readme = "README.md"
+# Keep the published crate Rust-only; the Python package + CI live in the repo, not the crate.
+exclude = ["/python", "/examples", "/docs", "/.github"]
 
 [lib]
 name = "sinopac_nt"
