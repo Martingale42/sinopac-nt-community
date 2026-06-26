@@ -19,6 +19,7 @@ use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
 use axum::{Router, routing::get};
 use nautilus_common::testing::wait_until_async;
+use rstest::rstest;
 use sinopac_nt::{
     common::enums::{
         SinopacAction, SinopacMarket, SinopacOCType, SinopacOrderCond, SinopacOrderLot,
@@ -26,7 +27,6 @@ use sinopac_nt::{
     },
     http::{client::SinopacHttpClient, models::PlaceOrderRequest, query::SnapshotsQuery},
 };
-use rstest::rstest;
 
 fn load_test_json(filename: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

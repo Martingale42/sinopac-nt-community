@@ -53,7 +53,11 @@ pub fn twse_stock_tick_size(reference: f64) -> (f64, u8) {
 /// 0.05 (not the stock-tier 0.50), and an ETF at 36 TWD ticks at 0.01 (not the
 /// stock-tier 0.05). `reference` is the contract's reference price.
 pub fn twse_etf_tick_size(reference: f64) -> (f64, u8) {
-    if reference < 50.0 { (0.01, 2) } else { (0.05, 2) }
+    if reference < 50.0 {
+        (0.01, 2)
+    } else {
+        (0.05, 2)
+    }
 }
 
 /// Returns the tick size and precision for a TAIFEX index / sector futures root.

@@ -1137,8 +1137,7 @@ mod tests {
             multiplier: 0,
             currency: "TWD".to_string(),
         };
-        let result =
-            parse_stock_to_equity(&contract, UnixNanos::default(), UnixNanos::default());
+        let result = parse_stock_to_equity(&contract, UnixNanos::default(), UnixNanos::default());
         assert!(result.is_err());
     }
 
@@ -1360,7 +1359,10 @@ mod tests {
                 assert_eq!(f.price_precision(), 0);
                 assert_eq!(f.multiplier().as_f64(), 100.0);
                 // tick_value identity: 1.0 * 100 = NTD 100/pt.
-                assert_eq!(f.price_increment().as_f64() * f.multiplier().as_f64(), 100.0);
+                assert_eq!(
+                    f.price_increment().as_f64() * f.multiplier().as_f64(),
+                    100.0
+                );
             }
             _ => panic!("Expected FuturesContract"),
         }
@@ -1410,7 +1412,10 @@ mod tests {
     #[rstest]
     #[case(49.9, 0.01)] // ETF < 50 -> 0.01
     #[case(50.0, 0.05)] // ETF boundary, >= 50 -> 0.05
-    fn test_etf_underlying_future_grid_boundary(#[case] reference: f64, #[case] expected_tick: f64) {
+    fn test_etf_underlying_future_grid_boundary(
+        #[case] reference: f64,
+        #[case] expected_tick: f64,
+    ) {
         // ETF-futures grid boundary at 50 TWD (cash-ETF schedule):
         // < 50 -> 0.01, >= 50 -> 0.05, both precision 2.
         let mut contract = dump_single_stock_future();

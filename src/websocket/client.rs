@@ -28,9 +28,7 @@ use dashmap::DashMap;
 use nautilus_common::live::get_runtime;
 use nautilus_network::{
     mode::ConnectionMode,
-    websocket::{
-        TransportBackend, WebSocketClient, WebSocketConfig, channel_message_handler,
-    },
+    websocket::{TransportBackend, WebSocketClient, WebSocketConfig, channel_message_handler},
 };
 use tokio::sync::mpsc;
 

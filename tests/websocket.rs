@@ -36,11 +36,11 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use nautilus_common::testing::wait_until_async;
+use rstest::rstest;
 use sinopac_nt::{
     common::enums::SinopacQuoteType,
     websocket::{client::SinopacWebSocketClient, messages::WsIncomingMsg},
 };
-use rstest::rstest;
 
 fn load_test_json(filename: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

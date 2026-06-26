@@ -1,19 +1,33 @@
 name: ci
 on: [push, pull_request]
+
 jobs:
   build-test:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python: ["3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.96.0
       - uses: astral-sh/setup-uv@v5
-      - name: Build + test
+      - name: Build extension + run tests
         run: |
           uv venv --python ${{ matrix.python }}
-          uv pip install nautilus_trader==1.228.0 maturin pytest
+          uv pip install nautilus_trader==1.228.0 maturin "pytest>=8,<9" pytest-asyncio==0.23.8
           uv run maturin develop
           uv run pytest python/tests -q
           cargo test
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: rustfmt, clippy
+      - name: rustfmt + clippy
+        run: |
+          cargo fmt --check
+          cargo clippy --features "python,extension-module"
