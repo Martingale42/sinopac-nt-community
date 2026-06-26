@@ -28,7 +28,9 @@ use dashmap::DashMap;
 use nautilus_common::live::get_runtime;
 use nautilus_network::{
     mode::ConnectionMode,
-    websocket::{WebSocketClient, WebSocketConfig, channel_message_handler},
+    websocket::{
+        TransportBackend, WebSocketClient, WebSocketConfig, channel_message_handler,
+    },
 };
 use tokio::sync::mpsc;
 
@@ -140,6 +142,8 @@ impl SinopacWebSocketClient {
             reconnect_jitter_ms: Some(250),
             reconnect_max_attempts: None,
             idle_timeout_ms: None,
+            backend: TransportBackend::default(),
+            proxy_url: None,
         };
 
         let client = WebSocketClient::connect(
