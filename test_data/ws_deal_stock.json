@@ -1,0 +1,11 @@
+{
+  "type": "order_update",
+  "event": "OrderState.StockDeal",
+  "data": {
+    "trade_id": "abc123", "seqno": "123456", "ordno": "A1234",
+    "exchange_seq": "E5678", "broker_id": "1234", "account_id": "5678",
+    "action": "Buy", "code": "2330",
+    "order_cond": "Cash", "order_lot": "Common",
+    "price": 580.0, "quantity": 1, "ts": 1709352601.0
+  }
+}

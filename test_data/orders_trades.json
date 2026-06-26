@@ -1,0 +1,25 @@
+[
+  {
+    "trade_id": "trade-001",
+    "code": "2330",
+    "action": "Buy",
+    "price": 580.0,
+    "quantity": 1000,
+    "status": "Filled",
+    "order_type": "ROD",
+    "price_type": "LMT",
+    "filled_qty": 1000,
+    "avg_fill_price": 580.5,
+    "custom_field": "tok123"
+  },
+  {
+    "trade_id": "trade-002",
+    "code": "2317",
+    "action": "Sell",
+    "price": 105.0,
+    "quantity": 2000,
+    "status": "PendingSubmit",
+    "order_type": "ROD",
+    "price_type": "LMT"
+  }
+]

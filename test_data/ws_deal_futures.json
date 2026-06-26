@@ -1,0 +1,11 @@
+{
+  "type": "order_update",
+  "event": "OrderState.FuturesDeal",
+  "data": {
+    "trade_id": "fut001", "seqno": "789012", "ordno": "F5678",
+    "exchange_seq": "E9012", "broker_id": "1234", "account_id": "5678",
+    "action": "Buy", "code": "TXFC6",
+    "price": 18000.0, "quantity": 2, "ts": 1709352701.0,
+    "security_type": "FUT", "market_type": "Day", "combo": false
+  }
+}

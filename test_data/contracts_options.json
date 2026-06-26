@@ -1,0 +1,21 @@
+[
+  {
+    "code": "TXO20000C6",
+    "symbol": "TXO20000C6",
+    "name": "台指選20000C06",
+    "category": "TXO",
+    "delivery_month": "2026/06",
+    "delivery_date": "2026/06/17",
+    "strike_price": 20000.0,
+    "option_right": "C",
+    "underlying_kind": "I",
+    "limit_up": 2200.0,
+    "limit_down": 0.1,
+    "reference": 500.0,
+    "update_date": "2026-03-02",
+    "unit": 1.0,
+    "multiplier": 50,
+    "currency": "TWD",
+    "underlying_code": "TXO"
+  }
+]

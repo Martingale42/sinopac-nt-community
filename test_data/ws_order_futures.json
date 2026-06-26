@@ -1,0 +1,15 @@
+{
+  "type": "order_update",
+  "event": "OrderState.FuturesOrder",
+  "data": {
+    "operation": {"op_type": "New", "op_code": "00", "op_msg": ""},
+    "order": {
+      "id": "fut001", "seqno": "789012", "ordno": "F5678",
+      "action": "Buy", "price": 18000.0, "quantity": 2,
+      "order_type": "ROD", "price_type": "LMT",
+      "market_type": "Day", "oc_type": "New", "combo": false
+    },
+    "status": {"id": "fut001", "exchange_ts": 1709352700.0, "modified_price": 0.0, "cancel_quantity": 0, "order_quantity": 2},
+    "contract": {"security_type": "FUT", "code": "TXFC6", "exchange": "TAIFEX", "delivery_month": "2026/06", "strike_price": null, "option_right": null}
+  }
+}

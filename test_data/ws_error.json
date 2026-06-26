@@ -1,0 +1,4 @@
+{
+  "type": "error",
+  "detail": "Missing or invalid contract_code/quote_type"
+}

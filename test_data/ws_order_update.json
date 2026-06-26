@@ -1,0 +1,12 @@
+{
+  "type": "order_update",
+  "event": "Submitted",
+  "data": {
+    "trade_id": "trade-001",
+    "code": "2330",
+    "action": "Buy",
+    "price": 580.0,
+    "quantity": 1000,
+    "status": "Submitted"
+  }
+}

@@ -1,0 +1,29 @@
+[
+  {
+    "code": "2330",
+    "symbol": "TSE2330",
+    "name": "台積電",
+    "exchange": "TSE",
+    "category": "Electronics",
+    "limit_up": 638.0,
+    "limit_down": 522.0,
+    "reference": 580.0,
+    "update_date": "2026-03-02",
+    "day_trade": "Yes",
+    "unit": 1000.0,
+    "multiplier": 0,
+    "currency": "TWD"
+  },
+  {
+    "code": "2317",
+    "symbol": "TSE2317",
+    "name": "鴻海",
+    "exchange": "TSE",
+    "category": "Electronics",
+    "limit_up": 165.0,
+    "limit_down": 135.0,
+    "reference": 150.0,
+    "update_date": "2026-03-02",
+    "day_trade": "Yes"
+  }
+]

@@ -1,0 +1,19 @@
+[
+  {
+    "code": "TXFC6",
+    "symbol": "TXFC6",
+    "name": "台指期06",
+    "category": "TXF",
+    "delivery_month": "2026/06",
+    "delivery_date": "2026/06/17",
+    "underlying_kind": "I",
+    "limit_up": 22000.0,
+    "limit_down": 18000.0,
+    "reference": 20000.0,
+    "update_date": "2026-03-02",
+    "unit": 1.0,
+    "multiplier": 200,
+    "currency": "TWD",
+    "underlying_code": "TXF"
+  }
+]

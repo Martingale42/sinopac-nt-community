@@ -1,0 +1,16 @@
+{
+  "type": "tick",
+  "code": "TXFC6",
+  "data": {
+    "close": 20050.0,
+    "volume": 10,
+    "total_volume": 5000,
+    "bid_side_total_vol": 2500,
+    "ask_side_total_vol": 2500,
+    "underlying_price": 20000.0,
+    "open": 20000.0,
+    "high": 20100.0,
+    "low": 19950.0,
+    "timestamp": "2026-03-02 09:30:00.123456"
+  }
+}

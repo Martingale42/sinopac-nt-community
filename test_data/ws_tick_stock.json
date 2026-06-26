@@ -1,0 +1,19 @@
+{
+  "type": "tick",
+  "code": "2330",
+  "data": {
+    "close": 580.0,
+    "volume": 150,
+    "total_volume": 25000,
+    "tick_type": 1,
+    "bid_side_total_vol": 12000,
+    "ask_side_total_vol": 13000,
+    "avg_price": 579.5,
+    "open": 578.0,
+    "high": 585.0,
+    "low": 575.0,
+    "amount": 87000.0,
+    "pct_chg": 0.35,
+    "timestamp": "2026-03-02 09:30:00.123456"
+  }
+}
