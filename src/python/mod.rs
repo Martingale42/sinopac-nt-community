@@ -22,9 +22,9 @@ use pyo3::prelude::*;
 
 use crate::common::enums::*;
 
-/// Loaded as `nautilus_pyo3.sinopac`.
+/// Loaded as `sinopac_nt._sinopac`.
 #[pymodule]
-pub fn sinopac(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+pub fn _sinopac(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Constants
     m.add("SINOPAC", crate::common::consts::SINOPAC)?;
 
