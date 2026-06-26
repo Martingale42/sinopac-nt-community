@@ -44,6 +44,19 @@ account during a controlled live session) -- see the design doc test matrix.
 The ``SINOPAC_EXEC_DRY_RUN`` environment variable (``true``/``false``) overrides
 ``dry_run`` for the scenario strategies; when true, orders are built and logged
 but not submitted.
+
+- ``stop_market``: submits a single emulated ``STOP_MARKET`` on TSMC (2330) with
+  ``emulation_trigger=TriggerType.LAST_PRICE``. The NautilusTrader
+  ``OrderEmulator`` holds the order until the last-trade price crosses the
+  trigger, then releases a plain ``MARKET`` order to the venue. In dry-run mode
+  the order is built and logged without being submitted.
+- ``bracket``: submits a bracket ``OrderList`` (entry ``LIMIT`` + stop-loss
+  ``STOP_MARKET`` + take-profit ``LIMIT``) on TSMC (2330), all three legs carrying
+  ``emulation_trigger=TriggerType.LAST_PRICE``. All legs are emulated by the
+  ``OrderEmulator``: the entry is held at submit; the OTO-child SL and TP activate
+  only after the entry fills. Sinopac has no native conditional orders, so no leg
+  rests natively at the venue. In dry-run mode the order list is built and logged
+  without being submitted.
 """
 
 import os
@@ -65,7 +78,9 @@ from nautilus_trader.config import TradingNodeConfig
 from nautilus_trader.live.node import TradingNode
 from nautilus_trader.model.data import QuoteTick
 from nautilus_trader.model.enums import OrderSide
+from nautilus_trader.model.enums import OrderType
 from nautilus_trader.model.enums import TimeInForce
+from nautilus_trader.model.enums import TriggerType
 from nautilus_trader.model.events import OrderEvent
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.identifiers import TraderId
@@ -112,11 +127,15 @@ SCENARIO_COMMON = "common"
 SCENARIO_INTRADAY_ODD = "intraday_odd"
 SCENARIO_MKP = "mkp"
 SCENARIO_FUTURES_OCTYPE = "futures_octype"
+SCENARIO_STOP_MARKET = "stop_market"
+SCENARIO_BRACKET = "bracket"
 SCENARIOS = (
     SCENARIO_COMMON,
     SCENARIO_INTRADAY_ODD,
     SCENARIO_MKP,
     SCENARIO_FUTURES_OCTYPE,
+    SCENARIO_STOP_MARKET,
+    SCENARIO_BRACKET,
 )
 
 
@@ -306,6 +325,30 @@ class OrderSemanticsScenarioStrategy(Strategy):
             return
         self._submitted = True  # Guard before building so a failure does not loop
 
+        if self.config.scenario == SCENARIO_BRACKET:
+            # Bracket is an OrderList, not a single order, so handle it here
+            # before the single-order path.  All three legs (entry LIMIT, SL
+            # STOP_MARKET, TP LIMIT) carry emulation_trigger=LAST_PRICE, so all
+            # are held by the OrderEmulator; SL/TP activate only after the entry
+            # fills. Sinopac has no native conditional orders; no leg rests at the
+            # venue natively.
+            entry = self.instrument.make_price(float(quote.ask_price))
+            bracket = self.order_factory.bracket(
+                instrument_id=self.instrument_id,
+                order_side=OrderSide.BUY,
+                quantity=self.instrument.make_qty(2000),
+                entry_price=entry,
+                sl_trigger_price=self.instrument.make_price(float(entry) - 5.0),
+                tp_price=self.instrument.make_price(float(entry) + 5.0),
+                entry_order_type=OrderType.LIMIT,
+                emulation_trigger=TriggerType.LAST_PRICE,
+                time_in_force=TimeInForce.DAY,
+            )
+            self.log.info(f"Built bracket: {bracket}", LogColor.CYAN)
+            if not self.config.dry_run:
+                self.submit_order_list(bracket)
+            return
+
         order = self._build_order(quote)
         if order is None:
             return
@@ -378,6 +421,21 @@ class OrderSemanticsScenarioStrategy(Strategy):
                 tags=[SinopacOrderTags(octype="Cover").value],
             )
 
+        if self.config.scenario == SCENARIO_STOP_MARKET:
+            # Emulated stop market: the OrderEmulator holds this order until the
+            # last-trade price crosses the trigger, then releases a plain MARKET
+            # order.  Set the trigger a tick above the ask so it can fire quickly
+            # in sim (buy stop fires when price rises through the trigger).
+            trigger = instrument.make_price(float(quote.ask_price) + 1.0)
+            return self.order_factory.stop_market(
+                instrument_id=instrument_id,
+                order_side=OrderSide.BUY,
+                quantity=instrument.make_qty(2000),
+                trigger_price=trigger,
+                trigger_type=TriggerType.LAST_PRICE,
+                emulation_trigger=TriggerType.LAST_PRICE,
+            )
+
         self.log.error(f"Unhandled scenario '{self.config.scenario}'")
         return None
 
@@ -414,7 +472,8 @@ def _build_scenario_config(scenario: str, dry_run: bool) -> OrderSemanticsScenar
     Parameters
     ----------
     scenario : str
-        One of ``intraday_odd``, ``mkp``, ``futures_octype``.
+        One of ``intraday_odd``, ``mkp``, ``futures_octype``, ``stop_market``,
+        ``bracket``.
     dry_run : bool
         Whether orders are built and logged but not submitted.
 
@@ -500,9 +559,9 @@ def build_node(scenario: str) -> TradingNode:
             tob_offset_ticks=OFFSET_TICKS,
             subscribe_quotes=True,
             subscribe_trades=True,
-            enable_stop_buys=False,  # Sinopac doesn't support stop orders natively
+            enable_stop_buys=False,  # use the stop_market scenario for emulated stops
             enable_stop_sells=False,
-            enable_brackets=False,  # Sinopac doesn't support bracket orders
+            enable_brackets=False,  # use the bracket scenario for emulated bracket orders
             use_post_only=False,  # Not applicable to Taiwan exchange
             close_positions_time_in_force=TimeInForce.DAY,  # Taiwan uses ROD (rest of day)
             dry_run=dry_run,  # DRY_RUN_DEFAULT (False) unless SINOPAC_EXEC_DRY_RUN set

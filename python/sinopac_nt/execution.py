@@ -70,6 +70,7 @@ from nautilus_trader.model.enums import OrderStatus
 from nautilus_trader.model.enums import OrderType
 from nautilus_trader.model.enums import PositionSide
 from nautilus_trader.model.enums import TimeInForce
+from nautilus_trader.model.enums import order_type_to_str
 from nautilus_trader.model.identifiers import AccountId
 from nautilus_trader.model.identifiers import ClientId
 from nautilus_trader.model.identifiers import ClientOrderId
@@ -180,6 +181,21 @@ _NT_TO_SINOPAC_ORDER_TYPE = {
 
 # Order types that send no price (price=0.0) and route as marketable orders.
 _MARKETABLE_ORDER_TYPES = frozenset({OrderType.MARKET, OrderType.MARKET_TO_LIMIT})
+
+# The 6 OrderType members the venue cannot place directly. All are conditional
+# (stop/trigger) types; on Sinopac they must be emulated via NautilusTrader's
+# OrderEmulator (submit with `emulation_trigger`), which releases a plain
+# MARKET/LIMIT order on trigger. See docs/sinopac.md.
+_CONDITIONAL_ORDER_TYPES = frozenset(
+    {
+        OrderType.STOP_MARKET,
+        OrderType.STOP_LIMIT,
+        OrderType.MARKET_IF_TOUCHED,
+        OrderType.LIMIT_IF_TOUCHED,
+        OrderType.TRAILING_STOP_MARKET,
+        OrderType.TRAILING_STOP_LIMIT,
+    },
+)
 
 
 def _resolve_order_type(
@@ -942,7 +958,27 @@ class SinopacExecutionClient(LiveExecutionClient):
         instrument_id = order.instrument_id
 
         if order.order_type not in _NT_TO_SINOPAC_PRICE_TYPE:
-            self._log.error(f"Unsupported order type: {order.order_type}")
+            if order.order_type in _CONDITIONAL_ORDER_TYPES:
+                reason = (
+                    f"Sinopac has no native conditional orders "
+                    f"({order_type_to_str(order.order_type)}); "
+                    "resubmit with emulation_trigger=LAST_PRICE or BID_ASK to use "
+                    "NautilusTrader order emulation"
+                )
+            else:
+                # Defensive: no current OrderType reaches here, but a future enum
+                # addition would otherwise be silently dropped.
+                reason = (
+                    f"Unsupported order type {order_type_to_str(order.order_type)} "
+                    "for Sinopac"
+                )
+            self.generate_order_rejected(
+                strategy_id=order.strategy_id,
+                instrument_id=instrument_id,
+                client_order_id=order.client_order_id,
+                reason=reason,
+                ts_event=self._clock.timestamp_ns(),
+            )
             return
 
         self.generate_order_submitted(

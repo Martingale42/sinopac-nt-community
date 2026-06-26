@@ -13,6 +13,7 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 
+from decimal import Decimal
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 
@@ -26,6 +27,7 @@ from sinopac_nt.tags import TAG_PREFIX
 from sinopac_nt.tags import SinopacOrderTags
 from nautilus_trader.common.component import LiveClock
 from nautilus_trader.common.component import MessageBus
+from nautilus_trader.common.factories import OrderFactory
 from sinopac_nt import _sinopac as pyo3_sinopac
 from sinopac_nt._sinopac import SinopacOCType
 from sinopac_nt._sinopac import SinopacOrderCond
@@ -39,6 +41,8 @@ from nautilus_trader.model.enums import OrderSide
 from nautilus_trader.model.enums import OrderStatus
 from nautilus_trader.model.enums import OrderType
 from nautilus_trader.model.enums import TimeInForce
+from nautilus_trader.model.enums import TrailingOffsetType
+from nautilus_trader.model.enums import order_type_to_str
 from nautilus_trader.model.identifiers import ClientOrderId
 from nautilus_trader.model.identifiers import StrategyId
 from nautilus_trader.model.identifiers import TradeId
@@ -1976,3 +1980,115 @@ async def test_daytrade_short_with_short_selling_is_rejected_locally(
 
     exec_client.generate_order_rejected.assert_called_once()
     exec_client._http_client.place_order.assert_not_called()
+
+
+# -- Conditional order rejection tests ---------------------------------------------------------------
+
+
+def _order_factory():
+    return OrderFactory(
+        trader_id=TestIdStubs.trader_id(),
+        strategy_id=StrategyId("S-001"),
+        clock=LiveClock(),
+    )
+
+
+def _naked_conditional(factory, instrument, order_type):
+    qty = instrument.make_qty(2000)
+    trig = instrument.make_price(590.0)
+    lim = instrument.make_price(589.0)
+    if order_type == OrderType.STOP_MARKET:
+        return factory.stop_market(instrument.id, OrderSide.BUY, qty, trig)
+    if order_type == OrderType.STOP_LIMIT:
+        return factory.stop_limit(instrument.id, OrderSide.BUY, qty, lim, trig)
+    if order_type == OrderType.MARKET_IF_TOUCHED:
+        return factory.market_if_touched(instrument.id, OrderSide.BUY, qty, trig)
+    if order_type == OrderType.LIMIT_IF_TOUCHED:
+        return factory.limit_if_touched(instrument.id, OrderSide.BUY, qty, lim, trig)
+    if order_type == OrderType.TRAILING_STOP_MARKET:
+        return factory.trailing_stop_market(
+            instrument.id,
+            OrderSide.BUY,
+            qty,
+            trailing_offset=Decimal("1.0"),
+            trailing_offset_type=TrailingOffsetType.PRICE,
+        )
+    if order_type == OrderType.TRAILING_STOP_LIMIT:
+        return factory.trailing_stop_limit(
+            instrument.id,
+            OrderSide.BUY,
+            qty,
+            limit_offset=Decimal("1.0"),
+            trailing_offset=Decimal("1.0"),
+            trailing_offset_type=TrailingOffsetType.PRICE,
+        )
+    raise AssertionError(order_type)
+
+
+@pytest.mark.parametrize(
+    "order_type",
+    [
+        OrderType.STOP_MARKET,
+        OrderType.STOP_LIMIT,
+        OrderType.MARKET_IF_TOUCHED,
+        OrderType.LIMIT_IF_TOUCHED,
+        OrderType.TRAILING_STOP_MARKET,
+        OrderType.TRAILING_STOP_LIMIT,
+    ],
+    ids=order_type_to_str,
+)
+def test_naked_conditional_order_is_rejected_with_emulation_hint(
+    event_loop, exec_client, sinopac_equity, order_type
+):
+    factory = _order_factory()
+    order = _naked_conditional(factory, sinopac_equity, order_type)
+    exec_client._cache.add_order(order)
+    command = SubmitOrder(
+        trader_id=order.trader_id,
+        strategy_id=order.strategy_id,
+        order=order,
+        command_id=UUID4(),
+        ts_init=0,
+    )
+    exec_client.generate_order_rejected = MagicMock()
+
+    event_loop.run_until_complete(exec_client._submit_order(command))
+
+    exec_client.generate_order_rejected.assert_called_once()
+    reason = exec_client.generate_order_rejected.call_args.kwargs["reason"]
+    assert "emulation_trigger" in reason
+    assert order_type_to_str(order_type) in reason
+    exec_client._http_client.place_order.assert_not_called()
+
+
+# -- Tag preservation on emulation-released orders --------------------------------------------------
+
+
+def test_market_order_preserves_margin_tag_through_submit(
+    event_loop, exec_client, sinopac_equity
+):
+    exec_client._http_client.place_order = AsyncMock(
+        return_value={"trade_id": "T-MARGIN-MKT", "code": "2330", "status": "PendingSubmit"},
+    )
+    factory = _order_factory()
+    order = factory.market(
+        sinopac_equity.id,
+        OrderSide.SELL,
+        sinopac_equity.make_qty(2000),
+        time_in_force=TimeInForce.IOC,
+        tags=[SinopacOrderTags(order_cond="MarginTrading").value],
+    )
+    exec_client._cache.add_order(order)
+    command = SubmitOrder(
+        trader_id=order.trader_id,
+        strategy_id=order.strategy_id,
+        order=order,
+        command_id=UUID4(),
+        ts_init=0,
+    )
+
+    event_loop.run_until_complete(exec_client._submit_order(command))
+
+    exec_client._http_client.place_order.assert_awaited_once()
+    kwargs = exec_client._http_client.place_order.call_args.kwargs
+    assert kwargs["order_cond"] == SinopacOrderCond.MARGIN_TRADING

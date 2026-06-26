@@ -197,23 +197,40 @@ active subscriptions, using per-instrument emit flags for efficiency.
 
 ### Order types
 
-| Order Type | Stocks | Futures | Options | Notes |
-|------------|--------|---------|---------|-------|
-| `MARKET`   | ✓      | ✓       | ✓       |       |
-| `LIMIT`    | ✓      | ✓       | ✓       |       |
+| Order Type        | Stocks | Futures | Options | Notes                                            |
+|-------------------|--------|---------|---------|--------------------------------------------------|
+| `MARKET`          | ✓      | ✓       | ✓       | Coerced to IOC if TIF is DAY/GTC.                |
+| `LIMIT`           | ✓      | ✓       | ✓       | Price snapped to the tick grid.                  |
+| `MARKET_TO_LIMIT` | ✗      | ✓       | ✓       | Range-market (MKP); stock MKP is rejected locally before reaching the venue; futures and options MKP are supported. |
 
 The execution client snaps limit prices onto the instrument's tick grid using
 round-half-even (banker's rounding) before sending. This handles grids such as
 `0.05` that an instrument's price precision alone cannot express; an off-grid price
 is adjusted to the nearest tick and the adjustment is logged.
 
+#### Stop / conditional orders (emulated only)
+
+Sinopac/Shioaji has no native stop or trigger order type. `STOP_MARKET`,
+`STOP_LIMIT`, `MARKET_IF_TOUCHED`, `LIMIT_IF_TOUCHED`, and the trailing-stop
+variants are supported **only** through NautilusTrader's order emulation: submit
+with `emulation_trigger=TriggerType.LAST_PRICE` (recommended for TWSE/TAIFEX) or
+`TriggerType.BID_ASK`. The emulator holds the order in-process, watches the
+data the Sinopac data client streams, and releases a plain `MARKET`/`LIMIT`
+order to the venue on trigger. A conditional order submitted **without**
+`emulation_trigger` is rejected locally with a message pointing at
+`emulation_trigger`.
+
+:::note
+The trigger lives in the NautilusTrader process. If the process stops, an emulated
+stop does not fire during the outage. Back the cache with Redis so emulated orders
+survive a restart.
+:::
+
 ### Lots and odd-lot trading
 
-NautilusTrader orders are placed as **common lots only**. The execution client's
-`_submit_order` does not send an `order_lot` field, so every order defaults to the
-gateway's `Common` lot. Consequently the order quantity (in shares) must be a
-multiple of 1000; a non-1000-multiple quantity is rejected (see
-[Order rejection](#order-rejection)).
+The execution client always sends an `order_lot` field (defaulting to `Common`).
+For common-lot orders the quantity must be a multiple of 1000 shares; a
+non-1000-multiple quantity is rejected (see [Order rejection](#order-rejection)).
 
 #### Odd-lot trading
 
@@ -224,11 +241,13 @@ The gateway itself supports `order_lot` ∈ `Common` / `Odd` / `IntradayOdd` /
 - `Odd` — after-hours odd-lot (盤後零股), 13:40–14:30.
 - `Fixing` — fixing session.
 
-:::warning
-Odd-lot trading is currently a **gateway HTTP capability only**. The NautilusTrader
-execution client does not yet send `order_lot`, so it cannot place odd-lot, intraday
-odd-lot, or fixing orders — every NT order is a common lot. NT-side odd-lot support
-is a planned future enhancement and is **not implemented**.
+:::note
+`IntradayOdd` (盤中零股, 09:00–13:30) is supported: attach
+`SinopacOrderTags(order_lot="IntradayOdd")` to the order's `tags`. Quantities are
+in shares (1–999), the order must be `LIMIT` + `DAY`, and the account condition
+must be `Cash` — an intraday odd lot tagged `MarginTrading` or `ShortSelling` is
+rejected locally. Post-market `Odd`
+(盤後零股) and `Fixing` (定盤) lots remain out of scope (backlog item B3).
 :::
 
 ### Time in force
@@ -238,6 +257,40 @@ is a planned future enhancement and is **not implemented**.
 | `DAY`         | ✓      | ✓       | ✓       | Rest of day (ROD).  |
 | `IOC`         | ✓      | ✓       | ✓       | Immediate or cancel.|
 | `FOK`         | ✓      | ✓       | ✓       | Fill or kill.       |
+
+### Taiwan order tags
+
+Venue parameters with no native Nautilus field ride on `order.tags` via
+`SinopacOrderTags`. See the canonical capability matrix in the adapter package
+docstring (`sinopac_nt/__init__.py`).
+
+| Tag field        | Values                                   | Applies to      |
+|------------------|------------------------------------------|-----------------|
+| `order_lot`      | `Common`, `IntradayOdd`                  | Stocks          |
+| `order_cond`     | `Cash`, `MarginTrading`, `ShortSelling`  | Stocks          |
+| `daytrade_short` | `True` / `False` (requires `Cash`)       | Stocks          |
+| `octype`         | `Auto`, `New`, `Cover`, `DayTrade`       | Futures/Options |
+
+Attach a tag by appending `SinopacOrderTags(...).value` to the order's `tags`:
+
+```python
+from sinopac_nt import SinopacOrderTags
+
+order = self.order_factory.limit(
+    instrument_id=instrument_id,
+    order_side=OrderSide.BUY,
+    quantity=Quantity.from_int(37),
+    price=price,
+    time_in_force=TimeInForce.DAY,
+    tags=[SinopacOrderTags(order_lot="IntradayOdd").value],
+)
+```
+
+:::note
+`SinopacOrderTags` is a live-venue concern: the backtest matching engine ignores
+them. See `sinopac_nt/__init__.py` for the full capability
+matrix and usage examples.
+:::
 
 ### Order operations
 
