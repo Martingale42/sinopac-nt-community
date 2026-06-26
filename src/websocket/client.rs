@@ -58,7 +58,7 @@ pub(crate) const BIDASK_EMIT_DELTAS: u8 = 0b100;
 /// PyO3 `#[pymethods]` (which receive `&self`) can connect/disconnect.
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_pyo3.sinopac", skip_from_py_object)
+    pyo3::pyclass(module = "sinopac_nt._sinopac", skip_from_py_object)
 )]
 pub struct SinopacWebSocketClient {
     url: String,

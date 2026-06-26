@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
         eq,
         eq_int,
         frozen,
-        module = "nautilus_trader.core.nautilus_pyo3.sinopac",
+        module = "sinopac_nt._sinopac",
         rename_all = "SCREAMING_SNAKE_CASE",
         from_py_object,
     )
@@ -44,7 +44,7 @@ pub enum SinopacAction {
         eq,
         eq_int,
         frozen,
-        module = "nautilus_trader.core.nautilus_pyo3.sinopac",
+        module = "sinopac_nt._sinopac",
         rename_all = "SCREAMING_SNAKE_CASE",
         from_py_object,
     )
@@ -66,7 +66,7 @@ pub enum SinopacPriceType {
         eq,
         eq_int,
         frozen,
-        module = "nautilus_trader.core.nautilus_pyo3.sinopac",
+        module = "sinopac_nt._sinopac",
         rename_all = "SCREAMING_SNAKE_CASE",
         from_py_object,
     )
@@ -88,7 +88,7 @@ pub enum SinopacOrderType {
         eq,
         eq_int,
         frozen,
-        module = "nautilus_trader.core.nautilus_pyo3.sinopac",
+        module = "sinopac_nt._sinopac",
         rename_all = "SCREAMING_SNAKE_CASE",
         from_py_object,
     )
@@ -110,7 +110,7 @@ pub enum SinopacOrderCond {
         eq,
         eq_int,
         frozen,
-        module = "nautilus_trader.core.nautilus_pyo3.sinopac",
+        module = "sinopac_nt._sinopac",
         rename_all = "SCREAMING_SNAKE_CASE",
         from_py_object,
     )
@@ -134,7 +134,7 @@ pub enum SinopacOrderLot {
         eq,
         eq_int,
         frozen,
-        module = "nautilus_trader.core.nautilus_pyo3.sinopac",
+        module = "sinopac_nt._sinopac",
         rename_all = "SCREAMING_SNAKE_CASE",
         from_py_object,
     )
@@ -166,7 +166,7 @@ impl Default for SinopacOCType {
         eq,
         eq_int,
         frozen,
-        module = "nautilus_trader.core.nautilus_pyo3.sinopac",
+        module = "sinopac_nt._sinopac",
         rename_all = "SCREAMING_SNAKE_CASE",
         from_py_object,
     )
@@ -187,7 +187,7 @@ pub enum SinopacQuoteType {
         eq,
         eq_int,
         frozen,
-        module = "nautilus_trader.core.nautilus_pyo3.sinopac",
+        module = "sinopac_nt._sinopac",
         rename_all = "SCREAMING_SNAKE_CASE",
         from_py_object,
     )
@@ -210,7 +210,7 @@ pub enum SinopacMarket {
         eq,
         eq_int,
         frozen,
-        module = "nautilus_trader.core.nautilus_pyo3.sinopac",
+        module = "sinopac_nt._sinopac",
         rename_all = "SCREAMING_SNAKE_CASE",
         from_py_object,
     )

@@ -31,7 +31,7 @@ use crate::common::{consts::SINOPAC_GATEWAY_HTTP_URL, urls::gateway_http_url};
 #[derive(Clone, Debug)]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_pyo3.sinopac", skip_from_py_object)
+    pyo3::pyclass(module = "sinopac_nt._sinopac", skip_from_py_object)
 )]
 pub struct SinopacHttpClient {
     base_url: String,
