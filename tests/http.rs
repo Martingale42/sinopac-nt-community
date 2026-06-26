@@ -19,7 +19,7 @@ use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
 use axum::{Router, routing::get};
 use nautilus_common::testing::wait_until_async;
-use nautilus_sinopac::{
+use sinopac_nt::{
     common::enums::{
         SinopacAction, SinopacMarket, SinopacOCType, SinopacOrderCond, SinopacOrderLot,
         SinopacOrderType, SinopacPriceType,

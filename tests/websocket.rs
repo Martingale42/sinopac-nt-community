@@ -36,7 +36,7 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use nautilus_common::testing::wait_until_async;
-use nautilus_sinopac::{
+use sinopac_nt::{
     common::enums::SinopacQuoteType,
     websocket::{client::SinopacWebSocketClient, messages::WsIncomingMsg},
 };
