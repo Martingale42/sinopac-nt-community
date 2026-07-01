@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.2]
+- Docs: README now leads with the PyPI (`pip install sinopac-nt-community`) and
+  crates.io (`cargo add sinopac-nt-community`) install paths, drops the stale
+  "no wheel published yet" note, and adds a "Using from Rust" section. No code changes.
+
 ## [0.1.1]
 - First release published to PyPI (`pip install sinopac-nt-community`) and crates.io
   (`cargo add sinopac-nt-community`). No functional changes from 0.1.0.

@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "sinopac-nt-community"
-version = "0.1.1"
+version = "0.1.2"
 description = "Independent community Sinopac (Taiwan markets) adapter for NautilusTrader"
 readme = "README.md"
 requires-python = ">=3.12,<3.15"
