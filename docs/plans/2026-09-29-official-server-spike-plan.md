@@ -318,7 +318,7 @@ git commit -m "Abort unless the official server reports simulation mode"
 **Behaviour:**
 
 - `load_scenarios` 讀 `scenarios.toml`；案例 id 重複、`steps` 含未知動詞、`expect_fill` 案例用了 `exceed_funds` 時拋 `ConfigError`。
-- 價格參照 `limit_down`、`limit_up`、`reference` 取自合約回應；`limit_down_plus_tick` 為跌停價加一個升降單位；升降單位依市場、價格區間與 `etf_codes` 查表。
+- 價格參照 `limit_down`、`limit_up`、`reference` 取自合約回應；`limit_down_plus_tick` 為跌停價加一個升降單位；`far_below` 在股票與零股為跌停價，在期貨為「參考價 × 0.95 向下取到升降單位」；`far_below_plus_tick` 為 `far_below` 加一個升降單位；升降單位依市場、價格區間與 `etf_codes` 查表。
 - `preflight`：連鎖檢查；查 `accounts`、`balance`、`margin`、`usage`、`ca_status`；查 `p1.toml` 所列全部商品的合約；計算資金需求並比對可用額度。
 - 資金需求以單一部位計（設計 §4）：股票為 `max(會成交股票案例的 張數 × 1000 × 漲停價)`，期貨為 `max(會成交期貨案例的 口數 × 該商品原始保證金)`。
 - 不足、或找不到可用額度欄位時記 ERROR、以 2 結束；不論成敗都寫 `preflight.json`，鍵為 `funds_ok`、`required`、`available`、`connections`、`accounts`（帳戶類型 → `signed`）、`limits`（商品 → 漲停、跌停、參考價）。
@@ -329,7 +329,7 @@ git commit -m "Abort unless the official server reports simulation mode"
 
 ```python
 class Market(StrEnum): STOCK = "stock"; ODD = "odd"; FUTURES = "futures"
-class PriceRef(StrEnum): LIMIT_DOWN = "limit_down"; LIMIT_UP = "limit_up"; REFERENCE = "reference"; LIMIT_DOWN_PLUS_TICK = "limit_down_plus_tick"
+class PriceRef(StrEnum): LIMIT_DOWN = "limit_down"; LIMIT_UP = "limit_up"; REFERENCE = "reference"; LIMIT_DOWN_PLUS_TICK = "limit_down_plus_tick"; FAR_BELOW = "far_below"; FAR_BELOW_PLUS_TICK = "far_below_plus_tick"
 
 @dataclass(frozen=True)
 class Case:
@@ -386,6 +386,7 @@ def run_preflight(cfg: P1Config, scenarios: Path, run_dir: Path) -> int: ...
 - `test_etf_tick_bands` — 49.99→0.01、50→0.05。
 - `test_futures_tick_is_one_point` — TMF 任意價格回 1。
 - `test_limit_down_plus_tick` — 跌停 9.95 的一般股回 9.96。
+- `test_far_below_futures` — TMF 參考價 47781 時回 45391（47781 × 0.95 = 45391.95 向下取到 1 點）；一般股回跌停價。
 - `test_required_funds_single_position` — 兩筆會成交的股票案例取較大者，不加總。
 - `test_insufficient_exits_2_and_writes_json` — 回 2，`preflight.json` 存在且 `funds_ok` 為 `false`。
 - `test_missing_available_field_exits_2` — 找不到可用額度欄位時回 2。
@@ -396,6 +397,7 @@ def run_preflight(cfg: P1Config, scenarios: Path, run_dir: Path) -> int: ...
 - 1000 股／張：證交所整股交易單位。
 - 股票升降單位（<10：0.01；10–<50：0.05；50–<100：0.1；100–<500：0.5；500–<1000：1；≥1000：5）與 ETF（<50：0.01；≥50：0.05）：證交所升降單位規定。
 - 期貨升降單位 1 點：期交所 TXF／MXF／TMF 契約規格。
+- 期貨遠價 0.95：期貨 API 測試（契約文件 §2）中以跌停價下單被拒、以參考價 × 0.95 下單被接受。
 - `futures_margin_twd`：`calibrate:` Task 12 執行 preflight 前，依期交所當日公告的原始保證金填入。
 
 **Verification:**
@@ -494,6 +496,7 @@ git commit -m "Stream quotes to several recorded SSE clients"
 
 - `p1rec orders [--only <id,...>] [--base-url <url>]` 依 `scenarios.toml` 順序執行；`--base-url` 覆蓋 `base_url`。
 - 每個 `place`、`update_price`、`update_qty`、`cancel`、`close` 呼叫前執行連鎖檢查；中止時以 3 結束，不再送任何請求。
+- `account` 欄位帶 `accounts` 回傳的完整帳戶物件：股票與零股用 `S`、期貨用 `F`（只帶帳號時 `account_type` 預設為 `S`，契約文件 §2）。
 - 請求本體由 `body_templates` 代入 `{code}`、`{action}`、`{price}`、`{quantity}`、`{price_type}`、`{order_type}`、`{custom_field}`、`{trade_id}`；股票與零股用 `place_stock`，期貨用 `place_futures`。
 - 價格由 `resolve_price` 算出；`quantity = "exceed_funds"` 時張數為「可用股票餘額 ÷（1000 × 跌停價）」無條件進位再加 1，價格固定為跌停價，被接受也不會成交。
 - 步驟之間等待 `step_wait_s`。
@@ -521,8 +524,8 @@ def run_orders(cfg: P1Config, cases: Sequence[Case], run_dir: Path,
 
 | 群組 | 商品 | 案例 |
 |---|---|---|
-| 遠價 LMT | 2890、00981A（零股）、TMF | LMT × ROD／IOC／FOK，`limit_down`，不成交 |
-| 生命週期 | 2890、TMF | 2 單位、`limit_down`；`update_price:limit_down_plus_tick` → `update_qty:1` → `cancel` |
+| 遠價 LMT | 2890、00981A（零股）、TMF | LMT × ROD／IOC／FOK，`far_below`，不成交 |
+| 生命週期 | 2890、TMF | 2 單位、`far_below`；`update_price:far_below_plus_tick` → `update_qty:1` → `cancel` |
 | 市價類 | 2890（整股 1 張）、00981A（零股 1 股）、TMF（1 口） | MKT、MKP × ROD／IOC／FOK，`expect_fill = true`，逐筆開倉即平倉 |
 | 資金不足 | 2890 | `exceed_funds`、LMT ROD，之後 `cancel` |
 | 委託標記 | 2890 | 遠價 LMT ROD；`custom_field` 分別為 6 字元 base62、7 字元 base62、ADR-0004 候選格式（1 字元 node + 5 字元雜湊）；之後 `cancel` |
