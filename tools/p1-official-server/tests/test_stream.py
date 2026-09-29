@@ -29,7 +29,14 @@ from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
-from helpers import MINIMAL_CONFIG_LINES, SECRET_ENV_VARS, UNUSED_EVENT_FIELDS, UNUSED_ORDERS_CONFIG, WriteConfig
+from helpers import (
+    MINIMAL_CONFIG_LINES,
+    SECRET_ENV_VARS,
+    UNUSED_EVENT_FIELDS,
+    UNUSED_ORDERS_CONFIG,
+    UNUSED_TRADE_FIELDS,
+    WriteConfig,
+)
 
 from p1rec import capture, cli, sse, stream
 from p1rec.capture import CapturingClient
@@ -182,6 +189,7 @@ def _cfg(
             actions=actions,
         ),
         orders=UNUSED_ORDERS_CONFIG,
+        trades=UNUSED_TRADE_FIELDS,
         events=UNUSED_EVENT_FIELDS,
         history=HistoryConfig(queries=(), usage_bytes_pointer="/bytes"),
         scrub=ScrubConfig(

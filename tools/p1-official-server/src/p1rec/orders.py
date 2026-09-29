@@ -50,9 +50,10 @@ from p1rec.broker import (
     parse_json_exact,
 )
 from p1rec.capture import CapturedResponse, CapturingClient, describe_exception
-from p1rec.config import PLACEHOLDER_RE, ConfigError, OrdersConfig, P1Config
+from p1rec.config import PLACEHOLDER_RE, ConfigError, OrdersConfig, P1Config, TradeFields
 from p1rec.interlock import EXIT_INTERLOCK_ABORT, InterlockError, assert_simulation
 from p1rec.jsonpointer import JsonPointerError, resolve_pointer
+from p1rec.order_status import STATUS_CANCELLED, STATUS_FAILED, STATUS_FILLED, normalize_status
 from p1rec.prices import SHARES_PER_BOARD_LOT, format_decimal, resolve_price
 from p1rec.records import EXIT_CHECK_FAILED
 from p1rec.scenarios import EXCEED_FUNDS, Action, Case, Market, PriceRef, parse_step
@@ -101,11 +102,6 @@ _ORDER_LOT: Mapping[Market, str] = {Market.STOCK: "Common", Market.ODD: "Intrada
 # FuturesOrder.octype the futures API test sent and the server accepted,
 # leaving open or cover to the broker, so a close offsets the open position.
 _FUTURES_OCTYPE = "Auto"
-
-# OrderStatusInfo.status values (openapi.json Status)
-_STATUS_FILLED = "Filled"
-_STATUS_FAILED = "Failed"
-_STATUS_CANCELLED = "Cancelled"
 
 # A close is a limit order at the far limit, so it matches any resting
 # counter order, and ROD, so it waits for one rather than expiring.
@@ -475,6 +471,7 @@ class _Runner:
         self._client = client
         self._cfg = cfg
         self._orders = cfg.orders
+        self._trades = cfg.trades
         self._clock = clock
 
         # Set once a position may remain, after which no fill case starts
@@ -588,7 +585,7 @@ class _Runner:
 
         trade_id = record.trade_id
         if trade_id is None:
-            reason = f"place accepted but its response has no trade id at {self._orders.trade_id_pointer!r}"
+            reason = f"place accepted but its response has no trade id at {self._trades.id!r}"
             if case.expect_fill:
                 return self._residual_position(record, reason)
             return self._order_may_rest(record, reason)
@@ -730,7 +727,7 @@ class _Runner:
             _log_residual(record, reason)
             raise _UnknownOutcome(reason)
 
-        accepted, parsed = self._judge(response)
+        accepted, parsed = _judge(response, self._trades)
         sent.accepted = accepted
         if accepted:
             logger.info("case %s: %s accepted (HTTP %d)", case.id, step, response.status)
@@ -738,24 +735,9 @@ class _Runner:
             logger.warning("case %s: %s rejected (HTTP %d), recorded", case.id, step, response.status)
         return accepted, parsed
 
-    def _judge(self, response: CapturedResponse) -> tuple[bool, object]:
-        """Return whether a 2xx or 4xx response accepted its request, and the parsed body.
-
-        A 2xx whose body cannot be parsed still counts as accepted, since
-        the server took the request, and its body is returned as None.
-        """
-        if response.status >= 400:
-            return False, None
-        try:
-            parsed = json.loads(response.body, parse_float=Decimal)
-        except Exception:
-            # Broad on purpose, since a deeply nested body raises RecursionError
-            return True, None
-        return _value_or_none(parsed, self._orders.filled_pointer) != _STATUS_FAILED, parsed
-
     def _trade_id(self, trade: object) -> str | None:
-        """Return the non-empty string trade id a Trade carries at trade_id_pointer, or None."""
-        value = _value_or_none(trade, self._orders.trade_id_pointer)
+        """Return the non-empty string trade id a Trade carries at trades.id, or None."""
+        value = _value_or_none(trade, self._trades.id)
         return value if isinstance(value, str) and value else None
 
     def _wait_for_end(self, trade_id: str, account: Mapping[str, object]) -> _OrderState:
@@ -791,12 +773,29 @@ class _Runner:
             logger.warning("trades poll for order %s: response is not an array", trade_id)
             return _OrderState.PENDING
         for item in trades:
-            if _value_or_none(item, self._orders.trade_id_pointer) == trade_id:
-                return _order_state(item, self._orders)
+            if _value_or_none(item, self._trades.id) == trade_id:
+                return _order_state(item, self._trades)
         return _OrderState.PENDING
 
 
-def _order_state(trade: object, orders: OrdersConfig) -> _OrderState:
+def _judge(response: CapturedResponse, fields: TradeFields) -> tuple[bool, object]:
+    """Return whether a 2xx or 4xx response to a mutation accepted it, and the parsed body.
+
+    A 2xx is accepted unless the Trade in its body has the status Failed.
+    A 2xx whose body cannot be parsed still counts as accepted, since the
+    server took the request, and its body is returned as None.
+    """
+    if response.status >= 400:
+        return False, None
+    try:
+        parsed = json.loads(response.body, parse_float=Decimal)
+    except Exception:
+        # Broad on purpose, since a deeply nested body raises RecursionError
+        return True, None
+    return _status(parsed, fields) != STATUS_FAILED, parsed
+
+
+def _order_state(trade: object, fields: TradeFields) -> _OrderState:
     """Classify one trades element by its status and filled quantity.
 
     A Failed order was refused, so it holds nothing unless it reports a
@@ -806,18 +805,24 @@ def _order_state(trade: object, orders: OrdersConfig) -> _OrderState:
     order that has not ended yet but reports a filled quantity is
     PARTLY_FILLED.
     """
-    status = _value_or_none(trade, orders.filled_pointer)
-    if status == _STATUS_FILLED:
+    status = _status(trade, fields)
+    if status == STATUS_FILLED:
         return _OrderState.FILLED
-    filled = _value_or_none(trade, orders.deal_quantity_pointer)
+    filled = _value_or_none(trade, fields.deal_quantity)
     known = isinstance(filled, int) and not isinstance(filled, bool)
-    if status not in (_STATUS_FAILED, _STATUS_CANCELLED):
+    if status not in (STATUS_FAILED, STATUS_CANCELLED):
         return _OrderState.PARTLY_FILLED if known and filled else _OrderState.PENDING
     if known and filled:
         return _OrderState.ENDED_PARTIAL
-    if known or (status == _STATUS_FAILED and filled is None):
+    if known or (status == STATUS_FAILED and filled is None):
         return _OrderState.ENDED_UNFILLED
     return _OrderState.ENDED_UNKNOWN
+
+
+def _status(trade: object, fields: TradeFields) -> str | None:
+    """Return the normalized status a Trade carries, or None if it has no string status."""
+    value = _value_or_none(trade, fields.status)
+    return normalize_status(value) if isinstance(value, str) else None
 
 
 def _what_to_do(record: _CaseRecord) -> str:

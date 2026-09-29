@@ -21,9 +21,17 @@ from pathlib import Path
 import httpx
 
 from p1rec.capture import CapturingClient
-from p1rec.config import EventFields, P1Config
+from p1rec.config import EventFields, P1Config, TradeFields
 from p1rec.interlock import assert_simulation
 from p1rec.jsonpointer import JsonPointerError, resolve_pointer
+from p1rec.order_status import (
+    STATUS_CANCELLED,
+    STATUS_FAILED,
+    STATUS_FILLED,
+    STATUS_PART_FILLED,
+    STATUS_SUBMITTED,
+    normalize_status,
+)
 from p1rec.records import (
     EXIT_ANALYSIS_ERROR,
     EXIT_CHECK_FAILED,
@@ -50,15 +58,8 @@ _OP_NEW = "New"
 _OP_CANCEL = "Cancel"
 _OPS_QUANTITY_ONLY = frozenset({"UpdatePrice", "UpdateQty"})
 
-# REST statuses may be spelled with the enum's qualified name
-_STATUS_PREFIX = "Status."
-
-# Derived statuses; all but UNKNOWN are values of the OpenAPI Status enum
-STATUS_FAILED = "Failed"
-STATUS_FILLED = "Filled"
-STATUS_CANCELLED = "Cancelled"
-STATUS_PART_FILLED = "PartFilled"
-STATUS_SUBMITTED = "Submitted"
+# The status derive_status gives an order whose events cannot place it,
+# which is no value of the OpenAPI Status enum and so never matches REST.
 STATUS_UNKNOWN = "Unknown"
 
 # The trades request names no account, since every AccountRequest field
@@ -180,11 +181,6 @@ def _optional_quantity(doc: object, pointer: str) -> Decimal | None:
     except JsonPointerError:
         return None
     return None if value is None else to_decimal(value)
-
-
-def normalize_status(status: str) -> str:
-    """Return status without the enum's "Status." qualifier, so both spellings compare equal."""
-    return status.removeprefix(_STATUS_PREFIX)
 
 
 def derive_status(
@@ -483,30 +479,30 @@ def _warn_if_night_session(what: str, ts_ns: int) -> None:
         )
 
 
-def _rest_items(payload: object, fields: EventFields) -> list[object]:
+def _rest_items(payload: object, fields: TradeFields) -> list[object]:
     try:
-        items = resolve_pointer(payload, fields.rest_list)
+        items = resolve_pointer(payload, fields.list)
     except JsonPointerError as exc:
-        raise AnalysisError(f"trades response has no list at {fields.rest_list!r}: {exc}") from exc
+        raise AnalysisError(f"trades response has no list at {fields.list!r}: {exc}") from exc
     if not isinstance(items, list):
-        raise AnalysisError(f"trades response at {fields.rest_list!r} is {type(items).__name__}, expected a list")
+        raise AnalysisError(f"trades response at {fields.list!r} is {type(items).__name__}, expected a list")
     return items
 
 
-def _rest_order_ns(item: object, fields: EventFields) -> int | None:
+def _rest_order_ns(item: object, fields: TradeFields) -> int | None:
     """Return a trades item's order time in epoch nanoseconds, or None if it has no usable one.
 
     A missing, null, non-numeric or non-positive order time is treated as
     absent, as an order report's exchange time is.
     """
     try:
-        order_ns = epoch_s_to_ns(resolve_pointer(item, fields.rest_order_ts))
+        order_ns = epoch_s_to_ns(resolve_pointer(item, fields.order_ts))
     except (JsonPointerError, ValueError):
         return None
     return order_ns if order_ns > 0 else None
 
 
-def orders_from_rest(payload: object, fields: EventFields, trading_day: date | None = None) -> RestOrders:
+def orders_from_rest(payload: object, fields: TradeFields, trading_day: date | None = None) -> RestOrders:
     """Return the orders in a trades response keyed by order key.
 
     A missing or null filled quantity counts as zero, since the schema
@@ -524,9 +520,9 @@ def orders_from_rest(payload: object, fields: EventFields, trading_day: date | N
     excluded = 0
     for index, item in enumerate(_rest_items(payload, fields)):
         try:
-            key = _pointer_str(item, fields.rest_key)
-            status = normalize_status(_pointer_str(item, fields.rest_status))
-            reported = _optional_quantity(item, fields.rest_filled_qty)
+            key = _pointer_str(item, fields.id)
+            status = normalize_status(_pointer_str(item, fields.status))
+            reported = _optional_quantity(item, fields.deal_quantity)
             filled = reported if reported is not None else Decimal(0)
         except (JsonPointerError, ValueError) as exc:
             raise AnalysisError(f"trades item {index}: {exc}") from exc
@@ -547,7 +543,7 @@ def orders_from_rest(payload: object, fields: EventFields, trading_day: date | N
     return RestOrders(orders=orders, excluded_other_days=excluded)
 
 
-def trading_day_of(payload: object, fields: EventFields) -> date:
+def trading_day_of(payload: object, fields: TradeFields) -> date:
     """Return the Asia/Taipei calendar date every order time in a trades response falls on.
 
     This is a calendar date, not a TAIFEX trading day. Items without a
@@ -679,8 +675,8 @@ def run_reconcile(
             payload = _query_trades(cfg, run_dir, transport)
         else:
             payload = last_trades_payload(resolve_run_dir(cfg.results_root, rest_run) / "rest.jsonl")
-        day = trading_day if trading_day is not None else trading_day_of(payload, cfg.events)
-        rest = orders_from_rest(payload, cfg.events, day)
+        day = trading_day if trading_day is not None else trading_day_of(payload, cfg.trades)
+        rest = orders_from_rest(payload, cfg.trades, day)
         sse_files = discover_sse_files(sse_dir)
         report = reconcile(orders_from_sse(sse_files, cfg.events, day), rest)
     except (AnalysisError, OSError) as exc:

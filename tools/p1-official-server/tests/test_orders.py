@@ -1200,7 +1200,7 @@ def test_repo_scenarios_follow_the_plan() -> None:
 def test_repo_p1_toml_orders_section() -> None:
     cfg = load_config(_TOOL_DIR / "p1.toml")
 
-    assert cfg.orders.trade_id_pointer == "/order/id"
+    assert cfg.trades.id == "/order/id"
     assert set(cfg.orders.body_templates) == {"place_stock", "place_futures", "update_price", "update_qty", "cancel"}
 
 
@@ -1242,12 +1242,9 @@ def test_template_placeholders_validated(write_config: WriteConfig, line: str, m
     [
         ("step_wait_s", "step_wait_s = 0", r"orders\.step_wait_s"),
         ("fill_timeout_s", "fill_timeout_s = 2", r"orders\.fill_timeout_s"),
-        ("filled_pointer", 'filled_pointer = "status"', r"orders\.filled_pointer"),
         ("futures = ", "", r"orders\.exchange"),
         ("futures = ", 'futures = "CME"', r"orders\.exchange\.futures must be one of"),
         ("step_wait_s", "step_wait_s = 3\nstep_wait = 3", r"unknown config key: orders\.step_wait\b"),
-        ("trade_id_pointer", 'trade_id_pointer = "/order/account/account_id"', r"orders\.trade_id_pointer.*account_id"),
-        ("deal_quantity_pointer", 'deal_quantity_pointer = "/x/person_id"', r"orders\.deal_quantity_pointer"),
     ],
 )
 def test_orders_settings_validated(write_config: WriteConfig, prefix: str, line: str, key: str) -> None:

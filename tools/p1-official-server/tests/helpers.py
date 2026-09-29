@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
-from p1rec.config import OrdersConfig
+from p1rec.config import OrdersConfig, TradeFields
 from p1rec.interlock import _UNUSED_EVENT_FIELDS
 
 # EventFields for a test config whose event pointers are never read, the
@@ -36,17 +36,16 @@ PLACE_FUTURES_TEMPLATE = (
     '"custom_field": "{custom_field}", "account": "{account}"}}'
 )
 
-# An OrdersConfig for hand-built P1Configs whose test never runs orders
+# An OrdersConfig and TradeFields for hand-built P1Configs whose test
+# never runs orders or reconcile.
 UNUSED_ORDERS_CONFIG = OrdersConfig(
     body_templates={},
     exchange={},
-    trade_id_pointer="",
-    filled_pointer="",
-    deal_quantity_pointer="",
     step_wait_s=0.0,
     fill_poll_s=0.0,
     fill_timeout_s=0.0,
 )
+UNUSED_TRADE_FIELDS = TradeFields(list="", id="", status="", deal_quantity="", order_ts="")
 
 # A minimal but complete p1.toml, shared by tests that need a valid config
 # to load and mutate, independent of the real p1.toml.
@@ -140,10 +139,15 @@ MINIMAL_CONFIG_LINES = [
     'method = "POST"',
     'path = "/api/v1/order/trades"',
     "",
+    # [trades], shaped like the official server's trades list
+    "[trades]",
+    'list = ""',
+    'id = "/order/id"',
+    'status = "/status/status"',
+    'deal_quantity = "/status/deal_quantity"',
+    'order_ts = "/status/order_ts"',
+    "",
     "[orders]",
-    'trade_id_pointer = "/order/id"',
-    'filled_pointer = "/status/status"',
-    'deal_quantity_pointer = "/status/deal_quantity"',
     "step_wait_s = 3",
     "fill_poll_s = 2",
     "fill_timeout_s = 60",
@@ -168,7 +172,7 @@ MINIMAL_CONFIG_LINES = [
     'selection = "fixtures.toml"',
     'contract_doc = "contract.md"',
     "extra_scan_paths = []",
-    # [events], shaped like the official server's order events and trades list
+    # [events], shaped like the official server's order events
     "",
     "[events]",
     'order_event_name = "order_event"',
@@ -183,11 +187,6 @@ MINIMAL_CONFIG_LINES = [
     'cancel_qty = "/status/cancel_quantity"',
     'deal_key = "/trade_id"',
     'deal_qty = "/quantity"',
-    'rest_list = ""',
-    'rest_key = "/order/id"',
-    'rest_status = "/status/status"',
-    'rest_filled_qty = "/status/deal_quantity"',
-    'rest_order_ts = "/status/order_ts"',
     'order_exchange_ts = "/status/exchange_ts"',
     'deal_exchange_ts = "/ts"',
     'exchange_ts_pointers = ["/date", "/time"]',

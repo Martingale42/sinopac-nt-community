@@ -33,6 +33,7 @@ from p1rec.config import (
     P1Config,
     ScrubConfig,
     StreamConfig,
+    TradeFields,
 )
 from p1rec.jsonpointer import JsonPointerError, resolve_pointer
 
@@ -148,11 +149,6 @@ _UNUSED_EVENT_FIELDS = EventFields(
     op_code_success="",
     order_exchange_ts="",
     deal_exchange_ts="",
-    rest_list="",
-    rest_key="",
-    rest_status="",
-    rest_filled_qty="",
-    rest_order_ts="",
     exchange_ts_pointers=(),
     exchange_ts_format=None,
     heartbeat_event="",
@@ -194,13 +190,11 @@ def _self_test_cfg(interlock: InterlockConfig) -> P1Config:
         orders=OrdersConfig(
             body_templates={},
             exchange={},
-            trade_id_pointer="",
-            filled_pointer="",
-            deal_quantity_pointer="",
             step_wait_s=0.0,
             fill_poll_s=0.0,
             fill_timeout_s=0.0,
         ),
+        trades=TradeFields(list="", id="", status="", deal_quantity="", order_ts=""),
         events=_UNUSED_EVENT_FIELDS,
         history=HistoryConfig(queries=(), usage_bytes_pointer="/bytes"),
         scrub=ScrubConfig(
