@@ -981,9 +981,9 @@ git commit -m "Rehearse the full recorder pipeline against a stub server"
 
 - 排程：選證交所行事曆上週四至下週二皆為營業日（週末除外）的第一週；10/8 那週不行（10/9 補假，依設計 §9.2 推論，排程時查證）。
 - 離線演練（Task 11）沒有涵蓋、只能在本日驗證的路徑，逐項觀察並記入契約文件：委託在下單回應之後才結算（等待成交、`PendingSubmit` 時刪單、`step_wait_s` 等時間的實際值）、部分成交與多筆成交、成交事件的 `deal_key` 與 `deal_qty`、IOC／FOK 到期的事件形狀、以事件回報的改單或刪單拒絕、不帶帳戶的 `trades` 是否列出所有帳戶的委託、斷線後訂閱是否需要重送、串流流量是否計入每日額度、夜盤與跨日。
-- 改動 `p1.toml` 的指標、範本或 `[events]` 時，同步改 `tests/data/p1.toml`，否則離線測試的設定比對會失敗。
+- 改動 `p1.toml` 的指標、範本、`[events]` 或 `[trades]` 時，同步改 `tests/data/p1.toml`，否則離線測試的設定比對會失敗。
 - 前一個交易日：依當日合約清單校準 `p1.toml` 的近月期貨代號（TXFJ6、MXFJ6、TMFJ6 於 2026-10-21 到期，soak 跨過該日就改用下一個月份）與近月價平 TXO 買權、賣權各一檔，同步更新 `[stream]` 商品、`[history]` 的 snapshots 查詢與 `scenarios.toml`。
-- 07:30 前：校時狀態（`timedatectl` 與 `chronyc tracking` 或等效指令）存入 `results/p1/<日期>-ntp.txt`；填入 `futures_margin_twd`；啟動官方 server 並依 Task 1 記下的方式把 log 導向 `results/p1/<日期>-server/server.log`（放在自己的 run 目錄內，Task 15 才能以 `fixtures.toml` 挑選）；`p1rec self-test-interlock` 回 0；`p1rec preflight` 回 0，回 2 即停止並交由使用者取得模擬資金。
+- 07:30 前：本日與 Task 13、14 的每個 shell 先執行 `umask 077`，`p1rec` 以外建立的目錄（server log 目錄、第二個實例的 `SJ_HOME_PATH` 與 env 檔）才不會在多人共用主機上讓其他使用者讀到；校時狀態（`timedatectl` 與 `chronyc tracking` 或等效指令）存入 `results/p1/<日期>-ntp.txt`；填入 `futures_margin_twd`；啟動官方 server 並依 Task 1 記下的方式把 log 導向 `results/p1/<日期>-server/server.log`（放在自己的 run 目錄內，Task 15 才能以 `fixtures.toml` 挑選）；`p1rec self-test-interlock` 回 0；`p1rec preflight` 回 0，回 2 即停止並交由使用者取得模擬資金。
 - 08:00 前：`p1rec stream --clients a,b --until <下週二 09:30 +08:00>` 於 tmux 啟動，即為 soak 起點（關閉期間最長 `SSE_READ_TIMEOUT_S + retry_s`，這段時間再按 Ctrl-C 不會生效，必要時以 SIGKILL 強制結束）；預先排入週五 10:30 取消 2330 tick 訂閱的動作（§6 D2：訂閱為全域，看兩個 client 是否同時停止收到 2330）。
 - 08:30 後（每日維護之後、下單之前）：再跑一次 `p1rec preflight`，以當日更新後的漲跌停價確認資金；回 2 即停止。
 - 09:00 後：`p1rec orders --only <第一個生命週期案例>`，量出延遲後填入 `step_wait_s`、`fill_poll_s`、`fill_timeout_s`，再以 `p1rec orders` 跑其餘案例；從第一批真實事件填入 `EventFields`。同時確認四件事：IOC／FOK 未成交時交易所自動刪單的事件形狀（是否以 Cancel 事件送出）、部分成交後刪單時 REST 的狀態字串、成交事件的 `deal_key` 與 `deal_qty`、改量後刪單時 `cancel_quantity` 是累計值還是單次值；與 `derive_status` 的規則不符時先修正，再進 Task 13。
@@ -1006,6 +1006,9 @@ Expected: `true`，連線數不超過 5。
 Run: `for f in results/p1/<stream run>/sse_*_*.jsonl; do printf '%s ' "$f"; jq -c 'select(.kind=="frame")' "$f" | wc -l; done`
 Expected: 每個 client 的行情串流檔皆大於 0，且 15:00 後重跑時數字仍在增加。
 
+Run: `cd tools/p1-official-server && uv run p1rec scrub --scan-only; echo $?`
+Expected: `0`，之後才 commit；回 2 時先移除 log 指出的內容。
+
 **Commit:**
 
 ```bash
@@ -1024,8 +1027,9 @@ git commit -m "Calibrate recorder settings from the first live session"
 
 - 10:30 的排程動作自動執行；之後確認 client a 的 2330 tick 仍持續進來。
 - 11:00：先查 soak 實例的 `usage`；`connections` 加 1（一個官方實例的量測值）超過 5 時，不開 harness 實例，F2 只以文件與模擬模式預設值作答並在契約文件註明。未超過時，以另一份 env（`SJ_HTTP_ADDR=127.0.0.1:18081`、`SJ_AGENT_HARNESS=all`、獨立的 `SJ_HOME_PATH`）啟動第二個官方 server 實例；執行 `p1rec orders --tag harness --only harness_probe --base-url http://127.0.0.1:18081`，錄下回應後停止該實例。soak 實例不受影響。
+- 11:30：經 soak 實例本身執行 `p1rec orders --tag pre-restart --only lifecycle_futures_tmf,<週四確認會成交的一個 market_futures_tmf_* 案例>`，讓重啟前的當日委託同時有未成交與成交兩種（設計 §9.1 第 8 步要求重啟時當日已有委託）；harness 實例的委託走另一個實例，不能代替。
 - 12:00（重啟排在當日主動測試的最後）：停止並重啟 soak 實例，`stream` 會記下斷線與重連；重啟後執行 `p1rec reconcile --sse-run <stream run_id>`。
-- 對帳回 2 時不重試，保留 `reconcile.json` 作為 go/no-go 證據。
+- 對帳回 2 時不重試，保留 `reconcile.json` 作為 go/no-go 證據；`rest_order_count` 為 0 表示重啟後的實例查不到 11:30 的委託，即 GO 準則 5 的反證。
 - 此後到下週二 09:30 不再觸碰 soak 實例。
 
 **Numbers:**
@@ -1033,11 +1037,18 @@ git commit -m "Calibrate recorder settings from the first live session"
 - `18081`：Task 1 確認未被佔用。
 - 一個官方實例佔 1 條連線：Task 1 與複查時 `usage.connections` 的量測值（兩次皆與舊 gateway 同時登入，合計 2）；上限 5 條：設計 §4。
 - 各時間點：週五交易時段內，重啟排在最後（設計 §9.1 第 8 步、§9.2）。
+- 11:30：落在 harness 實例（11:00）與重啟（12:00）之間，且在期交所日盤 08:45–13:45 內（`orders` 只在日盤下期貨單）。
 
 **Verification:**
 
+Run: `jq '.rest_order_count, .sse_order_count_by_client' results/p1/<當日 reconcile run>/reconcile.json`
+Expected: `rest_order_count` 不小於 11:30 那次 `orders` 下的委託數，每個 client 的數字大於 0；為 0 時依上方規則判讀，不重跑。
+
 Run: `jq '(.only_in_rest | length), (.only_in_sse | length), (.mismatched | length), ([.missing_events_by_client[] | length] | add)' results/p1/<當日 reconcile run>/reconcile.json`
 Expected: 產出四個數字並抄入契約文件；GO 準則 4、5 依此判定，不要求為 0。
+
+Run: `cd tools/p1-official-server && uv run p1rec scrub --scan-only; echo $?`
+Expected: `0`，之後才 commit。
 
 Run: `jq -c 'select(.op=="place_stock")' results/p1/*-orders-harness/rest.jsonl | wc -l`
 Expected: `1`。
@@ -1067,6 +1078,9 @@ git commit -m "Record multi-client, harness and restart runs"
 
 Run: `grep -c '處置：' docs/official-server-contract.md`
 Expected: 等於 §4 表中列出的類別數。
+
+Run: `cd tools/p1-official-server && uv run p1rec scrub --scan-only; echo $?`
+Expected: `0`，之後才 commit；server log 含明文帳號與對外 IP，§4 引用的 log 行須先去識別化。
 
 **Commit:**
 
