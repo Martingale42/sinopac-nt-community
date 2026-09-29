@@ -100,27 +100,40 @@ class _RedactingStreamHandler(_SafeHandlerMixin, logging.StreamHandler):
 
 def _log_uncaught_exception(
     exc_type: type[BaseException],
-    exc_value: BaseException,
+    exc_value: BaseException | None,
     exc_traceback: TracebackType | None,
     *,
     thread_name: str | None = None,
 ) -> None:
+    """Log an otherwise-uncaught exception through the redacting handlers.
+
+    exc_type.__name__ is named directly in the message, not left to
+    exc_info's traceback dump, so the type still shows even if exc_value
+    is None.
+    """
     logger = logging.getLogger(__name__)
     if thread_name is not None:
         logger.error(
-            "uncaught exception in thread %s", thread_name, exc_info=(exc_type, exc_value, exc_traceback)
+            "uncaught exception in thread %s: %s",
+            thread_name,
+            exc_type.__name__,
+            exc_info=(exc_type, exc_value, exc_traceback),
         )
     else:
-        logger.error("uncaught exception", exc_info=(exc_type, exc_value, exc_traceback))
+        logger.error("uncaught exception: %s", exc_type.__name__, exc_info=(exc_type, exc_value, exc_traceback))
 
 
 def _excepthook(
-    exc_type: type[BaseException], exc_value: BaseException, exc_traceback: TracebackType | None
+    exc_type: type[BaseException], exc_value: BaseException | None, exc_traceback: TracebackType | None
 ) -> None:
     _log_uncaught_exception(exc_type, exc_value, exc_traceback)
 
 
 def _thread_excepthook(args: threading.ExceptHookArgs) -> None:
+    if args.exc_type is SystemExit:
+        # Matches the default threading.excepthook: SystemExit in a thread
+        # is a normal way to end it, not an error worth logging.
+        return
     thread_name = args.thread.name if args.thread is not None else "unknown"
     _log_uncaught_exception(args.exc_type, args.exc_value, args.exc_traceback, thread_name=thread_name)
 

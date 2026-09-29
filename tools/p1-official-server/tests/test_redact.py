@@ -193,6 +193,27 @@ def test_thread_exception_is_redacted(tmp_path: Path, capsys: pytest.CaptureFixt
         assert "sse-worker" in output
 
 
+def test_thread_system_exit_is_ignored(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    setup_logging(tmp_path, secrets=[], level="INFO")
+
+    def _quit() -> None:
+        raise SystemExit("quit")
+
+    thread = threading.Thread(target=_quit, name="quitting-worker")
+    thread.start()
+    thread.join()
+
+    for handler in logging.getLogger().handlers:
+        handler.flush()
+
+    log_text = (tmp_path / "recorder.log").read_text(encoding="utf-8")
+    stderr_text = capsys.readouterr().err
+
+    # Matches the default threading.excepthook: SystemExit is not logged
+    assert log_text == ""
+    assert "quitting-worker" not in stderr_text
+
+
 def test_setup_logging_creates_recorder_log(tmp_path: Path) -> None:
     setup_logging(tmp_path, secrets=[], level="DEBUG")
     logging.getLogger("p1rec.preflight").debug("starting preflight")
