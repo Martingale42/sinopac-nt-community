@@ -572,7 +572,7 @@ git commit -m "Run simulated order scenarios behind the interlock"
 
 - `p1rec reconcile --sse-run <run_id> [--rest-run <run_id>]`：run_id 為 `results_root` 下的目錄名，含路徑分隔字元時拒絕。未給 `--rest-run` 時，連鎖檢查後以 `{"refresh": true}`（`TradesRequest` 的帳戶欄位皆可省略，端點回傳全部委託）即時查 `trades`，記在本次 run 的 `rest.jsonl`；給了則用該 run 最後一次 `trades` 回應（非 2xx 時失敗，不退回較舊的回應）。先取 REST 再讀 SSE 檔。
 - 依 `EventFields` 從各 client 的全部 SSE 檔（`order_event` 串流與可能也帶委託事件的綜合串流）挑出事件名稱為 `order_event_name` 的 frame；報告在 `data/<state>`（OpenAPI `OrderEvent`），`state` 屬 `order_states` 為委託、屬 `deal_states` 為成交。同一 client 內以 `event_id`（空字串時以 data 原文）去重，依收到時間整理為「委託識別 → 最終狀態、累計成交量」。
-- 官方委託事件不帶狀態字串，SSE 端狀態由 `derive_status` 推得，依序取第一條成立者：New 的 `op_code` 不等於 `op_code_success` → Failed；沒有任何事件帶 `order_quantity` → Unknown；成交量大於 0 且不小於 `order_quantity` → Filled；有成功的 Cancel 且 `cancel_quantity` 不小於「`order_quantity` − 成交量」→ Cancelled；成交量大於 0 → PartFilled；New 成功 → Submitted；其餘 → Unknown。`order_quantity` 取最新值，`cancel_quantity` 取最大值；UpdatePrice、UpdateQty 只更新數量，其他 op_type 記 WARN。REST 狀態去掉 `Status.` 前綴後比較；`deal_quantity` 為 null 時視為 0。
+- 官方委託事件不帶狀態字串，SSE 端狀態由 `derive_status` 推得，依序取第一條成立者：New 的 `op_code` 不等於 `op_code_success` → Failed；沒有委託數量 → Unknown；成交量大於 0 且不小於委託數量 → Filled；有成功的 Cancel 且 `cancel_quantity` 不小於「委託數量 − 成交量」→ Cancelled；成交量大於 0 → PartFilled；New 成功 → Submitted；其餘 → Unknown。委託數量取自 `order_qty`（`/order/quantity`，三筆真實事件皆為下單數量；真實 Cancel 事件的 `status.order_quantity` 為 0，不能用），只採成功操作回報的最新非零值（UpdateQty 可能調降）；`cancel_quantity` 取成功操作回報的最大值；被拒的操作不更新任何數量（可能帶的是請求的數量）。UpdatePrice、UpdateQty 只更新數量，其他 op_type 記 WARN。REST 狀態去掉 `Status.` 前綴後比較；`deal_quantity` 為 null 時視為 0。
 - `reconcile.json`：`only_in_rest`（至少一個 client 沒看到的 REST 委託；GO 準則 4 與設計 §6 D1 量的是每個 client 都收齊，任一 client 缺一筆即列入）、`only_in_sse`（任一 client 看到而 REST 沒有的委託）、`mismatched`（`Mismatch(client, sse, rest)`：每個看到該委託而狀態或成交量與 REST 不同的 client 各一筆）、`missing_by_client`（各 client 缺的 REST 委託）、`per_client_keys`（各 client 看到的委託識別，設計 §6 D），另記 `sse_run`、`rest_run`。前三者皆空時回 0，否則回 2；輸入無法分析時回 1。
 - `p1rec stats --sse-run <run_id>` 只讀錄製檔、不連 server，因此不需要密鑰環境變數。寫 `stats.json`：每個 client 各事件名稱的數量；以下皆逐檔（一個 recorder 一檔）計算，同一 client 的綜合串流與 `order_event` 串流才不會重複計數：每秒 frame 數最高的前 10 秒（以 `recv_ts_ns` 取整秒，UTC ISO 時間）；心跳事件（名稱為 `heartbeat_event`）在同一連線內的間隔最小、中位數（`statistics.median`）、最大值；相鄰 frame 間隔超過 `gap_threshold_s` 的清單；斷線到下一次 200 連上的區間（含嘗試次數與第一個錯誤）；`exchange_ts_pointers` 有設定時，收到時間減交易所時間的 p50、p99（nearest-rank）、最大值與無法解析的筆數。
 - JSONL 最後一行無法解析時記 WARN 並略過（主機曾硬斷電，寫入未 fsync）；中間行無法解析時失敗。
@@ -585,11 +585,11 @@ class EventFields:  # 事件名稱與 JSON 指標，取自 2026-09-29 錄到的�
     order_event_name: str             # 官方 1.7.6 為 "order_event"
     order_states: tuple[str, ...]     # StockOrder、FuturesOrder
     deal_states: tuple[str, ...]      # StockDeal、FuturesDeal
-    event_id: str                     # 以下七個指標相對於 data/<state> 的報告
+    event_id: str                     # 此行起八個指標相對於 data/<state> 的報告
     order_key: str
     op_type: str
     op_code: str
-    order_qty: str
+    order_qty: str                    # /order/quantity；Cancel 事件的 status.order_quantity 為 0
     cancel_qty: str
     deal_key: str
     deal_qty: str
@@ -645,6 +645,8 @@ def run_stats(cfg: P1Config, sse_run: str, run_dir: Path) -> int: ...
 - `test_deals_accumulate_qty` — 同一委託兩筆成交數量加總。
 - `test_stats_peak_second_and_gaps` — 合成資料中某秒 50 個 frame、某處間隔 90 秒時，`stats.json` 的尖峰與間隔清單正確。
 - `test_derive_status_rules` — 推導規則逐條成立（含部分成交後刪單、只見成交、數量為 0）。
+- `test_partial_fill_then_cancel_is_cancelled` — 依真實事件形狀（Cancel 的 `status.order_quantity` 為 0），New(3)、成交 1、Cancel 後為 Cancelled，成交量 1。
+- `test_rejected_update_qty_does_not_change_size` — 部分成交後被拒的 UpdateQty 不會讓狀態變成 Filled。
 - `test_event_on_two_streams_counted_once` — 同一事件出現在綜合串流與 `order_event` 串流時只算一次。
 - `test_truncated_last_line_skipped_with_warning`、`test_unreadable_middle_line_raises` — 末行截斷略過並記 WARN，中間行損壞則失敗。
 - `test_live_reconcile_aborts_before_trades_when_not_simulation` — 模式非模擬時不送出 `trades` 查詢。

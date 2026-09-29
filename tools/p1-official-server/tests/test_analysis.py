@@ -53,23 +53,45 @@ def _order(
     op_code: str = "00",
     *,
     event_id: str,
-    order_qty: int = 2,
+    quantity: int = 2,
     cancel_qty: int = 0,
     state: str = "FuturesOrder",
 ) -> dict[str, object]:
-    """Return an OrderEvent shaped like the official server's order report."""
+    """Return an OrderEvent with the keys of the official server's recorded order reports, values fake.
+
+    order.quantity is the placed size in every recorded report, while a
+    recorded Cancel reports status.order_quantity as 0, so only an
+    accepted New carries the size in status here too.
+    """
+    status_order_qty = quantity if op_type == "New" and op_code == "00" else 0
     return {
         "state": state,
         "data": {
             state: {
                 "event_id": event_id,
                 "operation": {"op_type": op_type, "op_code": op_code, "op_msg": ""},
-                "order": {"id": key, "seqno": "000001", "ordno": "X0001", "action": "Buy", "quantity": order_qty},
+                "order": {
+                    "id": key,
+                    "seqno": "000001",
+                    "ordno": "X0001",
+                    "account": {"account_type": "F", "broker_id": "F000000", "account_id": "0000000", "signed": True},
+                    "action": "Buy",
+                    "price": 100.0,
+                    "quantity": quantity,
+                    "order_type": "ROD",
+                    "price_type": "LMT",
+                    "market_type": "Day",
+                    "oc_type": "Auto",
+                    "subaccount": "",
+                    "combo": False,
+                },
                 "status": {
                     "id": key,
                     "exchange_ts": 1790000000.0,
-                    "order_quantity": order_qty,
+                    "modified_price": 0.0,
                     "cancel_quantity": cancel_qty,
+                    "order_quantity": status_order_qty,
+                    "web_id": "Z",
                 },
                 "contract": {"code": "TMFJ6"},
             }
@@ -271,7 +293,7 @@ def test_no_client_misses_every_rest_order(fields: EventFields) -> None:
 
 def test_deals_accumulate_qty(tmp_path: Path, fields: EventFields) -> None:
     events = [
-        _order("t1", event_id="e1", order_qty=3),
+        _order("t1", event_id="e1", quantity=3),
         _deal("t1", 1, event_id="e2"),
         _deal("t1", 2, event_id="e3"),
     ]
@@ -337,6 +359,32 @@ def test_derive_status_rules(
     )
 
     assert status == expected
+
+
+def test_partial_fill_then_cancel_is_cancelled(tmp_path: Path, fields: EventFields) -> None:
+    events = [
+        _order("t1", event_id="e1", quantity=3),
+        _deal("t1", 1, event_id="e2"),
+        _order("t1", "Cancel", event_id="e3", quantity=3, cancel_qty=2),
+    ]
+    path = _write_sse(tmp_path, "a", "order_event", _order_frames("a", events))
+
+    views = orders_from_sse({"a": [path]}, fields)
+
+    assert views["a"]["t1"] == OrderView(key="t1", status="Cancelled", filled_qty=Decimal(1))
+
+
+def test_rejected_update_qty_does_not_change_size(tmp_path: Path, fields: EventFields) -> None:
+    events = [
+        _order("t1", event_id="e1", quantity=3),
+        _deal("t1", 1, event_id="e2"),
+        _order("t1", "UpdateQty", "88", event_id="e3", quantity=1),
+    ]
+    path = _write_sse(tmp_path, "a", "order_event", _order_frames("a", events))
+
+    views = orders_from_sse({"a": [path]}, fields)
+
+    assert views["a"]["t1"] == OrderView(key="t1", status="PartFilled", filled_qty=Decimal(1))
 
 
 def test_rejected_new_matches_prefixed_rest_status(tmp_path: Path, fields: EventFields) -> None:

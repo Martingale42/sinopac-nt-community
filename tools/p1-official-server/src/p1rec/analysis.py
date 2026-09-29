@@ -288,10 +288,11 @@ def derive_status(
                 Unknown     otherwise.
     Domain:     new_ok is None when no New event was seen, else whether it
                 was accepted; cancel_ok is whether any Cancel was
-                accepted; order_qty is the latest order_quantity reported,
-                None if no order event carried one; cancel_qty is the
-                largest cancel_quantity reported, which the server keeps
-                cumulative; filled_qty is the sum of deal quantities.
+                accepted; order_qty is the latest non-zero order size an
+                accepted operation reported, None if none did; cancel_qty
+                is the largest cancel_quantity an accepted operation
+                reported, which the server keeps cumulative; filled_qty is
+                the sum of deal quantities.
                 Quantities are non-negative and in the events' own units;
                 an overfill also reads Filled, and the filled quantity
                 compared with REST still shows it.
@@ -411,7 +412,23 @@ def _report_identity(body: Mapping[str, object], frame: SseFrame, fields: EventF
 
 
 def _apply_report(orders: dict[str, _OrderProgress], report: _Report, fields: EventFields) -> None:
-    """Fold one report into orders, logging a WARNING instead if its fields are unusable."""
+    """Fold one report into its order's progress, logging a WARNING instead if its fields are unusable.
+
+    Definition: One step of the running state derive_status reads.
+    Formula:    deal: filled_qty += deal_qty.
+                order operation accepted (op_code == op_code_success):
+                order_qty = its order_qty if that is > 0, else unchanged;
+                cancel_qty = max(cancel_qty, its cancel_qty).
+                New: new_ok = accepted and no New was rejected before.
+                Cancel: cancel_ok = cancel_ok or accepted.
+    Domain:     Reports arrive in recv_ts order, deduplicated. A rejected
+                operation changes no quantity, since it may carry the size
+                it asked for rather than the order's. A zero order size is
+                ignored, as a size field can read 0 on a Cancel (the
+                recorded one has status.order_quantity 0), and a missing or
+                null quantity leaves the running value unchanged.
+    Returns:    None; orders is updated in place.
+    """
     try:
         if report.is_deal:
             key = _pointer_str(report.body, fields.deal_key)
@@ -429,9 +446,9 @@ def _apply_report(orders: dict[str, _OrderProgress], report: _Report, fields: Ev
         return
 
     progress = orders.setdefault(key, _OrderProgress())
-    if order_qty is not None:
+    if accepted and order_qty is not None and order_qty > 0:
         progress.order_qty = order_qty
-    if cancel_qty is not None:
+    if accepted and cancel_qty is not None:
         progress.cancel_qty = max(progress.cancel_qty, cancel_qty)
 
     if op_type == _OP_NEW:
@@ -585,12 +602,19 @@ def latency_summary(latencies: Sequence[float], unparsable: int) -> dict[str, ob
 def exchange_ts_ns(doc: object, fields: EventFields) -> int | None:
     """Return the exchange time in a frame's data as epoch nanoseconds.
 
-    Returns None when a pointer does not resolve, which is how frames
-    without an exchange time, such as heartbeats, are left out. With no
-    exchange_ts_format, the single pointer names numeric epoch seconds;
-    with one, the pointers name strings that are joined by a space and
-    parsed with it as Taipei local time. Raises ValueError if the values
-    resolve but do not parse.
+    Definition: The instant the exchange stamped on a frame, on the same
+                scale as recv_ts_ns.
+    Formula:    Without exchange_ts_format: ns = round(Decimal(v) * 1e9),
+                v the single pointer's value in epoch seconds, exact to
+                its decimal text. With it: t = strptime(" ".join(values),
+                exchange_ts_format) as Asia/Taipei local time, ns =
+                (t - 1970-01-01T00:00Z) in whole microseconds * 1000.
+    Domain:     doc is a frame's parsed data. Frames where a pointer does
+                not resolve, such as heartbeats, have no exchange time.
+                The format must not parse a zone. Raises ValueError when
+                the values resolve but are not a number or do not parse.
+    Returns:    Epoch nanoseconds (UTC), microsecond resolution for parsed
+                strings, or None when a pointer does not resolve.
     """
     try:
         values = [resolve_pointer(doc, pointer) for pointer in fields.exchange_ts_pointers]
@@ -622,6 +646,15 @@ def _exchange_tz() -> ZoneInfo:
 
 
 def _iso_utc(ts_ns: int, timespec: str = "microseconds") -> str:
+    """Return epoch nanoseconds as an ISO 8601 UTC string.
+
+    Definition: The wall-clock time an epoch-nanosecond stamp names.
+    Formula:    s, r = divmod(ts_ns, 1e9); UTC datetime of s with
+                microsecond = r // 1000, formatted with timespec.
+    Domain:     Integer nanoseconds since 1970-01-01T00:00Z; sub-microsecond
+                digits are truncated, not rounded.
+    Returns:    For example "2026-10-01T01:00:00.000000Z".
+    """
     seconds, remainder = divmod(ts_ns, NS_PER_S)
     moment = datetime.fromtimestamp(seconds, tz=timezone.utc).replace(microsecond=remainder // 1000)
     return moment.isoformat(timespec=timespec).replace("+00:00", "Z")
@@ -774,6 +807,9 @@ def stream_stats(paths: Mapping[str, Sequence[Path]], fields: EventFields) -> di
                 latency as in latency_summary.
     Domain:     paths maps a client to all of its files; each file is one
                 recorder, so intervals and gaps never span two files.
+                Client event_counts sum that client's files, so an event
+                recorded on both the combined and the order_event stream
+                counts twice there; per-file counts are exact.
                 recv_ts is the recorder's wall clock, which trails socket
                 arrival whenever the recorder falls behind.
     Returns:    {"gap_threshold_s", "heartbeat_event", "clients": {client:
