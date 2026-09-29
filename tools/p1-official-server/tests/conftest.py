@@ -15,7 +15,10 @@ from pathlib import Path
 import pytest
 from helpers import MINIMAL_CONFIG_LINES, WriteConfig
 
-from p1rec import cli
+from p1rec import cli, redact
+
+# Third-party loggers setup_logging raises to WARNING
+_QUIETED_LOGGERS = ("httpx", "httpcore")
 
 
 @pytest.fixture
@@ -37,7 +40,7 @@ def write_config(tmp_path: Path) -> WriteConfig:
 
 @pytest.fixture(autouse=True)
 def _reset_logging() -> Iterator[None]:
-    """Restore the root logger's handlers, level, propagate and excepthooks.
+    """Restore the root logger's state, the excepthooks and everything else setup_logging changes.
 
     setup_logging attaches handlers to the root logger and installs
     sys.excepthook / threading.excepthook, so a test that calls it must
@@ -50,6 +53,8 @@ def _reset_logging() -> Iterator[None]:
     original_propagate = root.propagate
     original_sys_excepthook = sys.excepthook
     original_thread_excepthook = threading.excepthook
+    original_quiet_levels = {name: logging.getLogger(name).level for name in _QUIETED_LOGGERS}
+    original_active_formatter = redact._active_formatter
 
     yield
 
@@ -61,6 +66,9 @@ def _reset_logging() -> Iterator[None]:
     root.propagate = original_propagate
     sys.excepthook = original_sys_excepthook
     threading.excepthook = original_thread_excepthook
+    for name, level in original_quiet_levels.items():
+        logging.getLogger(name).setLevel(level)
+    redact._active_formatter = original_active_formatter
 
 
 @pytest.fixture

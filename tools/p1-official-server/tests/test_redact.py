@@ -5,11 +5,20 @@ from __future__ import annotations
 import logging
 import sys
 import threading
+from collections.abc import Iterable
 from pathlib import Path
 
+import httpx
 import pytest
 
-from p1rec.redact import API_KEY_PREFIX_LEN, RedactingFormatter, redaction_values, setup_logging
+from p1rec import redact
+from p1rec.redact import (
+    API_KEY_PREFIX_LEN,
+    RedactingFormatter,
+    add_redaction_values,
+    redaction_values,
+    setup_logging,
+)
 
 
 def _make_record(msg: str, args: tuple[object, ...] = ()) -> logging.LogRecord:
@@ -231,7 +240,7 @@ def test_setup_logging_redacts_third_party_logger(tmp_path: Path, capsys: pytest
     setup_logging(tmp_path, secrets=[secret_value], level="INFO")
     # httpx/httpcore log under their own names, not under "p1rec", so the
     # handlers must live on the root logger to catch them too.
-    logging.getLogger("httpx").info("request sent with token %s", secret_value)
+    logging.getLogger("httpx").warning("request sent with token %s", secret_value)
 
     for handler in logging.getLogger().handlers:
         handler.flush()
@@ -263,3 +272,76 @@ def test_caplog_still_works_after_setup_logging(tmp_path: Path, caplog: pytest.L
     logging.getLogger("p1rec.orders").info("hello from caplog")
 
     assert "hello from caplog" in caplog.text
+
+
+def test_httpx_request_url_not_logged(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    setup_logging(tmp_path, secrets=[], level="INFO")
+    transport = httpx.MockTransport(lambda _request: httpx.Response(200))
+
+    with httpx.Client(transport=transport) as client:
+        client.get("http://127.0.0.1:8080/api/v1/auth/ca_expiretime", params={"person_id": "FAKEPID001"})
+
+    for handler in logging.getLogger().handlers:
+        handler.flush()
+
+    log_text = (tmp_path / "recorder.log").read_text(encoding="utf-8")
+    stderr_text = capsys.readouterr().err
+
+    assert "FAKEPID001" not in log_text
+    assert "HTTP Request" not in log_text
+    assert "FAKEPID001" not in stderr_text
+
+
+def test_added_redaction_value_is_redacted(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    setup_logging(tmp_path, secrets=["fake-secret-0123456789"], level="INFO")
+    logger = logging.getLogger("p1rec.test")
+    logger.info("before: account 0000001")
+
+    add_redaction_values(["0000001", "", "fake-user"])
+    logger.info("after: account 0000001 held by fake-user, secret fake-secret-0123456789")
+
+    for handler in logging.getLogger().handlers:
+        handler.flush()
+
+    log_lines = (tmp_path / "recorder.log").read_text(encoding="utf-8").splitlines()
+    stderr_text = capsys.readouterr().err
+
+    # Only lines formatted after the call are affected
+    assert "before: account 0000001" in log_lines[0]
+    assert log_lines[1].endswith("after: account *** held by ***, secret ***")
+    assert "after: account *** held by ***, secret ***" in stderr_text
+    assert "0000001 held" not in stderr_text
+
+
+def test_added_value_keeps_longest_first_order() -> None:
+    formatter = RedactingFormatter(["abcd"], "%(message)s")
+
+    formatter.add_secrets(["abcdefgh"])
+
+    assert formatter.format(_make_record("key=%s", ("abcdefgh",))) == "key=***"
+
+
+def test_concurrent_add_secrets_keeps_every_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    formatter = RedactingFormatter([], "%(message)s")
+    original = redact._longest_first
+    inside: list[None] = []
+    second_inside = threading.Event()
+
+    def _slow_longest_first(values: Iterable[str]) -> tuple[str, ...]:
+        # Hold the first caller until a second one arrives (or a short
+        # timeout passes), so without the lock both would read the same
+        # old tuple and the later write would drop the earlier value.
+        inside.append(None)
+        if len(inside) >= 2:
+            second_inside.set()
+        second_inside.wait(timeout=0.3)
+        return original(values)
+
+    monkeypatch.setattr(redact, "_longest_first", _slow_longest_first)
+    threads = [threading.Thread(target=formatter.add_secrets, args=([value],)) for value in ("alpha-1", "beta-22")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert formatter.format(_make_record("alpha-1 beta-22")) == "*** ***"

@@ -32,7 +32,6 @@ from p1rec.config import (
     ConfigError,
     ContractFields,
     Endpoint,
-    EventFields,
     FundsConfig,
     HistoryConfig,
     Instrument,
@@ -44,7 +43,7 @@ from p1rec.config import (
     StreamConfig,
     load_config,
 )
-from p1rec.interlock import EXIT_INTERLOCK_ABORT
+from p1rec.interlock import _UNUSED_EVENT_FIELDS, EXIT_INTERLOCK_ABORT
 from p1rec.stream import EXIT_CHECK_FAILED, render_template, run_stream
 
 INFO_PATH = "/api/v1/info"
@@ -146,8 +145,14 @@ def _cfg(base_url: str, actions: tuple[StreamAction, ...] = ()) -> P1Config:
         secret_env={},
         endpoints=endpoints,
         interlock=InterlockConfig(endpoint_op="mode", pointer="/simulation"),
-        contracts=ContractFields(),
-        funds=FundsConfig(),
+        contracts=ContractFields(code="", limit_up="", limit_down="", reference="", futures_tick="", etf_codes=()),
+        funds=FundsConfig(
+            stock_available_op="",
+            stock_available_pointer="",
+            stock_report_only={},
+            futures_available_pointer="",
+            futures_margin_twd={},
+        ),
         stream=StreamConfig(
             streams=dict(STREAMS),
             subscribe=endpoints["stream_subscribe"],
@@ -160,9 +165,17 @@ def _cfg(base_url: str, actions: tuple[StreamAction, ...] = ()) -> P1Config:
             actions=actions,
         ),
         orders=OrdersConfig(),
-        events=EventFields(),
-        history=HistoryConfig(),
-        scrub=ScrubConfig(),
+        events=_UNUSED_EVENT_FIELDS,
+        history=HistoryConfig(queries=(), usage_bytes_pointer="/bytes"),
+        scrub=ScrubConfig(
+            account_id_pointers=(),
+            ca_pointers=(),
+            account_id_keys=(),
+            map_path=Path("."),
+            selection=Path("."),
+            contract_doc=Path("."),
+            extra_scan_paths=(),
+        ),
     )
 
 

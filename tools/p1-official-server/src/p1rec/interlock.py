@@ -49,9 +49,10 @@ class InterlockError(RuntimeError):
 
 
 # Set for the duration of a self-test case's assert_simulation call, so
-# _abort logs it as a self-test case instead of the "interlock check
-# failed" template real callers get; self_test() reports each case's
-# outcome itself, so the two must never both log the same abort.
+# _abort logs it as self-test noise instead of the "interlock check
+# failed" template a real abort uses. A log sweep counts that template as
+# a genuine failure, so an expected self-test abort must never use it, or
+# the sweep would misclassify routine self-test noise as one.
 _self_test_active: contextvars.ContextVar[bool] = contextvars.ContextVar("self_test_active", default=False)
 
 
@@ -114,9 +115,9 @@ def assert_simulation(client: CapturingClient, cfg: P1Config) -> None:
 
 def _abort(reason: str, cause: BaseException | None = None) -> NoReturn:
     if _self_test_active.get():
-        # self_test() logs its own per-case outcome at the end of its
-        # loop; logging the real template here too would print the same
-        # abort twice, once generic and once case-labelled.
+        # A log sweep counts the "interlock check failed" template below
+        # as a genuine abort, so an expected self-test abort must not use
+        # it, or routine self-test noise would be misclassified as one.
         logger.info("self-test: %s", reason)
     else:
         logger.error("interlock check failed: %s", reason)
@@ -130,14 +131,46 @@ _SELF_TEST_BASE_URL = "http://p1rec.self-test.invalid"
 # satisfies CapturingClient's required timeout_s parameter.
 _SELF_TEST_TIMEOUT_S = 1.0
 
+# assert_simulation reads only the interlock and endpoints sections, so
+# the self-test's event fields are never consulted and hold empty values.
+_UNUSED_EVENT_FIELDS = EventFields(
+    order_event_name="",
+    order_states=(),
+    deal_states=(),
+    event_id="",
+    order_key="",
+    op_type="",
+    op_code="",
+    order_qty="",
+    cancel_qty="",
+    deal_key="",
+    deal_qty="",
+    op_code_success="",
+    order_exchange_ts="",
+    deal_exchange_ts="",
+    rest_list="",
+    rest_key="",
+    rest_status="",
+    rest_filled_qty="",
+    rest_order_ts="",
+    exchange_ts_pointers=(),
+    exchange_ts_format=None,
+    heartbeat_event="",
+    gap_threshold_s=float("inf"),
+)
+
 
 def _self_test_cfg(interlock: InterlockConfig) -> P1Config:
     """Build the P1Config self_test() checks interlock against.
 
-    The mode endpoint's method and path are fixed facts of the official
-    server's contract (GET /api/v1/info), not something p1.toml
-    configures, so they are hardcoded here rather than read from a
-    p1.toml this function never opens.
+    This function never opens p1.toml, so it uses its own canned
+    endpoint (GET /api/v1/info) rather than the path p1.toml's
+    [endpoints.mode] actually configures. A [endpoints.mode] path wrong
+    enough to reach the wrong resource is therefore not exercised here;
+    it still fails closed at runtime, since the pointer then finds
+    nothing to resolve and assert_simulation aborts.
+
+    Sections the interlock never reads carry empty values.
     """
     return P1Config(
         base_url=_SELF_TEST_BASE_URL,
@@ -147,13 +180,29 @@ def _self_test_cfg(interlock: InterlockConfig) -> P1Config:
         secret_env={},
         endpoints={interlock.endpoint_op: Endpoint(method="GET", path="/api/v1/info")},
         interlock=interlock,
-        contracts=ContractFields(),
-        funds=FundsConfig(),
+        contracts=ContractFields(
+            code="", limit_up="", limit_down="", reference="", futures_tick="", etf_codes=()
+        ),
+        funds=FundsConfig(
+            stock_available_op="",
+            stock_available_pointer="",
+            stock_report_only={},
+            futures_available_pointer="",
+            futures_margin_twd={},
+        ),
         stream=StreamConfig(),
         orders=OrdersConfig(),
-        events=EventFields(),
-        history=HistoryConfig(),
-        scrub=ScrubConfig(),
+        events=_UNUSED_EVENT_FIELDS,
+        history=HistoryConfig(queries=(), usage_bytes_pointer="/bytes"),
+        scrub=ScrubConfig(
+            account_id_pointers=(),
+            ca_pointers=(),
+            account_id_keys=(),
+            map_path=Path("."),
+            selection=Path("."),
+            contract_doc=Path("."),
+            extra_scan_paths=(),
+        ),
     )
 
 

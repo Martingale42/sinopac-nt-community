@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,7 @@ from p1rec.config import (
     EventFields,
     FundsConfig,
     HistoryConfig,
+    HistoryQuery,
     InterlockConfig,
     OrdersConfig,
     ScrubConfig,
@@ -43,16 +45,72 @@ def test_load_config_success(tmp_path: Path, write_config: WriteConfig) -> None:
     assert cfg.endpoints == {
         "mode": Endpoint(method="GET", path="/api/v1/info"),
         "place_stock": Endpoint(method="POST", path="/api/v1/order/place_order"),
+        "usage": Endpoint(method="GET", path="/api/v1/auth/usage"),
+        "ticks": Endpoint(method="POST", path="/api/v1/data/ticks"),
+        "trading_limits": Endpoint(method="POST", path="/api/v1/portfolio/trading_limits"),
     }
     assert cfg.interlock == InterlockConfig(endpoint_op="mode", pointer="/simulation")
+    assert cfg.contracts == ContractFields(
+        code="/code",
+        limit_up="/limit_up",
+        limit_down="/limit_down",
+        reference="/reference",
+        futures_tick="/tick",
+        etf_codes=("0050",),
+    )
+    assert cfg.funds == FundsConfig(
+        stock_available_op="trading_limits",
+        stock_available_pointer="/trading_available",
+        stock_report_only={},
+        futures_available_pointer="/available_margin",
+        futures_margin_twd={},
+    )
     # These remaining placeholder types only need to construct and load here
-    assert cfg.contracts == ContractFields()
-    assert cfg.funds == FundsConfig()
     assert cfg.stream == StreamConfig()
     assert cfg.orders == OrdersConfig()
-    assert cfg.events == EventFields()
-    assert cfg.history == HistoryConfig()
-    assert cfg.scrub == ScrubConfig()
+    assert cfg.events == EventFields(
+        order_event_name="order_event",
+        order_states=("StockOrder", "FuturesOrder"),
+        deal_states=("StockDeal", "FuturesDeal"),
+        event_id="/event_id",
+        order_key="/order/id",
+        op_type="/operation/op_type",
+        op_code="/operation/op_code",
+        order_qty="/order/quantity",
+        cancel_qty="/status/cancel_quantity",
+        deal_key="/trade_id",
+        deal_qty="/quantity",
+        op_code_success="00",
+        order_exchange_ts="/status/exchange_ts",
+        deal_exchange_ts="/ts",
+        rest_list="",
+        rest_key="/order/id",
+        rest_status="/status/status",
+        rest_filled_qty="/status/deal_quantity",
+        rest_order_ts="/status/order_ts",
+        exchange_ts_pointers=("/date", "/time"),
+        exchange_ts_format="%Y-%m-%d %H:%M:%S.%f",
+        heartbeat_event="heartbeat",
+        gap_threshold_s=60.0,
+    )
+    assert cfg.history == HistoryConfig(
+        queries=(
+            HistoryQuery(
+                op="ticks",
+                body='{"contract": {"security_type": "STK", "exchange": "TSE", "code": "2330"}, "date": "2026-09-29"}',
+            ),
+        ),
+        usage_bytes_pointer="/bytes",
+    )
+    assert cfg.scrub == ScrubConfig(
+        account_id_pointers=("/account_id", "/username", "/person_id"),
+        ca_pointers=("/person_id",),
+        account_id_keys=("subaccount",),
+        map_path=(tmp_path / "results" / "scrub-map.json").resolve(),
+        selection=(tmp_path / "fixtures.toml").resolve(),
+        contract_doc=(tmp_path / "contract.md").resolve(),
+        extra_scan_paths=(),
+    )
 
 
 def test_load_real_p1_toml() -> None:
@@ -111,14 +169,14 @@ def test_inline_secret_rejected_inside_array_of_tables(write_config: WriteConfig
 
 def test_inline_secret_rejected_for_person_id_and_egress_ip(write_config: WriteConfig) -> None:
     bogus_value = "A123456789"  # shaped like a Taiwanese national ID
-    lines = [*MINIMAL_CONFIG_LINES, "", "[scrub]", f'person_id = "{bogus_value}"']
+    lines = [*MINIMAL_CONFIG_LINES, "", "[notes]", f'person_id = "{bogus_value}"']
     config_path = write_config(lines)
 
     with pytest.raises(ConfigError) as exc_info:
         load_config(config_path)
 
     message = str(exc_info.value)
-    assert "scrub.person_id" in message
+    assert "notes.person_id" in message
     assert bogus_value not in message
 
 
@@ -220,6 +278,77 @@ def test_interlock_pointer_rejects_empty_string(write_config: WriteConfig) -> No
         load_config(config_path)
 
 
+def test_history_query_rejects_unknown_op(write_config: WriteConfig) -> None:
+    lines = ['op = "unknown"' if line == 'op = "ticks"' else line for line in MINIMAL_CONFIG_LINES]
+    config_path = write_config(lines)
+
+    with pytest.raises(ConfigError, match=r"history\.query\[0\]\.op"):
+        load_config(config_path)
+
+
+def test_history_query_rejects_non_json_body(write_config: WriteConfig) -> None:
+    lines = ["body = 'not json'" if line.startswith("body = ") else line for line in MINIMAL_CONFIG_LINES]
+    config_path = write_config(lines)
+
+    with pytest.raises(ConfigError, match=r"history\.query\[0\]\.body"):
+        load_config(config_path)
+
+
+def test_history_query_rejects_non_object_body(write_config: WriteConfig) -> None:
+    lines = ["body = '[1, 2, 3]'" if line.startswith("body = ") else line for line in MINIMAL_CONFIG_LINES]
+    config_path = write_config(lines)
+
+    with pytest.raises(ConfigError, match=r"history\.query\[0\]\.body"):
+        load_config(config_path)
+
+
+def test_history_usage_bytes_pointer_required(write_config: WriteConfig) -> None:
+    lines = [line for line in MINIMAL_CONFIG_LINES if line != 'usage_bytes_pointer = "/bytes"']
+    config_path = write_config(lines)
+
+    with pytest.raises(ConfigError, match=r"history\.usage_bytes_pointer"):
+        load_config(config_path)
+
+
+def test_history_query_must_not_be_empty(write_config: WriteConfig) -> None:
+    # Keep [history] and usage_bytes_pointer, drop the one [[history.query]]
+    # table (header, op and body), so the array itself is what's missing.
+    start = MINIMAL_CONFIG_LINES.index("[[history.query]]")
+    lines = MINIMAL_CONFIG_LINES[:start] + MINIMAL_CONFIG_LINES[start + 3 :]
+    config_path = write_config(lines)
+
+    with pytest.raises(ConfigError, match=r"history\.query"):
+        load_config(config_path)
+
+
+def test_history_query_op_must_name_known_endpoint(write_config: WriteConfig) -> None:
+    # "kbars" is a valid op, but MINIMAL_CONFIG_LINES defines no
+    # [endpoints.kbars], so the query cannot be sent.
+    lines = ['op = "kbars"' if line == 'op = "ticks"' else line for line in MINIMAL_CONFIG_LINES]
+    config_path = write_config(lines)
+
+    with pytest.raises(ConfigError, match=r"history\.query\[0\]\.op"):
+        load_config(config_path)
+
+
+def test_history_query_op_must_be_post(write_config: WriteConfig) -> None:
+    lines = list(MINIMAL_CONFIG_LINES)
+    lines[lines.index("[endpoints.ticks]") + 1] = 'method = "GET"'
+    config_path = write_config(lines)
+
+    with pytest.raises(ConfigError, match=r"history\.query\[0\]\.op"):
+        load_config(config_path)
+
+
+def test_history_usage_endpoint_must_be_get(write_config: WriteConfig) -> None:
+    lines = list(MINIMAL_CONFIG_LINES)
+    lines[lines.index("[endpoints.usage]") + 1] = 'method = "POST"'
+    config_path = write_config(lines)
+
+    with pytest.raises(ConfigError, match=r"endpoints\.usage"):
+        load_config(config_path)
+
+
 def test_missing_secret_env(write_config: WriteConfig, monkeypatch: pytest.MonkeyPatch) -> None:
     config_path = write_config()
     cfg = load_config(config_path)
@@ -284,3 +413,73 @@ def test_read_secrets_success(write_config: WriteConfig, monkeypatch: pytest.Mon
         "person_id": "A123456789",
         "egress_ip": "203.0.113.1",
     }
+
+
+def _with_margins(*entries: str) -> list[str]:
+    """Return MINIMAL_CONFIG_LINES with entries placed in [funds.futures_margin_twd]."""
+    lines = list(MINIMAL_CONFIG_LINES)
+    at = lines.index("[funds.futures_margin_twd]") + 1
+    lines[at:at] = list(entries)
+    return lines
+
+
+def test_futures_margins_accept_integer_and_decimal_string(write_config: WriteConfig) -> None:
+    cfg = load_config(write_config(_with_margins("TMFJ6 = 12000", 'TXFJ6 = "184000.5"')))
+
+    assert cfg.funds.futures_margin_twd == {"TMFJ6": Decimal("12000"), "TXFJ6": Decimal("184000.5")}
+
+
+@pytest.mark.parametrize("entry", ["TMFJ6 = 12000.5", "TMFJ6 = 0", 'TMFJ6 = "abc"', "TMFJ6 = true"])
+def test_futures_margin_rejects_float_and_non_positive(write_config: WriteConfig, entry: str) -> None:
+    with pytest.raises(ConfigError, match=r"funds\.futures_margin_twd\.TMFJ6"):
+        load_config(write_config(_with_margins(entry)))
+
+
+def test_funds_pointer_validated(write_config: WriteConfig) -> None:
+    lines = [
+        'stock_available_pointer = "acc_balance"' if line.startswith("stock_available_pointer") else line
+        for line in MINIMAL_CONFIG_LINES
+    ]
+
+    with pytest.raises(ConfigError, match=r"funds\.stock_available_pointer"):
+        load_config(write_config(lines))
+
+
+def test_contracts_etf_codes_must_be_strings(write_config: WriteConfig) -> None:
+    lines = ["etf_codes = [50]" if line.startswith("etf_codes") else line for line in MINIMAL_CONFIG_LINES]
+
+    with pytest.raises(ConfigError, match=r"contracts\.etf_codes"):
+        load_config(write_config(lines))
+
+
+def test_missing_contracts_section_names_key(write_config: WriteConfig) -> None:
+    start = MINIMAL_CONFIG_LINES.index("[contracts]")
+    end = MINIMAL_CONFIG_LINES.index("[funds]")
+    lines = MINIMAL_CONFIG_LINES[:start] + MINIMAL_CONFIG_LINES[end:]
+
+    with pytest.raises(ConfigError, match=r"contracts\."):
+        load_config(write_config(lines))
+
+
+def _with_funds_line(key: str, line: str) -> list[str]:
+    return [line if entry.startswith(f"{key} =") else entry for entry in MINIMAL_CONFIG_LINES]
+
+
+@pytest.mark.parametrize("op", ["mode", "no_such_op"])
+def test_stock_available_op_must_be_post_endpoint(write_config: WriteConfig, op: str) -> None:
+    lines = _with_funds_line("stock_available_op", f'stock_available_op = "{op}"')
+
+    with pytest.raises(ConfigError, match=r"funds\.stock_available_op must name a POST endpoint"):
+        load_config(write_config(lines))
+
+
+def test_stock_report_only_entries_validated(write_config: WriteConfig) -> None:
+    at = MINIMAL_CONFIG_LINES.index("[funds.stock_report_only]") + 1
+
+    unknown = [*MINIMAL_CONFIG_LINES[:at], 'balance = "/acc_balance"', *MINIMAL_CONFIG_LINES[at:]]
+    with pytest.raises(ConfigError, match=r"funds\.stock_report_only\.balance must name a POST endpoint"):
+        load_config(write_config(unknown))
+
+    repeated = [*MINIMAL_CONFIG_LINES[:at], 'trading_limits = "/trading_available"', *MINIMAL_CONFIG_LINES[at:]]
+    with pytest.raises(ConfigError, match=r"repeats funds\.stock_available_op"):
+        load_config(write_config(repeated))

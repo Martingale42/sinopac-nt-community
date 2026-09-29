@@ -17,6 +17,7 @@ import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -41,12 +42,35 @@ class InterlockConfig:
 
 @dataclass(frozen=True)
 class ContractFields:
-    """Placeholder, filled in once contract fixture field names are defined."""
+    """JSON pointers into one contract record, and the codes that use ETF ticks.
+
+    The same pointers serve contracts_stock's single record and each
+    element of contracts_futures' array, since both are ContractInfoRecord.
+    """
+
+    code: str
+    limit_up: str
+    limit_down: str
+    reference: str
+    futures_tick: str  # Checked against p1rec's own futures tick when present
+    etf_codes: tuple[str, ...]
 
 
 @dataclass(frozen=True)
 class FundsConfig:
-    """Placeholder, filled in once funds calibration fields are defined."""
+    # The stock funds query compared against the requirement: a POST
+    # operation taking an AccountRequest, and a pointer into its response.
+    stock_available_op: str
+    stock_available_pointer: str
+
+    # Further stock funds queries, operation -> pointer, run and reported
+    # alongside the compared one but never compared.
+    stock_report_only: dict[str, str]
+
+    futures_available_pointer: str  # Into the margin response
+
+    # Contract code -> initial margin per contract in TWD
+    futures_margin_twd: dict[str, Decimal]
 
 
 @dataclass(frozen=True)
@@ -101,17 +125,94 @@ class OrdersConfig:
 
 @dataclass(frozen=True)
 class EventFields:
-    """Placeholder, filled in once order/trade event field names are defined."""
+    """Where order reports, the trades list and stream timing live in recorded JSON."""
+
+    # SSE event name carrying OrderEvent frames, and the OrderEvent state
+    # values that mark an order report or a deal report.
+    order_event_name: str
+    order_states: tuple[str, ...]
+    deal_states: tuple[str, ...]
+
+    # JSON pointers into the report an OrderEvent holds at data/<state>
+    event_id: str
+    order_key: str
+    op_type: str
+    op_code: str
+    order_qty: str
+    cancel_qty: str
+    deal_key: str
+    deal_qty: str
+
+    # op_code of an accepted operation
+    op_code_success: str
+
+    # Pointers to the exchange time, in epoch seconds, of an order report
+    # and of a deal report, which date an order for the calendar-date window.
+    order_exchange_ts: str
+    deal_exchange_ts: str
+
+    # JSON pointers into the trades response: the list ("" for a bare
+    # array), then key, status and filled quantity within each item.
+    rest_list: str
+    rest_key: str
+    rest_status: str
+    rest_filled_qty: str
+
+    # Pointer into each trades item to its order time in epoch seconds,
+    # which dates the snapshot when no --trading-day is given and windows
+    # the REST side by calendar date.
+    rest_order_ts: str
+
+    # Pointers into a frame's data giving the exchange time, empty to skip
+    # latency: one numeric epoch-seconds value when exchange_ts_format is
+    # None, otherwise strings joined by a space and parsed with it as
+    # Taipei local time.
+    exchange_ts_pointers: tuple[str, ...]
+    exchange_ts_format: str | None
+
+    heartbeat_event: str
+
+    # Silence between consecutive frames of one file that stats reports
+    gap_threshold_s: float
+
+
+@dataclass(frozen=True)
+class HistoryQuery:
+    op: Literal["ticks", "kbars", "snapshots"]
+
+    # Parsed and re-serialized by httpx when sent, so rest.jsonl records
+    # what actually went on the wire, not this string byte-for-byte.
+    body: str
 
 
 @dataclass(frozen=True)
 class HistoryConfig:
-    """Placeholder, filled in once history-query fields are defined."""
+    queries: tuple[HistoryQuery, ...]
+    usage_bytes_pointer: str  # JSON pointer into UsageOut, e.g. "/bytes"
 
 
 @dataclass(frozen=True)
 class ScrubConfig:
-    """Placeholder, filled in once de-identification fields are defined."""
+    # JSON pointers applied to every element of each recorded accounts
+    # response, and to each ca_status response, to find the identifiers to
+    # scrub, with the pointer's last token upper-cased naming the category.
+    account_id_pointers: tuple[str, ...]
+    ca_pointers: tuple[str, ...]
+
+    # Key names whose non-empty values, at any depth of recorded JSON, are
+    # account identifiers too, with the key upper-cased naming the category.
+    account_id_keys: tuple[str, ...]
+
+    # Holds the original values themselves, so it must stay under results_root
+    map_path: Path
+
+    # fixtures.toml; each entry has name, run_id, source, lines, checklist, instrument and optionally recorded_at
+    selection: Path
+
+    # scrub --scan-only always scans fixtures_root's parent and this
+    # document, and extra_scan_paths can only add to them.
+    contract_doc: Path
+    extra_scan_paths: tuple[Path, ...]
 
 
 @dataclass(frozen=True)
@@ -316,6 +417,16 @@ def _optional_table(data: Mapping[str, Any], key: str) -> Mapping[str, Any]:
     return value
 
 
+def _require_endpoint_method(known_endpoints: Mapping[str, Any], op: str, method: str, key: str) -> None:
+    """Raise ConfigError, naming key, unless known_endpoints[op] exists with the given HTTP method."""
+    if op not in known_endpoints:
+        raise ConfigError(f"config key {key} names unknown endpoint: {op!r}")
+    endpoint_table = known_endpoints[op]
+    endpoint_method = endpoint_table.get("method") if isinstance(endpoint_table, Mapping) else None
+    if endpoint_method != method:
+        raise ConfigError(f"config key {key} must name a {method} endpoint, but {op!r} is {endpoint_method!r}")
+
+
 _DEFAULT_INTERLOCK_ENDPOINT_OP = "mode"
 
 
@@ -328,30 +439,83 @@ def _parse_interlock(data: Mapping[str, Any], config_dir: Path) -> InterlockConf
     pointer = _get_pointer(data, "interlock.pointer")
 
     known_endpoints = _lookup(data, "endpoints")
-    if not isinstance(known_endpoints, Mapping) or endpoint_op not in known_endpoints:
+    if not isinstance(known_endpoints, Mapping):
         raise ConfigError(f"config key interlock.endpoint_op names unknown endpoint: {endpoint_op!r}")
 
     # A POST that reports simulation mode as a side effect would still be
     # a mutation the interlock must not itself trigger, so only a GET may
     # back the check.
-    endpoint_table = known_endpoints[endpoint_op]
-    endpoint_method = endpoint_table.get("method") if isinstance(endpoint_table, Mapping) else None
-    if endpoint_method != "GET":
-        raise ConfigError(
-            f"config key interlock.endpoint_op must name a GET endpoint, but {endpoint_op!r} is {endpoint_method!r}"
-        )
+    _require_endpoint_method(known_endpoints, endpoint_op, "GET", "interlock.endpoint_op")
 
     return InterlockConfig(endpoint_op=endpoint_op, pointer=pointer)
 
 
 def _parse_contracts(data: Mapping[str, Any], config_dir: Path) -> ContractFields:
     _optional_table(data, "contracts")
-    return ContractFields()
+    etf_codes = _lookup(data, "contracts.etf_codes")
+    if not isinstance(etf_codes, list) or not all(isinstance(code, str) and code for code in etf_codes):
+        raise ConfigError("config key contracts.etf_codes must be an array of non-empty strings")
+    return ContractFields(
+        code=_get_pointer(data, "contracts.code"),
+        limit_up=_get_pointer(data, "contracts.limit_up"),
+        limit_down=_get_pointer(data, "contracts.limit_down"),
+        reference=_get_pointer(data, "contracts.reference"),
+        futures_tick=_get_pointer(data, "contracts.futures_tick"),
+        etf_codes=tuple(etf_codes),
+    )
 
 
 def _parse_funds(data: Mapping[str, Any], config_dir: Path) -> FundsConfig:
-    _optional_table(data, "funds")
-    return FundsConfig()
+    funds = _optional_table(data, "funds")
+    endpoints = _lookup(data, "endpoints")
+
+    def post_op(dotted_key: str, op: str) -> str:
+        # Funds queries send the account in a JSON body, so only a POST fits
+        endpoint = endpoints.get(op) if isinstance(endpoints, Mapping) else None
+        method = endpoint.get("method") if isinstance(endpoint, Mapping) else None
+        if method != "POST":
+            raise ConfigError(f"config key {dotted_key} must name a POST endpoint, but {op!r} is {method!r}")
+        return op
+
+    stock_available_op = post_op("funds.stock_available_op", _get_str(data, "funds.stock_available_op"))
+
+    report_only: dict[str, str] = {}
+    raw_report_only = funds.get("stock_report_only", {})
+    if not isinstance(raw_report_only, Mapping):
+        raise ConfigError("config key funds.stock_report_only must be a table")
+    for op in raw_report_only:
+        dotted_key = f"funds.stock_report_only.{op}"
+        if op == stock_available_op:
+            raise ConfigError(f"config key {dotted_key} repeats funds.stock_available_op")
+        report_only[post_op(dotted_key, op)] = _get_pointer(data, dotted_key)
+
+    raw_margins = _lookup(data, "funds.futures_margin_twd")
+    if not isinstance(raw_margins, Mapping):
+        raise ConfigError("config key funds.futures_margin_twd must be a table")
+
+    margins: dict[str, Decimal] = {}
+    for code, value in raw_margins.items():
+        dotted_key = f"funds.futures_margin_twd.{code}"
+
+        # A TOML float would carry binary rounding into the funds check,
+        # so only an integer or a decimal string is accepted.
+        if isinstance(value, bool) or not isinstance(value, (int, str)):
+            raise ConfigError(f"config key {dotted_key} must be an integer or a decimal string")
+        try:
+            margin = Decimal(value)
+        except InvalidOperation:
+            raise ConfigError(f"config key {dotted_key} is not a decimal number: {value!r}") from None
+        if not margin.is_finite() or margin <= 0:
+            raise ConfigError(f"config key {dotted_key} must be a positive number")
+        margins[code] = margin
+
+    return FundsConfig(
+        stock_available_op=stock_available_op,
+        stock_available_pointer=_get_pointer(data, "funds.stock_available_pointer"),
+        stock_report_only=report_only,
+        futures_available_pointer=_get_pointer(data, "funds.futures_available_pointer"),
+        futures_margin_twd=margins,
+    )
 
 
 # Logical operations the stream subcommand calls by name (docs/official-server-contract.md section 1)
@@ -627,15 +791,179 @@ def _parse_orders(data: Mapping[str, Any], config_dir: Path) -> OrdersConfig:
 
 
 def _parse_events(data: Mapping[str, Any], config_dir: Path) -> EventFields:
-    _optional_table(data, "events")
-    return EventFields()
+    table = _optional_table(data, "events")
+
+    def name(key: str) -> str:
+        value = _get_str(data, f"events.{key}")
+        if not value:
+            raise ConfigError(f"config key events.{key} must not be empty")
+        return value
+
+    def names(key: str) -> tuple[str, ...]:
+        value = _lookup(data, f"events.{key}")
+        if not isinstance(value, list) or not value or not all(isinstance(item, str) and item for item in value):
+            raise ConfigError(f"config key events.{key} must be a non-empty array of non-empty strings")
+        return tuple(value)
+
+    def pointer(key: str, *, allow_root: bool = False) -> str:
+        return _get_pointer(data, f"events.{key}", allow_root=allow_root)
+
+    order_states = names("order_states")
+    deal_states = names("deal_states")
+    if set(order_states) & set(deal_states):
+        raise ConfigError("config keys events.order_states and events.deal_states must not share a state")
+
+    exchange_ts_pointers: tuple[str, ...] = ()
+    if "exchange_ts_pointers" in table:
+        exchange_ts_pointers = names("exchange_ts_pointers")
+        for index, item in enumerate(exchange_ts_pointers):
+            if not is_valid_pointer_syntax(item):
+                raise ConfigError(f"config key events.exchange_ts_pointers[{index}] is not a valid JSON pointer")
+    exchange_ts_format = name("exchange_ts_format") if "exchange_ts_format" in table else None
+    if exchange_ts_format is None and len(exchange_ts_pointers) > 1:
+        raise ConfigError("config key events.exchange_ts_format is required with more than one exchange_ts_pointers")
+    if exchange_ts_format is not None and not exchange_ts_pointers:
+        raise ConfigError("config key events.exchange_ts_format needs events.exchange_ts_pointers")
+
+    gap_threshold_s = _get_number(data, "events.gap_threshold_s")
+    if not 0 < gap_threshold_s < float("inf"):
+        raise ConfigError("config key events.gap_threshold_s must be a positive finite number")
+
+    return EventFields(
+        order_event_name=name("order_event_name"),
+        order_states=order_states,
+        deal_states=deal_states,
+        event_id=pointer("event_id"),
+        order_key=pointer("order_key"),
+        op_type=pointer("op_type"),
+        op_code=pointer("op_code"),
+        order_qty=pointer("order_qty"),
+        cancel_qty=pointer("cancel_qty"),
+        deal_key=pointer("deal_key"),
+        deal_qty=pointer("deal_qty"),
+        op_code_success=name("op_code_success"),
+        order_exchange_ts=pointer("order_exchange_ts"),
+        deal_exchange_ts=pointer("deal_exchange_ts"),
+        rest_list=pointer("rest_list", allow_root=True),
+        rest_key=pointer("rest_key"),
+        rest_status=pointer("rest_status"),
+        rest_filled_qty=pointer("rest_filled_qty"),
+        rest_order_ts=pointer("rest_order_ts"),
+        exchange_ts_pointers=exchange_ts_pointers,
+        exchange_ts_format=exchange_ts_format,
+        heartbeat_event=name("heartbeat_event"),
+        gap_threshold_s=gap_threshold_s,
+    )
+
+
+_HISTORY_OPS = ("ticks", "kbars", "snapshots")
 
 
 def _parse_history(data: Mapping[str, Any], config_dir: Path) -> HistoryConfig:
-    _optional_table(data, "history")
-    return HistoryConfig()
+    # usage_bytes_pointer is looked up through _lookup (via _get_pointer)
+    # rather than read from the table below, so a p1.toml missing the
+    # whole [history] section fails here with that dotted key, the same
+    # way a missing [interlock] section does.
+    usage_bytes_pointer = _get_pointer(data, "history.usage_bytes_pointer")
+
+    known_endpoints = _lookup(data, "endpoints")
+    if not isinstance(known_endpoints, Mapping):
+        raise ConfigError("config key endpoints must be a table")
+
+    # run_history always reads usage itself, not through a configurable
+    # op name, so this checks the fixed "usage" entry directly rather
+    # than a dotted key someone could point elsewhere.
+    _require_endpoint_method(known_endpoints, "usage", "GET", "endpoints.usage")
+
+    table = _optional_table(data, "history")
+    raw_queries = table.get("query", [])
+    if not isinstance(raw_queries, list):
+        raise ConfigError("config key history.query must be an array of tables")
+    if not raw_queries:
+        raise ConfigError("config key history.query must not be empty")
+
+    queries = tuple(
+        _parse_history_query(item, index, known_endpoints) for index, item in enumerate(raw_queries)
+    )
+    return HistoryConfig(queries=queries, usage_bytes_pointer=usage_bytes_pointer)
+
+
+def _parse_history_query(item: Any, index: int, known_endpoints: Mapping[str, Any]) -> HistoryQuery:
+    key = f"history.query[{index}]"
+    if not isinstance(item, Mapping):
+        raise ConfigError(f"config key {key} must be a table")
+
+    op = item.get("op")
+    if op not in _HISTORY_OPS:
+        raise ConfigError(f"config key {key}.op must be one of {_HISTORY_OPS}, got {op!r}")
+    _require_endpoint_method(known_endpoints, op, "POST", f"{key}.op")
+
+    body = item.get("body")
+    if not isinstance(body, str):
+        raise ConfigError(f"config key {key}.body must be a string, got {type(body).__name__}")
+    try:
+        parsed_body = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise ConfigError(f"config key {key}.body is not valid JSON: {exc}") from exc
+    if not isinstance(parsed_body, dict):
+        raise ConfigError(f"config key {key}.body must be a JSON object")
+
+    return HistoryQuery(op=op, body=body)
+
+
+def _get_str_tuple(data: Mapping[str, Any], dotted_key: str) -> tuple[str, ...]:
+    value = _lookup(data, dotted_key)
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ConfigError(f"config key {dotted_key} must be an array of strings")
+    return tuple(value)
+
+
+# A plain field name not ending in _<digits>, since it becomes a
+# placeholder category and <CATEGORY>_<n> must parse back unambiguously.
+_SCRUB_FIELD_NAME = r"(?![A-Za-z0-9_]*_[0-9]+$)[A-Za-z][A-Za-z0-9_]*"
+
+# The last token names the placeholder category of every value the pointer finds
+_SCRUB_POINTER_RE = re.compile(rf"^(/[^/]*)*/{_SCRUB_FIELD_NAME}$")
+
+
+def _get_scrub_pointers(data: Mapping[str, Any], dotted_key: str) -> tuple[str, ...]:
+    pointers = _get_str_tuple(data, dotted_key)
+    if not pointers:
+        raise ConfigError(f"config key {dotted_key} must list at least one JSON pointer")
+    for index, pointer in enumerate(pointers):
+        if not _SCRUB_POINTER_RE.fullmatch(pointer):
+            raise ConfigError(
+                f"config key {dotted_key}[{index}] must be a JSON pointer ending in a field name "
+                "that does not end in _<digits>"
+            )
+    return pointers
+
+
+_SCRUB_KEY_RE = re.compile(rf"^{_SCRUB_FIELD_NAME}$")
+
+
+def _get_scrub_keys(data: Mapping[str, Any], dotted_key: str) -> tuple[str, ...]:
+    keys = _get_str_tuple(data, dotted_key)
+    for index, key in enumerate(keys):
+        if not _SCRUB_KEY_RE.fullmatch(key):
+            raise ConfigError(f"config key {dotted_key}[{index}] must be a plain field name not ending in _<digits>")
+    return keys
 
 
 def _parse_scrub(data: Mapping[str, Any], config_dir: Path) -> ScrubConfig:
     _optional_table(data, "scrub")
-    return ScrubConfig()
+    results_root = _get_fs_path(data, "results_root", config_dir)
+    map_path = _get_fs_path(data, "scrub.map_path", config_dir)
+    if not map_path.is_relative_to(results_root):
+        raise ConfigError("config key scrub.map_path must be inside results_root, which stays out of version control")
+    return ScrubConfig(
+        account_id_pointers=_get_scrub_pointers(data, "scrub.account_id_pointers"),
+        ca_pointers=_get_scrub_pointers(data, "scrub.ca_pointers"),
+        account_id_keys=_get_scrub_keys(data, "scrub.account_id_keys"),
+        map_path=map_path,
+        selection=_get_fs_path(data, "scrub.selection", config_dir),
+        contract_doc=_get_fs_path(data, "scrub.contract_doc", config_dir),
+        extra_scan_paths=tuple(
+            (config_dir / raw).resolve() for raw in _get_str_tuple(data, "scrub.extra_scan_paths")
+        ),
+    )

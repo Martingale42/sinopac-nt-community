@@ -105,6 +105,10 @@ path = "/api/v1/portfolio/account_balance"
 method = "POST"
 path = "/api/v1/portfolio/margin"
 
+[endpoints.trading_limits]
+method = "POST"
+path = "/api/v1/portfolio/trading_limits"
+
 [endpoints.usage]
 method = "GET"
 path = "/api/v1/auth/usage"
@@ -123,6 +127,138 @@ path = "/api/v1/agent/harness"
 [interlock]
 endpoint_op = "mode"
 pointer = "/simulation"
+
+# History queries for `p1rec history` (docs/official-server-contract.md
+# section 1): ticks, kbars and snapshots take their request in a JSON
+# body, not query parameters, usage_bytes_pointer names UsageOut's
+# cumulative byte counter read before and after each query below, and
+# KBarsRequest's start/end are dates only (`shioaji data kbars --help`:
+# kbars are stored per day), not a time-of-day range.
+#
+# calibrate: Task 12 sets every date/start/end to the actual previous
+# trading day, the futures codes to that day's near-month contracts, and
+# adds the near-month at-the-money TXO call/put codes to the snapshots
+# query below, before running `p1rec history` live.
+[history]
+usage_bytes_pointer = "/bytes"
+
+[[history.query]]
+op = "ticks"
+body = '{"contract": {"security_type": "STK", "exchange": "TSE", "code": "2330"}, "date": "2026-09-29", "query_type": "AllDay"}'
+
+[[history.query]]
+op = "kbars"
+body = '{"contract": {"security_type": "STK", "exchange": "TSE", "code": "2330"}, "start": "2026-09-29", "end": "2026-09-29"}'
+
+[[history.query]]
+op = "kbars"
+body = '{"contract": {"security_type": "FUT", "exchange": "TAIFEX", "code": "TMFJ6"}, "start": "2026-09-29", "end": "2026-09-29"}'
+
+[[history.query]]
+op = "snapshots"
+body = '{"contracts": [{"security_type": "STK", "exchange": "TSE", "code": "2330"}, {"security_type": "STK", "exchange": "TSE", "code": "0050"}, {"security_type": "STK", "exchange": "TSE", "code": "2890"}, {"security_type": "STK", "exchange": "TSE", "code": "00981A"}, {"security_type": "STK", "exchange": "TSE", "code": "00631L"}, {"security_type": "FUT", "exchange": "TAIFEX", "code": "TXFJ6"}, {"security_type": "FUT", "exchange": "TAIFEX", "code": "MXFJ6"}, {"security_type": "FUT", "exchange": "TAIFEX", "code": "TMFJ6"}]}'
+
+# Contract price limits: contracts_stock's record and each element of
+# contracts_futures' array are both ContractInfoRecord, with these fields
+# at the top level (openapi.json).
+[contracts]
+code = "/code"
+limit_up = "/limit_up"
+limit_down = "/limit_down"
+reference = "/reference"
+
+# FuturesContractInfoRecord.tick, cross-checked against p1rec's own futures tick
+futures_tick = "/tick"
+
+# Every ETF among the recorded stocks, since ETFs follow their own tick table
+etf_codes = ["0050", "00981A", "00631L"]
+
+# Funds the scenarios draw on (openapi.json TradingLimits and Margin). The
+# stock requirement is compared against the trading limit rather than the
+# settlement account balance, on the inference that the broker checks
+# orders against it. calibrate: confirm the operation and both pointers
+# against the simulation account's real responses.
+[funds]
+stock_available_op = "trading_limits"
+stock_available_pointer = "/trading_available"
+futures_available_pointer = "/available_margin"
+
+# Stock funds queries also run and reported but never compared, operation
+# -> pointer (openapi.json AccountBalance).
+[funds.stock_report_only]
+balance = "/acc_balance"
+
+# Futures contract code -> initial margin per contract in TWD, as an
+# integer or a quoted decimal string. calibrate: before preflight, fill in
+# TAIFEX's initial margin published for the run date, for every futures
+# code any futures case trades, resting or filling; preflight fails while
+# one is missing.
+[funds.futures_margin_twd]
+
+# Identifiers to scrub besides the secrets above: what each pointer finds
+# in every account of a recorded accounts response (an array) or in a
+# ca_status response, its last token naming the placeholder category
+# (ACCOUNT_ID_1, USERNAME_1, ...), and the value of each account_id_keys
+# key at any depth of recorded JSON, while broker_id, a public branch
+# code, is kept.
+[scrub]
+account_id_pointers = ["/account_id", "/username", "/person_id"]
+ca_pointers = ["/person_id"]
+account_id_keys = ["subaccount"]
+map_path = "../../results/p1/scrub-map.json"
+selection = "fixtures.toml"
+contract_doc = "../../docs/official-server-contract.md"
+extra_scan_paths = ["fixtures.toml"]
+
+# Order reports and stream timing, from the order_event and tick frames
+# recorded in simulation mode on 2026-09-29. Report pointers are relative
+# to the report an OrderEvent holds at data/<state>, since the state names
+# that key.
+[events]
+order_event_name = "order_event"
+order_states = ["StockOrder", "FuturesOrder"]
+deal_states = ["StockDeal", "FuturesDeal"]
+event_id = "/event_id"
+order_key = "/order/id"
+op_type = "/operation/op_type"
+op_code = "/operation/op_code"
+op_code_success = "00"
+
+# The order's size comes from the order, since a Cancel's
+# status.order_quantity reads 0.
+order_qty = "/order/quantity"
+cancel_qty = "/status/cancel_quantity"
+
+# calibrate: no deal has been recorded yet, so these follow the OpenAPI
+# StockDealEvent and FuturesDealEvent schemas until the first one is.
+deal_key = "/trade_id"
+deal_qty = "/quantity"
+deal_exchange_ts = "/ts"
+
+# Epoch seconds, which date an order for the calendar-date window
+order_exchange_ts = "/status/exchange_ts"
+
+# trades answers with a bare array of Trade objects
+rest_list = ""
+rest_key = "/order/id"
+rest_status = "/status/status"
+rest_filled_qty = "/status/deal_quantity"
+
+# Epoch seconds: the trades response recorded after a cancel in the
+# futures API test carries 1790677936.694802.
+rest_order_ts = "/status/order_ts"
+
+# Tick frames carry the exchange time as Taipei-local date and time
+# strings without a zone (docs/official-server-contract.md section 2).
+exchange_ts_pointers = ["/date", "/time"]
+exchange_ts_format = "%Y-%m-%d %H:%M:%S.%f"
+
+heartbeat_event = "heartbeat"
+
+# calibrate: twice the largest heartbeat interval stats measures on the
+# first live day, and until then twice the 30 s heartbeat measured in
+# docs/official-server-contract.md section 2.
+gap_threshold_s = 60.0
 
 # Multi-client SSE recording (docs/official-server-contract.md sections 1
 # and 2). Stream subscriptions are server-global, so p1rec stream sends

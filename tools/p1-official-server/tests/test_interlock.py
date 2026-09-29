@@ -18,7 +18,6 @@ from p1rec.cli import main
 from p1rec.config import (
     ContractFields,
     Endpoint,
-    EventFields,
     FundsConfig,
     HistoryConfig,
     InterlockConfig,
@@ -43,13 +42,29 @@ def _build_cfg(tmp_path: Path) -> P1Config:
         secret_env={},
         endpoints={_OP: Endpoint(method="GET", path=_INFO_PATH)},
         interlock=InterlockConfig(endpoint_op=_OP, pointer="/simulation"),
-        contracts=ContractFields(),
-        funds=FundsConfig(),
+        contracts=ContractFields(
+            code="", limit_up="", limit_down="", reference="", futures_tick="", etf_codes=()
+        ),
+        funds=FundsConfig(
+            stock_available_op="",
+            stock_available_pointer="",
+            stock_report_only={},
+            futures_available_pointer="",
+            futures_margin_twd={},
+        ),
         stream=StreamConfig(),
         orders=OrdersConfig(),
-        events=EventFields(),
-        history=HistoryConfig(),
-        scrub=ScrubConfig(),
+        events=interlock._UNUSED_EVENT_FIELDS,
+        history=HistoryConfig(queries=(), usage_bytes_pointer="/bytes"),
+        scrub=ScrubConfig(
+            account_id_pointers=(),
+            ca_pointers=(),
+            account_id_keys=(),
+            map_path=Path("."),
+            selection=Path("."),
+            contract_doc=Path("."),
+            extra_scan_paths=(),
+        ),
     )
 
 
