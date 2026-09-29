@@ -705,10 +705,15 @@ git commit -m "Measure history queries and their quota cost"
 
 - 替換對照的來源：`secret_env` 的全部密鑰（含 API key 前 10 字元與對外 IP）、以 `account_id_pointers` 從 `accounts` 回應找出的帳號、以 `ca_pointers` 從 `ca_status` 回應找出的憑證內容。
 - 佔位字串依「類別 + 首次出現順序」決定（例如 `ACCOUNT_1`）；同一原始值永遠得到同一佔位字串；對照表存 `results/p1/scrub-map.json`（不進版控），重跑時沿用。
-- 替換由長到短，嵌在較長字串中的值（例如 clientname 內的 key 前綴）也要替換。
+- 替換依原始值長度由長到短逐一進行（每個原始值的全部寫法一起換），兩個原始值重疊時較長者整段替換；嵌在較長字串中的值（例如 clientname 內的 key 前綴）也要替換；佔位字串不得包含任何原始值。
 - 原始值的每種寫法都要處理：原文、JSON 跳脫後的形式（含 `\uXXXX`），以及 `*_b64` 欄位解碼後的內容；帳戶物件的 `username` 也屬於要替換的值。
-- `p1rec scrub` 依 `fixtures.toml` 從 `results/` 取出指定檔案與行，替換後寫入 `test_data/official/1.7.6/`，並產生 `MANIFEST.toml`（每筆：檔名、來源 run_id、來源檔、行號、錄製時間、商品、對應的 §6 項目）。
-- `p1rec scrub --scan-only` 掃描 `test_data/official/` 與 `docs/official-server-contract.md`：發現任何原始值時列出「檔案:行號:類別」（不印原始值）並回 2，否則回 0。
+- `account_id_keys`（`subaccount`）列出的鍵，其非空值在錄製 JSON 的任何深度都視為帳號：從全部 `rest.jsonl` 的請求與回應找出，匯出時再從選取行補上只出現在該處的值（例如只見於 `order_event` 串流的 subaccount），並存入對照表。
+- 委託物件的 `ca` 是 CA 簽章（base64 DER，可能內含憑證持有人姓名與身分證字號，字串比對看不到），匯出時選取 JSON 中每個非空的 `ca` 值一律換成固定佔位字串 `CA_SIGNATURE`（不進對照表）；掃描時任何非空且非佔位字串的 `ca` 成員（任何跳脫深度）回報為 `CA_SIGNATURE`，`account_id_keys` 的成員同理以其類別回報。
+- `p1rec scrub` 依 `fixtures.toml` 從 `results/` 取出指定檔案與行，替換後寫入 `test_data/official/1.7.6/`，並產生 `MANIFEST.toml`（每筆：檔名、來源 run_id、來源檔、行號、錄製時間、商品、對應的 §6 項目）。輸出先在 `results/` 下暫存並掃描，通過才寫入；有洩漏時回 2，fixture 目錄不變。
+- 錄製時間取自第一個選取行：REST 紀錄的 `recv_ts_ns`（連線錯誤為 `error_ts_ns`）、SSE frame 的 `recv_ts_ns`、log 行開頭的 ISO-8601 時間戳（先去除 ANSI 色碼；錄製器 log 不帶時區，視為錄製主機的本地時間）。取不到時該筆須在 `fixtures.toml` 寫明帶時區的 `recorded_at`，否則 `ConfigError`；取得到時不接受 `recorded_at`。不使用檔案時間（主機曾發生 RTC 重置）。
+- `fixtures.toml` 某筆會公開的欄位（`name`、`run_id`、`source`、`instrument`、`checklist`）含任何原始值時 `ConfigError`，只以序號指出該筆，不印原始值。
+- `p1rec scrub --scan-only` 一律掃描 `fixtures_root` 的上層（`test_data/official/`）與 `contract_doc`（`docs/official-server-contract.md`），`extra_scan_paths` 只能再增加目標（例如 `fixtures.toml`），空清單不會減少掃描範圍；任一目標不存在或與 `results_root` 重疊時回 1。發現任何原始值時列出「檔案:行號:類別」（不印原始值）並回 2，否則回 0。
+- 指標對應的類別（例如 `ACCOUNT_ID`）在對照表與全部錄製中都沒有值時（尚未錄到 `accounts` 回應），掃描無從檢查這些值，匯出與 `--scan-only` 都記 ERROR 並回 1。
 
 **Interface:**
 
@@ -717,8 +722,11 @@ git commit -m "Measure history queries and their quota cost"
 class ScrubConfig:
     account_id_pointers: tuple[str, ...]
     ca_pointers: tuple[str, ...]
+    account_id_keys: tuple[str, ...]  # 值在任何深度都視為帳號的鍵，例如 subaccount
     map_path: Path
-    selection: Path  # fixtures.toml；每筆 name、run_id、source、lines、checklist、instrument
+    selection: Path  # fixtures.toml；每筆 name、run_id、source、lines、checklist、instrument，選填 recorded_at
+    contract_doc: Path  # 與 fixtures_root 的上層一律掃描
+    extra_scan_paths: tuple[Path, ...]  # 只能增加掃描目標
 
 @dataclass(frozen=True)
 class Leak:
@@ -730,7 +738,8 @@ def build_map(secrets: Mapping[str, str], discovered: Mapping[str, Sequence[str]
               existing: Mapping[str, str]) -> dict[str, str]: ...
 def scrub_text(text: str, mapping: Mapping[str, str]) -> str: ...
 def export_fixtures(cfg: P1Config, mapping: Mapping[str, str]) -> list[Path]: ...
-def scan(paths: Iterable[Path], originals: Mapping[str, str]) -> list[Leak]: ...
+def scan(paths: Iterable[Path], originals: Mapping[str, str],
+         keys: Mapping[str, str] | None = None) -> list[Leak]: ...  # keys：鍵名 -> 類別，另加於 ca
 ```
 
 **Tests:**
@@ -741,6 +750,11 @@ def scan(paths: Iterable[Path], originals: Mapping[str, str]) -> list[Leak]: ...
 - `test_scan_reports_without_value` — 有洩漏時回報檔案與行號，輸出不含原始值。
 - `test_scan_clean_returns_zero` — 無洩漏時回 0。
 - `test_manifest_entry_per_fixture` — 匯出兩筆時 `MANIFEST.toml` 有兩筆，欄位齊全。
+- `test_overlapping_originals_replace_longer_whole` — `QQQXYZ` 與 `XYZWWWWWWW` 相鄰重疊時，較長者整段替換。
+- `test_spec_targets_scanned_without_extra_paths` — `extra_scan_paths = []` 時，`test_data/official/` 與契約文件中的洩漏仍被回報。
+- `test_manifest_recorded_at_for_every_kind` — `.json`、`.sse`、`.log`（官方 server log 與錄製器 log）都帶錄製時間。
+- `test_ca_signature_and_subaccount_scrubbed_on_export` — trades 回應與 `order_event` frame 的 `ca` 換成 `CA_SIGNATURE`，只出現在串流的 subaccount 也被替換並存入對照表。
+- `test_scan_reports_ca_signature_and_account_keys` — 不知道原始值時，非佔位字串的 `ca` 與 `subaccount` 成員在各跳脫深度都被回報。
 
 **Verification:**
 

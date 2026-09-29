@@ -40,8 +40,10 @@ MINIMAL_CONFIG_LINES = [
     "[scrub]",
     'account_id_pointers = ["/account_id", "/username", "/person_id"]',
     'ca_pointers = ["/person_id"]',
+    'account_id_keys = ["subaccount"]',
     'map_path = "results/scrub-map.json"',
     'selection = "fixtures.toml"',
+    'contract_doc = "contract.md"',
     "extra_scan_paths = []",
 ]
 

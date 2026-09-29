@@ -11,6 +11,8 @@
 #   lines       1-based line numbers in source, in output order
 #   checklist   measurement checklist items the fixture is evidence for
 #   instrument  instrument code, or "" when none applies
+#   recorded_at optional date-time with a UTC offset, required only when
+#               the first selected line carries no timestamp of its own
 #
 # [[fixture]]
 # name = "B1_tick_fop"

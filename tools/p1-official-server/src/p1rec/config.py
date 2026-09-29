@@ -72,13 +72,19 @@ class ScrubConfig:
     account_id_pointers: tuple[str, ...]
     ca_pointers: tuple[str, ...]
 
+    # Key names whose non-empty values, at any depth of recorded JSON, are
+    # account identifiers too, with the key upper-cased naming the category.
+    account_id_keys: tuple[str, ...]
+
     # Holds the original values themselves, so it must stay under results_root
     map_path: Path
 
     # fixtures.toml; each entry has name, run_id, source, lines, checklist, instrument
     selection: Path
 
-    # Committed files and directories scrub --scan-only checks besides fixtures_root
+    # scrub --scan-only always scans fixtures_root's parent and this
+    # document, and extra_scan_paths can only add to them.
+    contract_doc: Path
     extra_scan_paths: tuple[Path, ...]
 
 
@@ -324,6 +330,17 @@ def _get_scrub_pointers(data: Mapping[str, Any], dotted_key: str) -> tuple[str, 
     return pointers
 
 
+_SCRUB_KEY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+
+
+def _get_scrub_keys(data: Mapping[str, Any], dotted_key: str) -> tuple[str, ...]:
+    keys = _get_str_tuple(data, dotted_key)
+    for index, key in enumerate(keys):
+        if not _SCRUB_KEY_RE.fullmatch(key):
+            raise ConfigError(f"config key {dotted_key}[{index}] must be a plain field name")
+    return keys
+
+
 def _parse_scrub(data: Mapping[str, Any], config_dir: Path) -> ScrubConfig:
     _optional_table(data, "scrub")
     results_root = _get_fs_path(data, "results_root", config_dir)
@@ -333,8 +350,10 @@ def _parse_scrub(data: Mapping[str, Any], config_dir: Path) -> ScrubConfig:
     return ScrubConfig(
         account_id_pointers=_get_scrub_pointers(data, "scrub.account_id_pointers"),
         ca_pointers=_get_scrub_pointers(data, "scrub.ca_pointers"),
+        account_id_keys=_get_scrub_keys(data, "scrub.account_id_keys"),
         map_path=map_path,
         selection=_get_fs_path(data, "scrub.selection", config_dir),
+        contract_doc=_get_fs_path(data, "scrub.contract_doc", config_dir),
         extra_scan_paths=tuple(
             (config_dir / raw).resolve() for raw in _get_str_tuple(data, "scrub.extra_scan_paths")
         ),

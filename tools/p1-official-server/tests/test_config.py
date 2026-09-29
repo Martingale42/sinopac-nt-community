@@ -55,8 +55,10 @@ def test_load_config_success(tmp_path: Path, write_config: WriteConfig) -> None:
     assert cfg.scrub == ScrubConfig(
         account_id_pointers=("/account_id", "/username", "/person_id"),
         ca_pointers=("/person_id",),
+        account_id_keys=("subaccount",),
         map_path=(tmp_path / "results" / "scrub-map.json").resolve(),
         selection=(tmp_path / "fixtures.toml").resolve(),
+        contract_doc=(tmp_path / "contract.md").resolve(),
         extra_scan_paths=(),
     )
 
