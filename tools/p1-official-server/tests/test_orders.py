@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -23,10 +24,13 @@ from p1rec.config import ORDER_MARKETS, ConfigError, P1Config, load_config
 from p1rec.interlock import EXIT_INTERLOCK_ABORT, InterlockError
 from p1rec.orders import (
     EXIT_UNEXPECTED,
+    FUTURES_DAY_SESSION,
     ORDERS_JSON,
+    TWSE_SESSION,
+    TradingSession,
     check_cases,
     exceed_funds_lots,
-    fits_futures_day_session,
+    fits_session,
     json_number,
     render_template,
     run_orders,
@@ -68,15 +72,50 @@ class FakeClock:
         self.elapsed += seconds
 
 
+class InterruptingClock(FakeClock):
+    """A FakeClock that raises KeyboardInterrupt instead of sleeping for one given duration."""
+
+    def __init__(self, interrupt_on_s: float) -> None:
+        super().__init__()
+        self.interrupt_on_s = interrupt_on_s
+
+    def sleep(self, seconds: float) -> None:
+        if seconds == self.interrupt_on_s:
+            raise KeyboardInterrupt
+        super().sleep(seconds)
+
+
+# Given a mutation's path and JSON body, a response to send instead of handling it, or None
+Answer = Callable[[str, dict[str, Any]], httpx.Response | None]
+
+
+def _order_of(body: dict[str, Any]) -> dict[str, Any]:
+    return body.get("stock_order") or body.get("futures_order") or {}
+
+
+def _answer_with(status: int, path: str, *, action: str | None = None) -> Answer:
+    """Answer every mutation to path, or only a place with action, with status."""
+
+    def answer(request_path: str, body: dict[str, Any]) -> httpx.Response | None:
+        if request_path != path or (action is not None and _order_of(body).get("action") != action):
+            return None
+        return httpx.Response(status, json={"code": status, "message": "fake", "details": {}})
+
+    return answer
+
+
 @dataclass
 class OrderServer(FakeServer):
     """FakeServer plus the order endpoints; a marketable order fills at the first trades query after it."""
 
     modes: list[bool] = field(default_factory=list)  # Answers to the next mode queries, then simulation
     reject_place: set[str] = field(default_factory=set)  # Codes whose place gets a 422
-    reject_paths: set[str] = field(default_factory=set)  # Order paths that always get a 422
-    fail_async: set[str] = field(default_factory=set)  # Codes accepted, then shown Failed by trades
-    fills: bool = True
+    answer: Answer | None = None
+    end_as: dict[str, str] = field(default_factory=dict)  # Code -> status its orders end with in trades
+    null_deal_quantity: bool = False
+    fills: bool = True  # Whether market-type buys fill
+    close_fills: bool = True  # Whether sells fill
+    limit_buys_fill: bool = False
     orders: dict[str, dict[str, Any]] = field(default_factory=dict)
     events: list[tuple[str, str]] = field(default_factory=list)
 
@@ -92,8 +131,9 @@ class OrderServer(FakeServer):
         if path in self.refuse:
             raise httpx.ConnectError("[Errno 111] Connection refused", request=request)
         body = json.loads(request.content)
-        if path in self.reject_paths:
-            return httpx.Response(422, json={"code": 422, "message": "rejected", "details": {}})
+        answer = self.answer(path, body) if self.answer is not None else None
+        if answer is not None:
+            return answer
         if path == _TRADES_PATH:
             return httpx.Response(200, json=[self._trade(trade_id, refresh=True) for trade_id in self.orders])
         if path == _PLACE_PATH:
@@ -116,22 +156,16 @@ class OrderServer(FakeServer):
         order = body.get("stock_order") or body.get("futures_order")
         assert isinstance(order, dict)
         trade_id = f"{len(self.orders) + 1:06d}"
-        self.orders[trade_id] = {
-            **order,
-            "contract": contract,
-            "status": "PendingSubmit",
-            "deal_quantity": 0,
-            "fail": contract["code"] in self.fail_async,
-        }
+        self.orders[trade_id] = {**order, "contract": contract, "status": "PendingSubmit", "deal_quantity": 0}
         self.events.append(("place", f"{trade_id} {order['action']}"))
         return httpx.Response(200, json=self._trade(trade_id))
 
     def _trade(self, trade_id: str, *, refresh: bool = False) -> dict[str, object]:
         order = self.orders[trade_id]
         if refresh and order["status"] in ("PendingSubmit", "Submitted"):
-            if order["fail"]:
-                order["status"] = "Failed"
-            elif self.fills and (order["price_type"] != "LMT" or order["action"] == "Sell"):
+            if order["contract"]["code"] in self.end_as:
+                order["status"] = self.end_as[order["contract"]["code"]]
+            elif self._fills(order):
                 order["status"] = "Filled"
                 order["deal_quantity"] = order["quantity"]
                 self.events.append(("filled", trade_id))
@@ -145,9 +179,14 @@ class OrderServer(FakeServer):
                 "id": trade_id,
                 "status": order["status"],
                 "status_code": "00",
-                "deal_quantity": order["deal_quantity"],
+                "deal_quantity": None if self.null_deal_quantity else order["deal_quantity"],
             },
         }
+
+    def _fills(self, order: dict[str, Any]) -> bool:
+        if order["action"] == "Sell":
+            return self.close_fills
+        return self.fills if order["price_type"] != "LMT" else self.limit_buys_fill
 
     def mutations(self) -> list[tuple[str, Any]]:
         return [(r.url.path, json.loads(r.content)) for r in self.requests if r.url.path in _MUTATION_PATHS]
@@ -249,7 +288,7 @@ def test_interlock_before_every_mutation(
     # The first case's order was placed but never cancelled
     (critical,) = _messages(caplog, logging.CRITICAL)
     assert "first" in critical
-    assert "possible residual order or position, check manually" in critical
+    assert "possible residual position, check manually" in critical
 
 
 def test_every_mutation_follows_its_own_mode_query(tmp_path: Path, write_config: WriteConfig) -> None:
@@ -379,8 +418,10 @@ def test_json_number_is_exact() -> None:
     assert json_number(Decimal("45391")) == 45391
     assert isinstance(json_number(Decimal("45391.0")), int)
     assert json.dumps(json_number(Decimal("0.1"))) == "0.1"
-    with pytest.raises(ValueError):
-        json_number(Decimal("0.12345678901234567890"))
+    assert json.dumps(json_number(Decimal("0.0001"))) == "0.0001"
+    for inexact_or_exponent in ("0.12345678901234567890", "0.00001", "12345678901234567.5"):
+        with pytest.raises(ValueError):
+            json_number(Decimal(inexact_or_exponent))
 
 
 # Fills
@@ -436,7 +477,7 @@ def test_order_ending_unfilled_needs_no_close(
     tmp_path: Path, write_config: WriteConfig, caplog: pytest.LogCaptureFixture
 ) -> None:
     # The exchange's rejection shows only in trades, the place having returned 200
-    server = OrderServer(fail_async={"2890"})
+    server = OrderServer(end_as={"2890": "Failed"})
     cases = [_fill_case("rejected_later"), _fill_case("futures_fill", market=Market.FUTURES, code="TMFJ6")]
 
     exit_code, summary = _run(tmp_path, _config(write_config), server, cases)
@@ -444,6 +485,97 @@ def test_order_ending_unfilled_needs_no_close(
     assert exit_code == 0
     assert _outcomes(summary) == ["ended_unfilled", "closed"]
     assert _messages(caplog, logging.CRITICAL) == []
+
+
+@pytest.mark.parametrize(
+    ("status", "null_deal_quantity", "outcome"),
+    [
+        ("Failed", True, "ended_unfilled"),
+        ("Cancelled", False, "ended_unfilled"),
+        ("Cancelled", True, "residual_position"),
+    ],
+)
+def test_ended_order_is_flat_only_on_evidence(
+    tmp_path: Path, write_config: WriteConfig, status: str, null_deal_quantity: bool, outcome: str
+) -> None:
+    server = OrderServer(end_as={"2890": status}, null_deal_quantity=null_deal_quantity)
+
+    _, summary = _run(tmp_path, _config(write_config), server, [_fill_case("fill")])
+
+    assert _outcomes(summary) == [outcome]
+    assert [body["stock_order"]["action"] for _, body in server.mutations()] == ["Buy"]
+
+
+@pytest.mark.parametrize(
+    ("server", "reason"),
+    [
+        (OrderServer(close_fills=False), "close 000002 did not fill (timed_out)"),
+        (OrderServer(answer=_answer_with(422, _PLACE_PATH, action="Sell")), "close rejected"),
+    ],
+    ids=["close_timeout", "close_rejected"],
+)
+def test_close_that_does_not_fill_is_a_residual_position(
+    tmp_path: Path, write_config: WriteConfig, caplog: pytest.LogCaptureFixture, server: OrderServer, reason: str
+) -> None:
+    cfg = _config(write_config, fill_poll_s=2.0, fill_timeout_s=10.0)
+
+    exit_code, summary = _run(tmp_path, cfg, server, [_fill_case("first"), _fill_case("next_fill")])
+
+    assert exit_code == EXIT_CHECK_FAILED
+    assert _outcomes(summary) == ["residual_position", "skipped_after_residual"]
+    assert [body["stock_order"]["action"] for _, body in server.mutations()] == ["Buy", "Sell"]
+    (critical,) = _messages(caplog, logging.CRITICAL)
+    assert "first" in critical
+    assert reason in critical
+    assert "possible residual position, check manually" in critical
+
+
+def test_interlock_abort_before_the_close(
+    tmp_path: Path, write_config: WriteConfig, caplog: pytest.LogCaptureFixture
+) -> None:
+    server = OrderServer(modes=[True, False])
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    with pytest.raises(InterlockError):
+        run_orders(
+            _config(write_config), [_fill_case("fill")], run_dir, None, transport=server.transport(), clock=FakeClock()
+        )
+
+    assert [body["stock_order"]["action"] for _, body in server.mutations()] == ["Buy"]
+    (case,) = json.loads((run_dir / ORDERS_JSON).read_text(encoding="utf-8"))["cases"]
+    assert (case["trade_id"], case["outcome"]) == ("000001", "interlock_abort")
+    (critical,) = _messages(caplog, logging.CRITICAL)
+    assert "fill" in critical
+    assert "possible residual position, check manually" in critical
+
+
+def test_interrupt_during_fill_wait(
+    tmp_path: Path, write_config: WriteConfig, caplog: pytest.LogCaptureFixture
+) -> None:
+    server = OrderServer()
+    cfg = _config(write_config, fill_poll_s=2.0)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    with pytest.raises(KeyboardInterrupt):
+        run_orders(
+            cfg,
+            [_fill_case("fill"), _case("after")],
+            run_dir,
+            None,
+            transport=server.transport(),
+            clock=InterruptingClock(interrupt_on_s=cfg.orders.fill_poll_s),
+        )
+
+    summary = json.loads((run_dir / ORDERS_JSON).read_text(encoding="utf-8"))
+    assert [(case["trade_id"], case["outcome"]) for case in summary["cases"]] == [
+        ("000001", "interrupted"),
+        (None, "not_run"),
+    ]
+    (critical,) = _messages(caplog, logging.CRITICAL)
+    assert "fill" in critical
+    assert "possible residual position, check manually" in critical
 
 
 # Rejections
@@ -473,13 +605,27 @@ def test_rejected_place_skips_remaining_steps(tmp_path: Path, write_config: Writ
 def test_rejected_cancel_of_resting_order_exits_2(
     tmp_path: Path, write_config: WriteConfig, caplog: pytest.LogCaptureFixture
 ) -> None:
-    server = OrderServer(reject_paths={_CANCEL_PATH})
+    server = OrderServer(answer=_answer_with(422, _CANCEL_PATH))
 
     exit_code, summary = _run(tmp_path, _config(write_config), server, [_case("resting")])
 
     assert exit_code == EXIT_CHECK_FAILED
     assert _outcomes(summary) == ["order_may_rest"]
     assert any("may still rest" in message for message in _messages(caplog, logging.ERROR))
+
+
+def test_rejected_cancel_of_filled_order_is_a_residual_position(
+    tmp_path: Path, write_config: WriteConfig, caplog: pytest.LogCaptureFixture
+) -> None:
+    server = OrderServer(limit_buys_fill=True, answer=_answer_with(422, _CANCEL_PATH))
+
+    exit_code, summary = _run(tmp_path, _config(write_config), server, [_case("resting")])
+
+    assert exit_code == EXIT_CHECK_FAILED
+    assert _outcomes(summary) == ["residual_position"]
+    (critical,) = _messages(caplog, logging.CRITICAL)
+    assert "resting" in critical
+    assert "may have filled (filled)" in critical
 
 
 def test_no_response_to_a_mutation_stops_the_run(
@@ -490,9 +636,70 @@ def test_no_response_to_a_mutation_stops_the_run(
     exit_code, summary = _run(tmp_path, _config(write_config), server, [_case("first"), _case("second")])
 
     assert exit_code == EXIT_UNEXPECTED
-    assert _outcomes(summary) == ["no_response", "not_run"]
+    assert _outcomes(summary) == ["unknown_outcome", "not_run"]
     assert summary["cases"][0]["steps"] == [{"step": "place", "op": "place_stock", "status": None, "accepted": False}]
-    assert any("first" in message for message in _messages(caplog, logging.CRITICAL))
+    (critical,) = _messages(caplog, logging.CRITICAL)
+    assert "first" in critical
+    assert "possible residual position, check manually" in critical
+
+
+@pytest.mark.parametrize(
+    ("answer", "cases", "steps"),
+    [
+        (
+            _answer_with(502, _PLACE_PATH),
+            [_case("first"), _case("second")],
+            [("place", "place_stock", 502, False)],
+        ),
+        (
+            _answer_with(503, _CANCEL_PATH),
+            [_case("first"), _case("second")],
+            [("place", "place_stock", 200, True), ("cancel", "cancel", 503, False)],
+        ),
+        (
+            _answer_with(502, _PLACE_PATH, action="Sell"),
+            [_fill_case("first"), _fill_case("second")],
+            [("place", "place_stock", 200, True), ("close", "place_stock", 502, False)],
+        ),
+    ],
+    ids=["place", "cancel", "close"],
+)
+def test_server_error_on_a_mutation_stops_the_run(
+    tmp_path: Path,
+    write_config: WriteConfig,
+    caplog: pytest.LogCaptureFixture,
+    answer: Answer,
+    cases: list[Case],
+    steps: list[tuple[str, str, int, bool]],
+) -> None:
+    # A 5xx may come after the server acted on the request, unlike a 4xx
+    server = OrderServer(answer=answer)
+
+    exit_code, summary = _run(tmp_path, _config(write_config), server, cases)
+
+    assert exit_code == EXIT_UNEXPECTED
+    assert _outcomes(summary) == ["unknown_outcome", "not_run"]
+    assert [tuple(step.values())[:4] for step in summary["cases"][0]["steps"]] == steps
+    assert len(server.mutations()) == len(steps)
+    (critical,) = _messages(caplog, logging.CRITICAL)
+    assert "first" in critical
+    assert "possible residual position, check manually" in critical
+
+
+def test_unparseable_place_body_counts_as_accepted_without_trade_id(
+    tmp_path: Path, write_config: WriteConfig, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Deep enough nesting that parsing raises RecursionError, not ValueError
+    nested = b"[" * 100_000 + b"]" * 100_000
+
+    def answer(path: str, _body: dict[str, Any]) -> httpx.Response | None:
+        return httpx.Response(200, content=nested) if path == _PLACE_PATH else None
+
+    exit_code, summary = _run(tmp_path, _config(write_config), OrderServer(answer=answer), [_case("resting")])
+
+    assert exit_code == EXIT_CHECK_FAILED
+    assert _outcomes(summary) == ["order_may_rest"]
+    assert any("may still rest" in message for message in _messages(caplog, logging.ERROR))
 
 
 def test_unprepared_case_sends_nothing_and_exits_2(tmp_path: Path, write_config: WriteConfig) -> None:
@@ -509,20 +716,24 @@ def test_unprepared_case_sends_nothing_and_exits_2(tmp_path: Path, write_config:
 
 
 @pytest.mark.parametrize(
-    ("clock_time", "budget_s", "fits"),
+    ("session", "clock_time", "budget_s", "fits"),
     [
-        ("08:44:59", 1.0, False),
-        ("08:45:00", 1.0, True),
-        ("13:44:58", 2.0, True),
-        ("13:44:59", 2.0, False),
-        ("13:45:00", 0.0, False),
-        ("20:00:00", 1.0, False),
+        (FUTURES_DAY_SESSION, "08:44:59", 1.0, False),
+        (FUTURES_DAY_SESSION, "08:45:00", 1.0, True),
+        (FUTURES_DAY_SESSION, "13:44:58", 2.0, True),
+        (FUTURES_DAY_SESSION, "13:44:59", 2.0, False),
+        (FUTURES_DAY_SESSION, "13:45:00", 0.0, False),
+        (FUTURES_DAY_SESSION, "20:00:00", 1.0, False),
+        (TWSE_SESSION, "08:59:59", 1.0, False),
+        (TWSE_SESSION, "09:00:00", 1.0, True),
+        (TWSE_SESSION, "13:29:58", 2.0, True),
+        (TWSE_SESSION, "13:29:59", 2.0, False),
     ],
 )
-def test_futures_day_session_bounds(clock_time: str, budget_s: float, fits: bool) -> None:
+def test_session_bounds(session: TradingSession, clock_time: str, budget_s: float, fits: bool) -> None:
     start = datetime.fromisoformat(f"2026-10-01T{clock_time}+08:00")
 
-    assert fits_futures_day_session(start, budget_s) is fits
+    assert fits_session(start, budget_s, session) is fits
 
 
 def test_futures_refused_outside_day_session_sends_nothing(
@@ -553,6 +764,23 @@ def test_futures_fill_case_refused_when_it_could_outlast_the_session(tmp_path: P
     assert exit_code == EXIT_CHECK_FAILED
     assert _outcomes(summary) == ["refused_outside_session"]
     assert server.requests == []
+
+
+def test_stock_fill_case_refused_when_it_could_outlast_the_twse_session(
+    tmp_path: Path, write_config: WriteConfig, caplog: pytest.LogCaptureFixture
+) -> None:
+    # 1 step * 3 s + 2 * (60 s + 2 s) = 127 s from 13:28 ends after 13:30
+    server = OrderServer()
+    clock = FakeClock(datetime(2026, 10, 1, 13, 28, tzinfo=_TAIPEI))
+
+    exit_code, summary = _run(
+        tmp_path, _config(write_config), server, [_fill_case("late_fill"), _case("resting")], clock=clock
+    )
+
+    assert exit_code == EXIT_CHECK_FAILED
+    assert _outcomes(summary) == ["refused_outside_session", "completed"]
+    assert [body["stock_order"]["price_type"] for path, body in server.mutations() if path == _PLACE_PATH] == ["LMT"]
+    assert any("late_fill" in m and "TWSE session" in m for m in _messages(caplog, logging.ERROR))
 
 
 # Case selection
@@ -682,7 +910,7 @@ def _with_orders_line(prefix: str, line: str) -> list[str]:
 def test_template_naming_account_identifier_rejected(write_config: WriteConfig, key: str) -> None:
     line = f"""update_price = '{{"trade_id": "{{trade_id}}", "price": "{{price}}", "x": [{{"{key}": "A1"}}]}}'"""
 
-    with pytest.raises(ConfigError, match=rf"orders\.body_templates\.update_price names account field '{key}'"):
+    with pytest.raises(ConfigError, match=rf"orders\.body_templates\.update_price must not name the account \({key}\)"):
         load_config(write_config(_with_orders_line("update_price = ", line)))
 
 

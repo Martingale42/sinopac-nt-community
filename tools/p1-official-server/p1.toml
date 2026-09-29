@@ -403,10 +403,12 @@ intraday_odd = false
 # API test (docs/official-server-contract.md section 2).
 trade_id_pointer = "/order/id"
 
-# OrderStatusInfo.status and deal_quantity within a Trade, where an order
-# the exchange rejects shows Failed only in a later trades response, the
-# place response having said PendingSubmit (futures API test). calibrate:
-# confirm Filled and the filled quantity on the first order that fills.
+# OrderStatusInfo.status and deal_quantity within a Trade. An order the
+# exchange rejects shows Failed only in a later trades response
+# (docs/official-server-contract.md section 2). A Failed order with a null
+# deal quantity counts as unfilled, a Cancelled one as possibly filled.
+# calibrate: confirm Filled and the deal quantity on the first order that
+# fills, and whether a Cancelled order ever reports a null deal quantity.
 filled_pointer = "/status/status"
 deal_quantity_pointer = "/status/deal_quantity"
 

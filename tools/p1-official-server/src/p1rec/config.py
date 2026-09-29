@@ -15,7 +15,7 @@ import math
 import os
 import re
 import tomllib
-from collections.abc import Iterator, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, time
 from decimal import Decimal, InvalidOperation
@@ -573,9 +573,10 @@ PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 # account identifier has to be written into the public p1.toml.
 _ACCOUNT_BODY_RE = re.compile(r"@account:(S|F|H)")
 
-# Account fields that identify the holder, refused anywhere in a configured
-# request body for the same reason.
-_ACCOUNT_IDENTIFIER_KEYS = frozenset({"account_id", "person_id", "username"})
+# Account fields that identify the holder (openapi.json Account), refused
+# anywhere in a configured request body for the same reason, and redacted
+# from logs once the live accounts response names their values.
+ACCOUNT_IDENTIFIER_KEYS = frozenset({"account_id", "person_id", "username"})
 
 # Every key [stream] and its tables may hold, so a misspelt one, such as
 # [[stream.actions]], fails at load instead of being silently ignored.
@@ -656,7 +657,7 @@ def _reject_unknown_keys(table: Mapping[str, Any], allowed: frozenset[str], wher
 def _identifier_keys(value: object) -> set[str]:
     """Return every account identifier key found at any depth of a parsed JSON value."""
     if isinstance(value, dict):
-        found = set(_ACCOUNT_IDENTIFIER_KEYS & value.keys())
+        found = set(ACCOUNT_IDENTIFIER_KEYS & value.keys())
         for item in value.values():
             found |= _identifier_keys(item)
         return found
@@ -903,9 +904,9 @@ def _parse_orders(data: Mapping[str, Any], config_dir: Path) -> OrdersConfig:
         )
     exchange = {market: _get_str(data, f"orders.exchange.{market}") for market in ORDER_MARKETS}
 
-    step_wait_s = _get_positive_number(data, "orders.step_wait_s")
-    fill_poll_s = _get_positive_number(data, "orders.fill_poll_s")
-    fill_timeout_s = _get_positive_number(data, "orders.fill_timeout_s")
+    step_wait_s = _get_interval(data, "orders.step_wait_s")
+    fill_poll_s = _get_interval(data, "orders.fill_poll_s")
+    fill_timeout_s = _get_interval(data, "orders.fill_timeout_s")
     if fill_timeout_s <= fill_poll_s:
         raise ConfigError("config key orders.fill_timeout_s must be greater than orders.fill_poll_s")
 
@@ -921,22 +922,15 @@ def _parse_orders(data: Mapping[str, Any], config_dir: Path) -> OrdersConfig:
     )
 
 
-def _get_positive_number(data: Mapping[str, Any], dotted_key: str) -> float:
-    value = _get_number(data, dotted_key)
-    if not math.isfinite(value) or value <= 0:
-        raise ConfigError(f"config key {dotted_key} must be a positive number")
-    return value
-
-
 def _get_order_template(
     data: Mapping[str, Any], dotted_key: str, required: frozenset[str], optional: frozenset[str]
 ) -> str:
     """Read one order body template and check its placeholders and keys.
 
     Raises ConfigError naming dotted_key unless the template is a JSON
-    object whose placeholders are all whole string values, include every
-    name in required and nothing outside required and optional, and whose
-    keys, at any depth, never name an account identifier.
+    object whose keys, at any depth, never name an account identifier, and
+    whose placeholders are all whole string values that include every name
+    in required and nothing outside required and optional.
     """
     template = _get_str(data, dotted_key)
     try:
@@ -946,19 +940,13 @@ def _get_order_template(
     if not isinstance(doc, dict):
         raise ConfigError(f"config key {dotted_key} must be a JSON object")
 
-    used: set[str] = set()
-    for key, value in _walk_json(doc):
-        if key in _ACCOUNT_IDENTIFIER_KEYS:
-            raise ConfigError(
-                f"config key {dotted_key} names account field {key!r}; the account comes from the live "
-                'accounts response through "{account}", never from p1.toml'
-            )
-        if not isinstance(value, str) or not PLACEHOLDER_RE.search(value):
-            continue
-        whole = PLACEHOLDER_RE.fullmatch(value)
-        if whole is None:
-            raise ConfigError(f"config key {dotted_key}: placeholder in {value!r} must be the whole string value")
-        used.add(whole.group(1))
+    identifiers = _identifier_keys(doc)
+    if identifiers:
+        raise ConfigError(
+            f"config key {dotted_key} must not name the account ({', '.join(sorted(identifiers))}); it comes "
+            'from the live accounts response through "{account}"'
+        )
+    used = _template_placeholders(doc, dotted_key)
 
     if unknown := sorted(used - required - optional):
         raise ConfigError(f"config key {dotted_key} uses unknown placeholders: {', '.join(unknown)}")
@@ -967,15 +955,28 @@ def _get_order_template(
     return template
 
 
-def _walk_json(node: object, key: str | None = None) -> Iterator[tuple[str | None, object]]:
-    """Yield (key, value) for node and every value nested in it; key is None outside an object."""
-    yield key, node
-    if isinstance(node, dict):
-        for child_key, child in node.items():
-            yield from _walk_json(child, child_key)
-    elif isinstance(node, list):
-        for child in node:
-            yield from _walk_json(child)
+def _template_placeholders(value: object, dotted_key: str) -> set[str]:
+    """Return every placeholder name in a parsed order template.
+
+    Raises ConfigError for a placeholder substitution would not replace,
+    one inside a longer string or in an object key, since it would
+    otherwise reach the server verbatim.
+    """
+    if isinstance(value, dict):
+        found: set[str] = set()
+        for key, item in value.items():
+            if PLACEHOLDER_RE.search(key):
+                raise ConfigError(f"config key {dotted_key}: a placeholder cannot be an object key: {key!r}")
+            found |= _template_placeholders(item, dotted_key)
+        return found
+    if isinstance(value, list):
+        return set().union(*(_template_placeholders(item, dotted_key) for item in value))
+    if isinstance(value, str) and PLACEHOLDER_RE.search(value):
+        whole = PLACEHOLDER_RE.fullmatch(value)
+        if whole is None:
+            raise ConfigError(f"config key {dotted_key}: a placeholder must be the whole string value: {value!r}")
+        return {whole.group(1)}
+    return set()
 
 
 def _parse_events(data: Mapping[str, Any], config_dir: Path) -> EventFields:

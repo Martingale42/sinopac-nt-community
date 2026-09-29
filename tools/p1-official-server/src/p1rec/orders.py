@@ -9,8 +9,10 @@ them. assert_simulation runs immediately before every place, update_price,
 update_qty, cancel and close request, and an InterlockError is never
 handled here: it ends the run before anything further is sent.
 
-A rejected request is recorded, since the rejection is itself corpus, and a
-rejected place skips the rest of its case. A case expected to fill is
+A request the server refuses with a 4xx is recorded, since the rejection
+is itself corpus, and a rejected place skips the rest of its case. Any
+other failure of a mutation, a 5xx or no response at all, leaves its
+effect unknown and stops the run. A case expected to fill is
 polled through trades until it fills, ends unfilled, or fill_timeout_s
 passes, and a fill is closed at once with a marketable limit order the
 other way. Whenever a position may remain, the run logs CRITICAL and starts
@@ -63,11 +65,24 @@ _CLIENT_NAME = "orders"
 # Queried before every case's place, beyond what p1.toml validation covers
 _REQUIRED_OPS = ("accounts", "contracts_stock", "contracts_futures")
 
-# TAIFEX day session in Taipei time, the only session the contract file's
-# price limits hold for (docs/official-server-contract.md section 2).
 _TAIPEI = ZoneInfo("Asia/Taipei")
-_FUTURES_DAY_OPEN = time_of_day(8, 45)
-_FUTURES_DAY_CLOSE = time_of_day(13, 45)
+
+
+@dataclass(frozen=True)
+class TradingSession:
+    """One exchange's regular trading hours, in Asia/Taipei wall-clock time."""
+
+    name: str
+    open: time_of_day
+    close: time_of_day
+
+
+# TAIFEX and TWSE regular trading hours. The contract file's futures price
+# limits hold for the TAIFEX day session only (docs/official-server-contract.md
+# section 2), and a filled stock or odd-lot order must be closed while TWSE
+# still trades.
+FUTURES_DAY_SESSION = TradingSession("TAIFEX day session", time_of_day(8, 45), time_of_day(13, 45))
+TWSE_SESSION = TradingSession("TWSE session", time_of_day(9, 0), time_of_day(13, 30))
 
 # ContractRequest.security_type per market (openapi.json SecurityType)
 _SECURITY_TYPE: Mapping[Market, str] = {Market.STOCK: "STK", Market.ODD: "STK", Market.FUTURES: "FUT"}
@@ -83,7 +98,7 @@ _FUTURES_OCTYPE = "Auto"
 # OrderStatusInfo.status values (openapi.json Status)
 _STATUS_FILLED = "Filled"
 _STATUS_FAILED = "Failed"
-_ENDED_STATUSES = frozenset({"Failed", "Cancelled"})
+_STATUS_CANCELLED = "Cancelled"
 
 # A close is a limit order at the far limit, so it matches any resting
 # counter order, and ROD, so it waits for one rather than expiring.
@@ -105,7 +120,8 @@ class Outcome(StrEnum):
     NOT_PREPARED = "not_prepared"
     SKIPPED_AFTER_RESIDUAL = "skipped_after_residual"
     INTERLOCK_ABORT = "interlock_abort"
-    NO_RESPONSE = "no_response"
+    UNKNOWN_OUTCOME = "unknown_outcome"
+    INTERRUPTED = "interrupted"
 
 
 # Outcomes that make the run exit EXIT_CHECK_FAILED
@@ -153,12 +169,14 @@ def run_orders(
     """Run the selected cases in order and return the run's exit code.
 
     Returns 0 when every case ran, rejections included; EXIT_CHECK_FAILED
-    when a position or a resting order may remain, a futures case was
-    refused outside the day session, or a case could not be prepared; and
-    EXIT_UNEXPECTED when a mutation got no response, which stops the run.
-    Raises ConfigError, before sending anything, if the cases break a rule
-    in check_cases or only names an unknown case, and lets InterlockError
-    propagate once the interlock aborts. orders.json is written whenever a
+    when a position or a resting order may remain, a case was refused
+    outside its trading session, or a case could not be prepared; and
+    EXIT_UNEXPECTED when a mutation's outcome is unknown, after a 5xx or no
+    response, which stops the run. Raises ConfigError, before sending
+    anything, if the cases break a rule in check_cases or only names an
+    unknown case. InterlockError, and anything else that escapes a case,
+    such as KeyboardInterrupt, propagates after a CRITICAL if that case
+    may have left an order behind. orders.json is written whenever a
     request may have been sent. transport and clock are None for live use;
     tests pass an httpx.MockTransport and a fake clock.
     """
@@ -176,24 +194,25 @@ def run_orders(
             for case, record in zip(selected, records, strict=True):
                 try:
                     runner.run_case(case, record)
+                # Each outcome is recorded here, then the exception re-raised
+                # so nothing further is sent.
                 except InterlockError:
-                    # Recorded here, then re-raised so nothing further is sent
                     record.outcome = Outcome.INTERLOCK_ABORT
-                    if record.trade_id is not None:
-                        logger.critical(
-                            "case %s: interlock aborted after order %s was sent; possible residual order or "
-                            "position, check manually",
-                            case.id,
-                            record.trade_id,
-                        )
+                    if record.may_hold_order():
+                        _log_residual(case.id, "the interlock aborted after an order was sent")
                     raise
-                except _NoResponse:
-                    record.outcome = Outcome.NO_RESPONSE
+                except _UnknownOutcome:
+                    record.outcome = Outcome.UNKNOWN_OUTCOME
                     break
+                except BaseException:
+                    record.outcome = Outcome.INTERRUPTED
+                    if record.may_hold_order():
+                        _log_residual(case.id, "the run was interrupted after an order was sent")
+                    raise
     finally:
         _write_summary(run_dir / ORDERS_JSON, records)
 
-    if any(record.outcome is Outcome.NO_RESPONSE for record in records):
+    if any(record.outcome is Outcome.UNKNOWN_OUTCOME for record in records):
         return EXIT_UNEXPECTED
     if any(record.outcome in _FAILED_OUTCOMES for record in records):
         return EXIT_CHECK_FAILED
@@ -280,22 +299,37 @@ def case_budget_s(case: Case, orders: OrdersConfig) -> float:
     return budget
 
 
-def fits_futures_day_session(start: datetime, budget_s: float) -> bool:
-    """Return whether a futures case starting at start ends within the TAIFEX day session.
+def fits_session(start: datetime, budget_s: float, session: TradingSession) -> bool:
+    """Return whether a case starting at start ends within session.
 
     Definition: Whether the interval [start, start + budget_s] lies inside
-                the day session on start's Taipei date.
-    Formula:    open <= start < close and start + budget_s <= close, with
-                open 08:45 and close 13:45 Asia/Taipei.
+                session on start's Taipei date.
+    Formula:    open <= start < close and start + budget_s <= close, in
+                Asia/Taipei wall-clock time.
     Domain:     start is timezone-aware; budget_s >= 0 from case_budget_s.
                 Exchange holidays are not checked, since the exchange itself
                 rejects orders on them.
     Returns:    True when the case may run.
     """
     local = start.astimezone(_TAIPEI)
-    open_at = datetime.combine(local.date(), _FUTURES_DAY_OPEN, tzinfo=_TAIPEI)
-    close_at = datetime.combine(local.date(), _FUTURES_DAY_CLOSE, tzinfo=_TAIPEI)
+    open_at = datetime.combine(local.date(), session.open, tzinfo=_TAIPEI)
+    close_at = datetime.combine(local.date(), session.close, tzinfo=_TAIPEI)
     return open_at <= local < close_at and local + timedelta(seconds=budget_s) <= close_at
+
+
+def session_for(case: Case) -> TradingSession | None:
+    """Return the session case must run within, or None if it may run at any time.
+
+    A futures order is priced from limits that hold in the day session
+    only; a stock or odd-lot case expected to fill must also be closed
+    before TWSE stops trading. A resting stock case is cancelled whenever
+    it runs.
+    """
+    if case.market is Market.FUTURES:
+        return FUTURES_DAY_SESSION
+    if case.expect_fill:
+        return TWSE_SESSION
+    return None
 
 
 def render_template(template: str, values: Mapping[str, object]) -> object:
@@ -319,23 +353,24 @@ def render_template(template: str, values: Mapping[str, object]) -> object:
 
 
 def json_number(value: Decimal) -> int | float:
-    """Return value as the int or float that json.dumps renders as exactly the same number.
+    """Return value as the int or float that json.dumps renders as value's fixed-point form.
 
     httpx serializes request bodies with json.dumps, which cannot take a
-    Decimal, so an integral value becomes an int, and any other a float
-    whose shortest representation is checked to read back as value. Raises
-    ValueError if no float does.
+    Decimal and writes a float as its shortest repr, so an integral value
+    becomes an int, and any other a float only when that repr is exactly
+    format_decimal of value. Raises ValueError for a value whose repr
+    would be inexact or in exponent notation, such as 0.00001 (1e-05).
     """
     if value == value.to_integral_value():
         return int(value)
     as_float = float(value)
-    if Decimal(repr(as_float)) != value:
-        raise ValueError(f"{format_decimal(value)} has no exact JSON number rendering")
+    if repr(as_float) != format_decimal(value.normalize()):
+        raise ValueError(f"{format_decimal(value)} has no exact fixed-point JSON rendering")
     return as_float
 
 
-class _NoResponse(Exception):
-    """Raised when a mutation got no response, so its effect on the server is unknown."""
+class _UnknownOutcome(Exception):
+    """Raised when a mutation got a 5xx or no response, so its effect on the server is unknown."""
 
 
 class _OrderState(StrEnum):
@@ -343,6 +378,7 @@ class _OrderState(StrEnum):
     FILLED = "filled"
     ENDED_UNFILLED = "ended_unfilled"
     ENDED_PARTIAL = "ended_partial"
+    ENDED_UNKNOWN = "ended_unknown"
     TIMED_OUT = "timed_out"
 
 
@@ -350,7 +386,7 @@ class _OrderState(StrEnum):
 class _StepRecord:
     step: str
     op: str
-    status: int | None  # None when the request got no response
+    status: int | None  # None until a response arrives, and for one that never does
     accepted: bool
 
 
@@ -361,6 +397,10 @@ class _CaseRecord:
     close_trade_id: str | None = None
     steps: list[_StepRecord] = field(default_factory=list)
     outcome: Outcome = Outcome.NOT_RUN
+
+    def may_hold_order(self) -> bool:
+        """Return whether an order of this case may exist: one was accepted, or one got no answer."""
+        return self.trade_id is not None or any(step.status is None for step in self.steps)
 
 
 @dataclass(frozen=True)
@@ -390,13 +430,17 @@ class _Runner:
             record.outcome = Outcome.SKIPPED_AFTER_RESIDUAL
             return
 
-        if case.market is Market.FUTURES:
+        session = session_for(case)
+        if session is not None:
             budget_s = case_budget_s(case, self._orders)
-            if not fits_futures_day_session(self._clock.now(), budget_s):
+            if not fits_session(self._clock.now(), budget_s, session):
                 logger.error(
-                    "case %s refused, nothing sent: a futures case must start and end within the TAIFEX day "
-                    "session 08:45-13:45 Asia/Taipei, and this one can take up to %g s",
+                    "case %s refused, nothing sent: it must start and end within the %s, %s-%s Asia/Taipei, "
+                    "and it can take up to %g s",
                     case.id,
+                    session.name,
+                    session.open.strftime("%H:%M"),
+                    session.close.strftime("%H:%M"),
                     budget_s,
                 )
                 record.outcome = Outcome.REFUSED_OUTSIDE_SESSION
@@ -482,17 +526,15 @@ class _Runner:
 
         cancel_rejected = False
         for raw, step in zip(case.steps[1:], later_steps, strict=True):
-            step_values: dict[str, object]
+            op: str = step.verb
+            step_values: dict[str, object] = {"trade_id": trade_id}
             if step.verb == "update_price":
-                price = prepared.step_prices[cast(PriceRef, step.price_ref)]
-                op, step_values = "update_price", {"trade_id": trade_id, "price": price}
+                step_values["price"] = prepared.step_prices[cast(PriceRef, step.price_ref)]
             elif step.verb == "update_qty":
                 # The reduction, as shioaji's update_order takes qty (inferred),
                 # which for a 2-unit order reduced by 1 equals the remaining
                 # quantity too, so the lifecycle case holds under either reading.
-                op, step_values = "update_qty", {"trade_id": trade_id, "quantity": step.reduce_by}
-            else:
-                op, step_values = "cancel", {"trade_id": trade_id}
+                step_values["quantity"] = step.reduce_by
             step_accepted, _ = self._mutate(case, record, raw, op, step_values)
             cancel_rejected = cancel_rejected or (op == "cancel" and not step_accepted)
             self._clock.sleep(self._orders.step_wait_s)
@@ -543,13 +585,15 @@ class _Runner:
         if state is _OrderState.ENDED_UNFILLED:
             logger.warning("case %s: cancel rejected, but order %s had already ended unfilled", case.id, trade_id)
             return Outcome.COMPLETED
-        if state in (_OrderState.FILLED, _OrderState.ENDED_PARTIAL):
-            return self._residual_position(case, f"cancel rejected and order {trade_id} has filled")
+        if state in (_OrderState.FILLED, _OrderState.ENDED_PARTIAL, _OrderState.ENDED_UNKNOWN):
+            return self._residual_position(
+                case, f"cancel rejected and order {trade_id} may have filled ({state.value})"
+            )
         logger.error("case %s: cancel rejected and order %s may still rest, check manually", case.id, trade_id)
         return Outcome.ORDER_MAY_REST
 
     def _residual_position(self, case: Case, reason: str) -> Outcome:
-        logger.critical("case %s: %s; possible residual position, check manually", case.id, reason)
+        _log_residual(case.id, reason)
         self._residual = True
         return Outcome.RESIDUAL_POSITION
 
@@ -585,27 +629,32 @@ class _Runner:
     ) -> tuple[bool, object]:
         """Send one mutation behind the interlock, record it, and return (accepted, parsed body).
 
-        A request is accepted when it gets a 2xx whose status, if the body
-        has one, is not Failed. Raises InterlockError, sending nothing, if
-        the interlock aborts, and _NoResponse if the request got no response.
+        A 4xx is a rejection, and a 2xx is accepted unless the body's status
+        is Failed. Raises InterlockError, sending nothing, if the interlock
+        aborts, and _UnknownOutcome, after a CRITICAL, for any other status
+        or no response, since the server may have acted on the request.
         """
         body = render_template(self._orders.body_templates[op], values)
         assert_simulation(self._client, self._cfg)
+
+        # On record before sending, so a send that never returns still counts as sent
+        sent = _StepRecord(step=step, op=op, status=None, accepted=False)
+        record.steps.append(sent)
         try:
             response = self._client.request(op, self._cfg.endpoints[op], json_body=body)
         except httpx.RequestError as exc:
-            record.steps.append(_StepRecord(step=step, op=op, status=None, accepted=False))
-            logger.critical(
-                "case %s: %s got no response (%s); the order's state is unknown, possible residual order or "
-                "position, check manually",
-                case.id,
-                step,
-                describe_exception(exc),
-            )
-            raise _NoResponse from exc
+            _log_residual(case.id, f"{step} got no response ({describe_exception(exc)}), so its outcome is unknown")
+            raise _UnknownOutcome from exc
+        sent.status = response.status
+
+        # A synchronous refusal is a 4xx (docs/official-server-contract.md
+        # section 2), while a 5xx may come after the server already acted.
+        if not (200 <= response.status < 300 or 400 <= response.status < 500):
+            _log_residual(case.id, f"{step} got HTTP {response.status}, so its outcome is unknown")
+            raise _UnknownOutcome
 
         accepted, parsed = self._judge(response)
-        record.steps.append(_StepRecord(step=step, op=op, status=response.status, accepted=accepted))
+        sent.accepted = accepted
         if accepted:
             logger.info("case %s: %s accepted (HTTP %d)", case.id, step, response.status)
         else:
@@ -613,11 +662,17 @@ class _Runner:
         return accepted, parsed
 
     def _judge(self, response: CapturedResponse) -> tuple[bool, object]:
-        if not 200 <= response.status < 300:
+        """Return whether a 2xx or 4xx response accepted its request, and the parsed body.
+
+        A 2xx whose body cannot be parsed still counts as accepted, since
+        the server took the request, and its body is returned as None.
+        """
+        if response.status >= 400:
             return False, None
         try:
             parsed = json.loads(response.body, parse_float=Decimal)
-        except ValueError:
+        except Exception:
+            # Broad on purpose, since a deeply nested body raises RecursionError
             return True, None
         return _value_or_none(parsed, self._orders.filled_pointer) != _STATUS_FAILED, parsed
 
@@ -641,8 +696,13 @@ class _Runner:
         body = {**account_request(account), "refresh": True}
         try:
             response = self._client.request("trades", self._cfg.endpoints["trades"], json_body=body)
+        except httpx.RequestError as exc:
+            logger.warning("trades poll for order %s got no response: %s", trade_id, describe_exception(exc))
+            return _OrderState.PENDING
+        try:
             trades = parse_json_exact("trades", response)
-        except (BrokerError, httpx.RequestError) as exc:
+        except Exception as exc:
+            # Broad on purpose, since a deeply nested body raises RecursionError
             logger.warning("trades poll for order %s failed: %s", trade_id, describe_exception(exc))
             return _OrderState.PENDING
         if not isinstance(trades, list):
@@ -657,18 +717,27 @@ class _Runner:
 def _order_state(trade: object, orders: OrdersConfig) -> _OrderState:
     """Classify one trades element by its status and filled quantity.
 
-    An order that ended as Failed or Cancelled holds no position only when
-    its filled quantity is known to be zero; an unknown quantity keeps it
-    pending, so an order is never taken as flat on missing evidence.
+    A Failed order was refused, so it holds nothing unless it reports a
+    filled quantity. A Cancelled order holds nothing only when its filled
+    quantity is known to be zero, since it may have filled in part before
+    it was cancelled, so a missing quantity makes it ENDED_UNKNOWN.
     """
     status = _value_or_none(trade, orders.filled_pointer)
     if status == _STATUS_FILLED:
         return _OrderState.FILLED
-    if status in _ENDED_STATUSES:
-        filled = _value_or_none(trade, orders.deal_quantity_pointer)
-        if isinstance(filled, int) and not isinstance(filled, bool):
-            return _OrderState.ENDED_UNFILLED if filled == 0 else _OrderState.ENDED_PARTIAL
-    return _OrderState.PENDING
+    if status not in (_STATUS_FAILED, _STATUS_CANCELLED):
+        return _OrderState.PENDING
+    filled = _value_or_none(trade, orders.deal_quantity_pointer)
+    known = isinstance(filled, int) and not isinstance(filled, bool)
+    if known and filled:
+        return _OrderState.ENDED_PARTIAL
+    if known or (status == _STATUS_FAILED and filled is None):
+        return _OrderState.ENDED_UNFILLED
+    return _OrderState.ENDED_UNKNOWN
+
+
+def _log_residual(case_id: str, reason: str) -> None:
+    logger.critical("case %s: %s; possible residual position, check manually", case_id, reason)
 
 
 def _value_or_none(doc: object, pointer: str) -> object:
