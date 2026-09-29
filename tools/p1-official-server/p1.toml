@@ -138,8 +138,8 @@ op_type = "/operation/op_type"
 op_code = "/operation/op_code"
 op_code_success = "00"
 
-# The order's size comes from the order, since a recorded Cancel reports
-# status.order_quantity as 0.
+# The order's size comes from the order, since a Cancel's
+# status.order_quantity reads 0.
 order_qty = "/order/quantity"
 cancel_qty = "/status/cancel_quantity"
 

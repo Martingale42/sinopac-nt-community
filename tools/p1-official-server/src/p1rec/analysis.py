@@ -41,6 +41,7 @@ EXIT_ANALYSIS_ERROR = 1
 EXIT_CHECK_FAILED = 2
 
 NS_PER_S = 1_000_000_000
+NS_PER_US = 1_000
 
 # How many of the busiest seconds stats lists, enough to show the shape
 # of the opening spike without flooding the report.
@@ -168,14 +169,16 @@ class ReconcileReport:
         }
 
 
-def read_jsonl(path: Path) -> Iterator[tuple[int, dict[str, object]]]:
+def read_jsonl(path: Path, contains: bytes | None = None) -> Iterator[tuple[int, dict[str, object]]]:
     """Yield (line number, record) for each JSON object line of path.
 
     Blank lines are skipped. An unreadable last line is skipped with a
-    WARNING, since appends are not fsynced and the recording host has lost
-    power mid-write before, leaving a torn or NUL-padded tail; any earlier
-    unreadable line raises AnalysisError, since a crash explains only the
-    tail.
+    WARNING, since appends are not fsynced and a power loss mid-write
+    leaves a torn or NUL-padded tail; any earlier unreadable line raises
+    AnalysisError, since a crash explains only the tail. With contains,
+    lines without those bytes are skipped undecoded, which spares a large
+    file's JSON parsing when only a few lines matter, so only lines that
+    contain them are checked.
     """
     bad_line: tuple[int, str] | None = None
     with path.open("rb") as fh:
@@ -185,6 +188,8 @@ def read_jsonl(path: Path) -> Iterator[tuple[int, dict[str, object]]]:
                 continue
             if bad_line is not None:
                 raise AnalysisError(f"{path}:{bad_line[0]}: unreadable line before the end of the file: {bad_line[1]}")
+            if contains is not None and contains not in text:
+                continue
             try:
                 record = json.loads(text)
             except ValueError as exc:
@@ -249,9 +254,9 @@ def _frame_of(record: Mapping[str, object], path: Path, number: int) -> SseFrame
     return parse_frame(raw)
 
 
-def _frames(path: Path) -> Iterator[tuple[int, int, SseFrame]]:
-    """Yield (line number, recv_ts_ns, parsed frame) for each frame line of an SSE file."""
-    for number, record in read_jsonl(path):
+def _frames(path: Path, contains: bytes | None = None) -> Iterator[tuple[int, int, SseFrame]]:
+    """Yield (line number, recv_ts_ns, parsed frame) for each frame line of an SSE file, as read_jsonl filters them."""
+    for number, record in read_jsonl(path, contains):
         if record.get("kind") == "frame":
             yield number, _recv_ts_ns(record, path, number), _frame_of(record, path, number)
 
@@ -390,12 +395,15 @@ def _reports(paths: Sequence[Path], fields: EventFields) -> list[_Report]:
 
     The same event can arrive on more than one of a client's streams, so
     reports are deduplicated by event_id, or by their data text when the
-    event_id is empty, keeping the earliest arrival.
+    event_id is empty, keeping the earliest arrival; an event_id repeated
+    with different content is logged as a WARNING. Only lines containing
+    the event name are decoded.
     """
+    needle = json.dumps(fields.order_event_name, ensure_ascii=False)[1:-1].encode("utf-8")
     by_identity: dict[str, _Report] = {}
     seq = 0
     for path in paths:
-        for number, recv_ts_ns, frame in _frames(path):
+        for number, recv_ts_ns, frame in _frames(path, needle):
             if frame.event != fields.order_event_name:
                 continue
             where = f"{path}:{number}"
@@ -409,6 +417,15 @@ def _reports(paths: Sequence[Path], fields: EventFields) -> list[_Report]:
             )
             seq += 1
             kept = by_identity.get(identity)
+            if kept is not None and kept.body != body:
+                earlier = kept if kept.recv_ts_ns <= recv_ts_ns else report
+                logger.warning(
+                    "%s: event_id %s repeats %s with different content; keeping %s",
+                    where,
+                    identity,
+                    kept.where,
+                    earlier.where,
+                )
             if kept is None or recv_ts_ns < kept.recv_ts_ns:
                 by_identity[identity] = report
     return sorted(by_identity.values(), key=lambda report: (report.recv_ts_ns, report.seq))
@@ -463,9 +480,9 @@ def _apply_report(orders: dict[str, _OrderProgress], report: _Report, fields: Ev
     Domain:     Reports arrive in recv_ts order, deduplicated. A rejected
                 operation changes no quantity, since it may carry the size
                 it asked for rather than the order's. A zero order size is
-                ignored, as a size field can read 0 on a Cancel (the
-                recorded one has status.order_quantity 0), and a missing or
-                null quantity leaves the running value unchanged.
+                ignored, since a Cancel's status.order_quantity reads 0 and
+                no live order has size 0, and a missing or null quantity
+                leaves the running value unchanged.
     Returns:    None; orders is updated in place.
     """
     try:
@@ -587,11 +604,12 @@ def orders_from_sse(
 def orders_from_rest(payload: object, fields: EventFields) -> dict[str, OrderView]:
     """Return the orders in a trades response keyed by order key.
 
-    A null filled quantity counts as zero, since the schema allows null
-    for an order without deals. Raises AnalysisError if the list or any
-    item's key, status or filled quantity cannot be read, since the
-    comparison is only meaningful against the whole list; a repeated key
-    keeps its last item, with a WARNING.
+    A missing or null filled quantity counts as zero, since the schema
+    makes it optional and nullable for an order without deals. Raises
+    AnalysisError if the list or any item's key or status cannot be read,
+    or its filled quantity is not a number, since the comparison is only
+    meaningful against the whole list; a repeated key keeps its last item,
+    with a WARNING.
     """
     try:
         items = resolve_pointer(payload, fields.rest_list)
@@ -605,8 +623,8 @@ def orders_from_rest(payload: object, fields: EventFields) -> dict[str, OrderVie
         try:
             key = _pointer_str(item, fields.rest_key)
             status = normalize_status(_pointer_str(item, fields.rest_status))
-            raw_filled = resolve_pointer(item, fields.rest_filled_qty)
-            filled = Decimal(0) if raw_filled is None else _to_decimal(raw_filled)
+            reported = _optional_quantity(item, fields.rest_filled_qty)
+            filled = reported if reported is not None else Decimal(0)
         except (JsonPointerError, ValueError) as exc:
             raise AnalysisError(f"trades item {index}: {exc}") from exc
         if key in orders:
@@ -683,7 +701,9 @@ def percentile_nearest_rank(sorted_values: Sequence[float], p: float) -> float:
     Definition: The smallest recorded value such that at least p percent
                 of the values are less than or equal to it.
     Formula:    P_p = x_(k), k = max(1, ceil(p / 100 * n)), 1-based over x
-                sorted ascending; computed with exact fractions.
+                sorted ascending; computed with exact fractions of p's
+                decimal text, so 99.9 is 999/10 rather than its binary
+                approximation.
     Domain:     sorted_values is sorted ascending and non-empty; 0 <= p <=
                 100. No interpolation, so small samples round up to an
                 observed value.
@@ -693,7 +713,7 @@ def percentile_nearest_rank(sorted_values: Sequence[float], p: float) -> float:
         raise ValueError("percentile of an empty sequence")
     if not 0 <= p <= 100:
         raise ValueError(f"percentile must be within [0, 100], got {p}")
-    rank = max(1, math.ceil(Fraction(p) * len(sorted_values) / 100))
+    rank = max(1, math.ceil(Fraction(str(p)) * len(sorted_values) / 100))
     return sorted_values[rank - 1]
 
 
@@ -744,7 +764,7 @@ def exchange_ts_ns(doc: object, fields: EventFields) -> int | None:
     Formula:    Without exchange_ts_format: ns = epoch_s_to_ns(v), v the
                 single pointer's value in epoch seconds. With it: t = strptime(" ".join(values),
                 exchange_ts_format) as Asia/Taipei local time, ns =
-                (t - 1970-01-01T00:00Z) in whole microseconds * 1000.
+                (t - 1970-01-01T00:00Z) in whole microseconds * NS_PER_US.
     Domain:     doc is a frame's parsed data. Frames where a pointer does
                 not resolve, such as heartbeats, have no exchange time.
                 The format must not parse a zone. Raises ValueError when
@@ -767,7 +787,7 @@ def exchange_ts_ns(doc: object, fields: EventFields) -> int | None:
     parsed = datetime.strptime(" ".join(texts), fields.exchange_ts_format)
     if parsed.tzinfo is not None:
         raise ValueError("exchange_ts_format must not parse a zone, since exchange time is Taipei local")
-    return (parsed.replace(tzinfo=_exchange_tz()) - _UNIX_EPOCH) // timedelta(microseconds=1) * 1000
+    return (parsed.replace(tzinfo=_exchange_tz()) - _UNIX_EPOCH) // timedelta(microseconds=1) * NS_PER_US
 
 
 @functools.cache
@@ -781,13 +801,13 @@ def _iso_utc(ts_ns: int, timespec: str = "microseconds") -> str:
 
     Definition: The wall-clock time an epoch-nanosecond stamp names.
     Formula:    s, r = divmod(ts_ns, 1e9); UTC datetime of s with
-                microsecond = r // 1000, formatted with timespec.
+                microsecond = r // NS_PER_US, formatted with timespec.
     Domain:     Integer nanoseconds since 1970-01-01T00:00Z; sub-microsecond
                 digits are truncated, not rounded.
     Returns:    For example "2026-10-01T01:00:00.000000Z".
     """
     seconds, remainder = divmod(ts_ns, NS_PER_S)
-    moment = datetime.fromtimestamp(seconds, tz=timezone.utc).replace(microsecond=remainder // 1000)
+    moment = datetime.fromtimestamp(seconds, tz=timezone.utc).replace(microsecond=remainder // NS_PER_US)
     return moment.isoformat(timespec=timespec).replace("+00:00", "Z")
 
 

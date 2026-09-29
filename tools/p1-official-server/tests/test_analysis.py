@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import dataclasses
 import json
 import logging
@@ -62,11 +63,11 @@ def _order(
     exchange_ts: float = T0_S,
     state: str = "FuturesOrder",
 ) -> dict[str, object]:
-    """Return an OrderEvent with the keys of the official server's recorded order reports, values fake.
+    """Return an OrderEvent with the keys of the official server's order reports, values fake.
 
-    order.quantity is the placed size in every recorded report, while a
-    recorded Cancel reports status.order_quantity as 0, so only an
-    accepted New carries the size in status here too.
+    The server reports the placed size in order.quantity, while a Cancel's
+    status.order_quantity reads 0, so here only an accepted New carries
+    the size in status.
     """
     status_order_qty = quantity if op_type == "New" and op_code == "00" else 0
     return {
@@ -537,6 +538,82 @@ def test_event_on_two_streams_counted_once(tmp_path: Path, fields: EventFields) 
     assert views["a"].orders["t1"] == OrderView(key="t1", status="PartFilled", filled_qty=Decimal(1))
 
 
+def test_duplicate_across_streams_keeps_earliest_arrival(tmp_path: Path, fields: EventFields) -> None:
+    update = _order("t1", "UpdateQty", event_id="e2", quantity=1, cancel_qty=1)
+    order_stream = [
+        _frame("a", "order_event", T0_NS, "order_event", _order("t1", event_id="e1")),
+        _frame("a", "order_event", T0_NS + 30 * NS_PER_S, "order_event", update),
+    ]
+    data_stream = [_frame("a", "data", T0_NS + NS_PER_S, "order_event", update)]
+    paths = [_write_sse(tmp_path, "a", "order_event", order_stream), _write_sse(tmp_path, "a", "data", data_stream)]
+
+    reports = analysis._reports(paths, fields)
+
+    assert [(report.identity, report.recv_ts_ns) for report in reports] == [
+        ("e1", T0_NS),
+        ("e2", T0_NS + NS_PER_S),
+    ]
+    assert reports[1].where.startswith(str(paths[1]))
+
+
+def test_repeated_event_id_with_other_content_warns(
+    tmp_path: Path, fields: EventFields, caplog: pytest.LogCaptureFixture
+) -> None:
+    events = [_order("t1", event_id="e1", quantity=2), _order("t1", event_id="e1", quantity=3)]
+    path = _write_sse(tmp_path, "a", "order_event", _order_frames("a", events))
+
+    with caplog.at_level(logging.WARNING, logger="p1rec.analysis"):
+        views = orders_from_sse({"a": [path]}, fields)
+
+    assert "event_id e1 repeats" in caplog.text
+    assert views["a"].orders["t1"] == OrderView(key="t1", status="Submitted", filled_qty=Decimal(0))
+    assert views["a"].event_ids == frozenset({"e1"})
+
+
+def test_update_price_keeps_status_and_size(
+    tmp_path: Path, fields: EventFields, caplog: pytest.LogCaptureFixture
+) -> None:
+    events = [_order("t1", event_id="e1", quantity=2), _order("t1", "UpdatePrice", event_id="e2", quantity=2)]
+    path = _write_sse(tmp_path, "a", "order_event", _order_frames("a", events))
+
+    with caplog.at_level(logging.WARNING, logger="p1rec.analysis"):
+        views = orders_from_sse({"a": [path]}, fields)
+
+    assert views["a"].orders["t1"] == OrderView(key="t1", status="Submitted", filled_qty=Decimal(0))
+    assert views["a"].event_ids == frozenset({"e1", "e2"})
+    assert caplog.text == ""
+
+
+def test_mismatch_in_one_client_only(tmp_path: Path, fields: EventFields) -> None:
+    new = _order("t1", event_id="e1")
+    deals = [_deal("t1", 1, event_id="e2"), _deal("t1", 1, event_id="e3")]
+    paths = {
+        "a": [_write_sse(tmp_path, "a", "order_event", _order_frames("a", [new, deals[0]]))],
+        "b": [_write_sse(tmp_path, "b", "order_event", _order_frames("b", [new, *deals]))],
+    }
+
+    report = reconcile(orders_from_sse(paths, fields), orders_from_rest([_trade("t1", "Filled", 2)], fields))
+
+    assert report.mismatched == [
+        Mismatch(
+            client="a",
+            sse=OrderView(key="t1", status="PartFilled", filled_qty=Decimal(1)),
+            rest=OrderView(key="t1", status="Filled", filled_qty=Decimal(2)),
+        )
+    ]
+    assert report.missing_events_by_client == {"a": ["e3"], "b": []}
+    assert report.only_in_rest == []
+
+
+def test_trades_item_without_deal_quantity_counts_zero(fields: EventFields) -> None:
+    item = _trade("t1", "Submitted", 0)
+    status = item["status"]
+    assert isinstance(status, dict)
+    del status["deal_quantity"]
+
+    assert orders_from_rest([item], fields) == {"t1": OrderView(key="t1", status="Submitted", filled_qty=Decimal(0))}
+
+
 def test_truncated_last_line_skipped_with_warning(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     path = _write_jsonl(tmp_path / "x.jsonl", [{"n": 1}, {"n": 2}])
     with path.open("ab") as fh:
@@ -587,6 +664,27 @@ def _live_transport(simulation: bool, trades: object, seen: list[httpx.Request])
 
 def _live_cfg_lines() -> list[str]:
     return [*MINIMAL_CONFIG_LINES, "", "[endpoints.trades]", 'method = "POST"', 'path = "/api/v1/order/trades"']
+
+
+def test_last_trades_payload_rejects_non_2xx(tmp_path: Path) -> None:
+    rest_log = _write_jsonl(
+        tmp_path / "rest.jsonl",
+        [_trades_record([_trade("old", "Submitted", 0)]), _trades_record({"error": "busy"}, status=503)],
+    )
+
+    with pytest.raises(AnalysisError, match=r"HTTP 503"):
+        analysis.last_trades_payload(rest_log)
+
+
+def test_last_trades_payload_decodes_base64_body(tmp_path: Path, fields: EventFields) -> None:
+    record = _trades_record([])
+    del record["resp_body"]
+    record["resp_body_b64"] = base64.b64encode(json.dumps([_trade("t1", "Submitted", 0)]).encode()).decode()
+    rest_log = _write_jsonl(tmp_path / "rest.jsonl", [record])
+
+    payload = analysis.last_trades_payload(rest_log)
+
+    assert set(orders_from_rest(payload, fields)) == {"t1"}
 
 
 def test_live_reconcile_checks_interlock_then_records_trades(tmp_path: Path, write_config: WriteConfig) -> None:
@@ -663,6 +761,27 @@ def test_heartbeat_intervals_reset_on_reconnect_and_outage_listed(tmp_path: Path
     assert file_stats["gaps"] == []  # 50 s across the outage stays under 60 s
 
 
+def test_outage_ended_by_stop(tmp_path: Path, fields: EventFields) -> None:
+    records = [
+        _lifecycle("a", "data", T0_NS, kind="connected", status=200),
+        _lifecycle("a", "data", T0_NS + 5 * NS_PER_S, kind="disconnected", error="ReadTimeout"),
+        _lifecycle("a", "data", T0_NS + 6 * NS_PER_S, kind="stopped"),
+    ]
+    path = _write_sse(tmp_path, "a", "data", records)
+
+    outages = _file_stats(path, fields)["outages"]
+
+    assert outages == [
+        {
+            "disconnected_at": "2026-10-01T01:00:05.000000Z",
+            "reconnected_at": None,
+            "outage_s": None,
+            "attempts": 1,
+            "first_error": "ReadTimeout",
+        }
+    ]
+
+
 def test_latency_from_taipei_date_and_time(tmp_path: Path, fields: EventFields) -> None:
     # 09:00:00.000 Taipei is T0 (01:00:00Z), and tick i arrives (i + 1) * 5 ms after it
     records = [
@@ -704,6 +823,8 @@ def test_percentile_nearest_rank() -> None:
     assert percentile_nearest_rank(values, 99) == 10.0
     assert percentile_nearest_rank(values, 0) == 1.0
     assert percentile_nearest_rank([7.0], 99) == 7.0
+    # 99.9 as a binary float is slightly above 999/10, which would round the rank up to 1000
+    assert percentile_nearest_rank([float(v) for v in range(1, 1001)], 99.9) == 999.0
     with pytest.raises(ValueError):
         percentile_nearest_rank([], 50)
 
