@@ -1028,7 +1028,7 @@ git commit -m "Calibrate recorder settings from the first live session"
 - 10:30 的排程動作自動執行；之後確認 client a 的 2330 tick 仍持續進來。
 - 11:00：先查 soak 實例的 `usage`；`connections` 加 1（一個官方實例的量測值）超過 5 時，不開 harness 實例，F2 只以文件與模擬模式預設值作答並在契約文件註明。未超過時，以另一份 env（`SJ_HTTP_ADDR=127.0.0.1:18081`、`SJ_AGENT_HARNESS=all`、獨立的 `SJ_HOME_PATH`）啟動第二個官方 server 實例；執行 `p1rec orders --tag harness --only harness_probe --base-url http://127.0.0.1:18081`，錄下回應後停止該實例。soak 實例不受影響。
 - 11:30：經 soak 實例本身執行 `p1rec orders --tag pre-restart --only lifecycle_futures_tmf,<週四確認會成交的一個 market_futures_tmf_* 案例>`，讓重啟前的當日委託同時有未成交與成交兩種（設計 §9.1 第 8 步要求重啟時當日已有委託）；harness 實例的委託走另一個實例，不能代替。
-- 12:00（重啟排在當日主動測試的最後）：停止並重啟 soak 實例，`stream` 會記下斷線與重連；重啟後執行 `p1rec reconcile --sse-run <stream run_id>`。
+- 12:00（重啟排在當日主動測試的最後）：停止並重啟 soak 實例，`stream` 會記下斷線與重連；重啟後執行 `p1rec reconcile --sse-run <stream run_id> --trading-day <當日>`；明確指定日期，重啟後查無委託時才會寫出 `reconcile.json` 並回 2，而不是因推斷不出日期回 1。
 - 對帳回 2 時不重試，保留 `reconcile.json` 作為 go/no-go 證據；`rest_order_count` 為 0 表示重啟後的實例查不到 11:30 的委託，即 GO 準則 5 的反證。
 - 此後到下週二 09:30 不再觸碰 soak 實例。
 
