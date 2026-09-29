@@ -1,0 +1,106 @@
+# Order scenarios for the offline rehearsal in test_rehearsal.py, one case
+# per path through `p1rec orders` and the stub's order book: a resting
+# order and its cancel, an IOC the stub expires before its cancel, the
+# lifecycle, a stock and a futures fill each closed at once, an odd-lot
+# market order the stub refuses, the insufficient-funds rejection and a
+# custom_field round trip.
+
+[[case]]
+id = "far_stock_2890_lmt_rod"
+market = "stock"
+code = "2890"
+action = "Buy"
+price_ref = "far_below"
+price_type = "LMT"
+order_type = "ROD"
+quantity = 1
+expect_fill = false
+steps = ["place", "cancel"]
+
+# Expired by the stub at once, so its cancel is refused and a trades query
+# shows it ended unfilled.
+[[case]]
+id = "far_stock_2890_lmt_ioc"
+market = "stock"
+code = "2890"
+action = "Buy"
+price_ref = "far_below"
+price_type = "LMT"
+order_type = "IOC"
+quantity = 1
+expect_fill = false
+steps = ["place", "cancel"]
+
+[[case]]
+id = "lifecycle_stock_2890"
+market = "stock"
+code = "2890"
+action = "Buy"
+price_ref = "far_below"
+price_type = "LMT"
+order_type = "ROD"
+quantity = 2
+expect_fill = false
+steps = ["place", "update_price:far_below_plus_tick", "update_qty:1", "cancel"]
+
+[[case]]
+id = "market_stock_2890_mkt_ioc"
+market = "stock"
+code = "2890"
+action = "Buy"
+price_ref = "limit_up"
+price_type = "MKT"
+order_type = "IOC"
+quantity = 1
+expect_fill = true
+steps = ["place"]
+
+# The stub, like a server enforcing odd-lot rules, takes odd lots as LMT only
+[[case]]
+id = "market_odd_00981a_mkt_ioc"
+market = "odd"
+code = "00981A"
+action = "Buy"
+price_ref = "limit_up"
+price_type = "MKT"
+order_type = "IOC"
+quantity = 1
+expect_fill = true
+steps = ["place"]
+
+[[case]]
+id = "market_futures_tmf_mkt_ioc"
+market = "futures"
+code = "TMFJ6"
+action = "Buy"
+price_ref = "limit_up"
+price_type = "MKT"
+order_type = "IOC"
+quantity = 1
+expect_fill = true
+steps = ["place"]
+
+[[case]]
+id = "exceed_funds_stock_2890"
+market = "stock"
+code = "2890"
+action = "Buy"
+price_ref = "limit_down"
+price_type = "LMT"
+order_type = "ROD"
+quantity = "exceed_funds"
+expect_fill = false
+steps = ["place", "cancel"]
+
+[[case]]
+id = "custom_field_base62_6"
+market = "stock"
+code = "2890"
+action = "Buy"
+price_ref = "far_below"
+price_type = "LMT"
+order_type = "ROD"
+quantity = 1
+custom_field = "Zz9aA0"
+expect_fill = false
+steps = ["place", "cancel"]
