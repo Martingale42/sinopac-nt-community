@@ -61,6 +61,8 @@ P1 是 spike，只回答一個問題：**NT adapter 能不能直接接官方 ser
 
 **連線額度**：永豐每人上限 5 條連線。官方 server 至少 1 條（token pool 可能不只一條，實際數字由 usage 查詢量出），舊 gateway 修復後 1 條；總數維持不超過 5。
 
+**IP 白名單**：永豐 API key 綁定對外 IP 白名單，對外 IP 改變時登入回 400 `ip: ... not allow`。官方 server 必須在白名單內的主機上執行；`preflight` 登入失敗時先比對目前對外 IP 與白名單，此錯誤類別在 log sweep 中須有明確處置。
+
 **錄製商品**
 
 | 類別 | 商品 |
