@@ -55,7 +55,7 @@ tools/p1-official-server/
     orders.py      # 劇本執行
     analysis.py    # 對帳、client 覆蓋、串流統計
     history.py     # 歷史資料查詢與額度量測
-    scrub.py       # 去識別化、語料匯出、掃描
+    scrub/         # 去識別化、語料匯出、掃描（比對與掃描、對照表、找值、匯出、流程各一個模組）
   tests/  stub_server.py  data/  test_*.py
 test_data/official/1.7.6/   # openapi.json、fixture、MANIFEST.toml
 docs/official-server-contract.md
@@ -697,7 +697,7 @@ git commit -m "Measure history queries and their quota cost"
 ### Task 10：去識別化、語料匯出與洩漏掃描
 
 **Files:**
-- Create: `src/p1rec/scrub.py`、`tools/p1-official-server/fixtures.toml`（空清單）
+- Create: `src/p1rec/scrub/`（套件）、`tools/p1-official-server/fixtures.toml`（空清單）
 - Modify: `src/p1rec/config.py`、`src/p1rec/cli.py`
 - Test: `tests/test_scrub.py`
 

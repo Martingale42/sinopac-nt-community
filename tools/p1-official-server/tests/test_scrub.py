@@ -29,6 +29,8 @@ from p1rec.scrub import (
     UNDECODABLE_B64,
     Leak,
     ScrubError,
+    _export,
+    _matching,
     build_map,
     categories,
     discover,
@@ -628,7 +630,7 @@ def test_export_leak_leaves_fixtures_root_untouched(
     _select(env, SSE_ENTRY)
 
     # A replacer that replaces nothing stands in for any scrubbing gap
-    monkeypatch.setattr(scrub, "_replacer", lambda _mapping: scrub._Replacer({}))
+    monkeypatch.setattr(_export, "cached_replacer", lambda _mapping: _matching.Replacer({}))
 
     exit_code = main(["scrub", "--config", str(env.config_path)])
 
