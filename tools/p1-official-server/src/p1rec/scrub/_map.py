@@ -10,8 +10,8 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from p1rec.redact import redaction_values
-from p1rec.scrub._common import PLACEHOLDER_RE, ScrubError, category_of
-from p1rec.scrub._matching import is_short, original_pattern
+from p1rec.scrub._common import CA_CATEGORY, PLACEHOLDER_RE, ScrubError, category_of
+from p1rec.scrub._matching import MIN_SUBSTRING_MATCH_LEN, is_short, original_pattern
 
 # Secret roles in the order they claim placeholders, identities before
 # credentials, so a credential equal to an identity value, such as a CA
@@ -25,6 +25,13 @@ _DERIVED_CATEGORY = "API_KEY_PREFIX"
 
 # A category never ends in _<digits>, so <CATEGORY>_<n> parses back unambiguously
 _CATEGORY_RE = re.compile(r"(?![A-Z0-9_]*_[0-9]+$)[A-Z][A-Z0-9_]*")
+
+# Values of these categories are never that short, so a short one means a
+# pointer or key selects the wrong field, and matching it only as a token
+# would hide that; a short subaccount or CA password is legitimate.
+_IDENTITY_CATEGORIES = frozenset(
+    {"API_KEY", "API_KEY_PREFIX", "SEC_KEY", "PERSON_ID", "EGRESS_IP", "ACCOUNT_ID", "USERNAME", CA_CATEGORY}
+)
 
 
 def categories(mapping: Mapping[str, str]) -> dict[str, str]:
@@ -42,7 +49,9 @@ def build_map(
     values in order of first appearance. A value already mapped, whether in
     existing or from an earlier source, keeps its placeholder, and each new
     value takes the next free number in its category. Raises ScrubError if
-    a placeholder is shared or would itself contain an original.
+    a placeholder is shared or would itself contain an original, or if an
+    identity value, such as an account ID, is shorter than
+    MIN_SUBSTRING_MATCH_LEN.
     """
     mapping = {original: placeholder for original, placeholder in existing.items() if original}
     next_number: dict[str, int] = {}
@@ -75,6 +84,13 @@ def build_map(
             claim(value, _DERIVED_CATEGORY)
 
     _check_placeholders(mapping)
+    for original, placeholder in mapping.items():
+        category = category_of(placeholder)
+        if category in _IDENTITY_CATEGORIES and is_short(original):
+            raise ScrubError(
+                f"a {category} value is shorter than {MIN_SUBSTRING_MATCH_LEN} UTF-8 bytes, "
+                "so a pointer or key probably selects the wrong field"
+            )
     return mapping
 
 

@@ -707,13 +707,13 @@ git commit -m "Measure history queries and their quota cost"
 - 佔位字串依「類別 + 首次出現順序」決定（例如 `ACCOUNT_1`）；同一原始值永遠得到同一佔位字串；對照表存 `results/p1/scrub-map.json`（不進版控），重跑時沿用。
 - 替換依原始值長度由長到短逐一進行（每個原始值的全部寫法一起換），兩個原始值重疊時較長者整段替換；嵌在較長字串中的值（例如 clientname 內的 key 前綴）也要替換；佔位字串不得包含任何原始值。
 - 原始值的每種寫法都要處理：原文、去除前後空白的形式、JSON 跳脫後的形式（含 `\uXXXX`，任意跳脫深度）、百分比編碼，以及 `*_b64` 欄位解碼後的內容；掃描另外比對 NFKC 正規化後的文字。帳戶物件的 `username` 也屬於要替換的值。
-- 長度（UTF-8 位元組）低於 `MIN_SUBSTRING_MATCH_LEN`（6）的原始值只以完整 token 比對（前後不接英數字或底線），避免 `00`、`2330` 之類的值誤中價格與代碼；各類別低於門檻的數量，以及每筆 fixture 每個類別的替換次數都記 log（不記原始值）。
+- 長度（UTF-8 位元組）低於 `MIN_SUBSTRING_MATCH_LEN`（6）的原始值只以完整 token 比對（前後不接英數字或底線；前面緊接 JSON 跳脫如 `\n`、`\u00e9` 或百分比編碼如 `%3A` 也算邊界），避免 `00`、`2330` 之類的值誤中價格與代碼；這只適用於 `SUBACCOUNT` 與 `CA_PASSWD`，身分類別（API key 與其前綴、`SEC_KEY`、`PERSON_ID`、`EGRESS_IP`、`ACCOUNT_ID`、`USERNAME`、`CA_SIGNATURE`）出現過短的值代表指標或鍵選錯欄位，以 `ScrubError` 依類別回報（不印原始值）。各類別低於門檻的數量，以及每筆 fixture 每個類別的替換次數都記 log（不記原始值）。
 - `account_id_keys`（`subaccount`）列出的鍵，其非空值在錄製 JSON 的任何深度都視為帳號（類別為鍵名大寫，例如 `SUBACCOUNT_1`）。
 - 委託物件的 `ca` 是 CA 簽章（base64 DER，可能內含憑證持有人姓名與身分證字號，字串比對看不到），每個非空值都是原始值，類別 `CA_SIGNATURE`（`CA_SIGNATURE_1`、`CA_SIGNATURE_2`……），與其他類別一樣存入對照表，因此出現在任何形式（例如 log 裡的 Debug 輸出）都會被替換與掃出。
-- `ca` 與 `account_id_keys` 的值從 `results_root` 下全部錄製找出：每個 `rest.jsonl` 與 `sse_*.jsonl` 的請求、回應與 frame（含 `*_b64` 欄位解碼後的內容），不限於選取行。掃描另外以結構檢查：任何非空且非佔位字串的 `ca` 欄位回報為 `CA_SIGNATURE`，`account_id_keys` 的欄位同理以其類別回報，即使該值不在對照表中；欄位形式包含任意跳脫深度的 JSON 成員、Debug 輸出（`key: "value"`、`key: Some("value")`）與 `key=value`。無法解碼的 `*_b64` 欄位回報為 `UNDECODABLE_B64`。
+- `ca` 與 `account_id_keys` 的值從 `results_root` 下全部錄製找出：每個 `rest.jsonl` 與 `sse_*.jsonl` 的請求、回應與 frame（含 `*_b64` 欄位解碼後的內容），不限於選取行。掃描另外以結構檢查：任何非空且非佔位字串的 `ca` 欄位回報為 `CA_SIGNATURE`，`account_id_keys` 的欄位同理以其類別回報，即使該值不在對照表中；欄位形式包含任意跳脫深度的 JSON 成員、Python repr（`'key': 'value'`）、Debug 輸出（`key: "value"`、`key: Some("value")`）與 `key=value`（引號可單可雙，`None`、`null` 視為空值）。無法解碼的 `*_b64` 欄位回報為 `UNDECODABLE_B64`。
 - `account_id_pointers` 的最後一段與 `account_id_keys` 不得以 `_<數字>` 結尾，否則類別與佔位字串的編號無法區分。
 - `p1rec scrub` 依 `fixtures.toml` 從 `results/` 取出指定檔案與行，替換後寫入 `test_data/official/1.7.6/`，並產生 `MANIFEST.toml`（每筆：檔名、來源 run_id、來源檔、行號、錄製時間、商品、對應的 §6 項目）。輸出先在 `results/` 下暫存並掃描，通過才寫入；有洩漏時回 2，fixture 目錄不變。寫入後 fixture 目錄若還有目前選取以外的檔案（`MANIFEST.toml` 與 `openapi.json` 除外），列出後回 2，不刪除任何檔案。
-- `results_root` 必須被 git 忽略（`git check-ignore`），否則匯出與 `--scan-only` 都回 1；`new_run` 以 0700 建立 `results_root` 與每個 run 目錄，既有的 `results_root` 也改為 0700。
+- `results_root` 必須被 git 忽略（`git check-ignore`），且對照表不得已被 git 追蹤（`git ls-files --error-unmatch`），否則匯出與 `--scan-only` 都回 1；log 中的路徑先做 NFKC 正規化再去識別化；`new_run` 以 0700 建立 `results_root` 與每個 run 目錄，既有的 `results_root` 也改為 0700。
 - 錄製時間取自第一個選取行：REST 紀錄的 `recv_ts_ns`（連線錯誤為 `error_ts_ns`）、SSE frame 的 `recv_ts_ns`、log 行開頭的 ISO-8601 時間戳（先去除 ANSI 色碼；錄製器 log 不帶時區，視為錄製主機的本地時間）。取不到時該筆須在 `fixtures.toml` 寫明帶時區的 `recorded_at`，否則 `ConfigError`；取得到時不接受 `recorded_at`。不使用檔案時間（主機曾發生 RTC 重置）。
 - `fixtures.toml` 某筆會公開的欄位（`name`、`run_id`、`source`、`instrument`、`checklist`）含任何原始值時 `ConfigError`，只以序號指出該筆，不印原始值。
 - `p1rec scrub --scan-only` 一律掃描 `fixtures_root` 的上層（`test_data/official/`）與 `contract_doc`（`docs/official-server-contract.md`），`extra_scan_paths` 只能再增加目標（例如 `fixtures.toml`），空清單不會減少掃描範圍；任一目標不存在或與 `results_root` 重疊時回 1。檔名與目錄名也掃描（相對於掃描根目錄，行號記為 0）。發現任何原始值時列出「檔案:行號:類別」（路徑先去識別化，不印原始值）並回 2，否則回 0。

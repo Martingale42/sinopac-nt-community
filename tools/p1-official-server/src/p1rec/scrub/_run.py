@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import unicodedata
 from collections import Counter
 from collections.abc import Iterable, Mapping
 from pathlib import Path
@@ -51,20 +52,35 @@ def _scan_targets(cfg: P1Config) -> list[Path]:
     return targets
 
 
-def _require_git_ignored(path: Path) -> None:
-    """Raise ConfigError unless git ignores path, where the scrub map and staged output are written."""
+def _git(args: list[str], cwd: Path) -> int:
+    """Run a git command quietly in cwd and return its exit status."""
     try:
-        result = subprocess.run(["git", "check-ignore", "-q", str(path)], cwd=path, capture_output=True, check=False)
+        return subprocess.run(["git", *args], cwd=cwd, capture_output=True, check=False).returncode
     except OSError as exc:
-        raise ConfigError(f"cannot run git to check that results_root {path} is ignored ({exc})") from exc
-    if result.returncode != 0:
-        raise ConfigError(f"results_root {path} is not ignored by git, so the scrub map could be committed")
+        raise ConfigError(f"cannot run git in {cwd} ({exc})") from exc
+
+
+def _require_git_ignored(results_root: Path, map_path: Path) -> None:
+    """Raise ConfigError unless git ignores results_root and does not track the scrub map.
+
+    Ignoring results_root keeps new recordings and the map out of commits,
+    but a file already added stays tracked regardless.
+    """
+    if _git(["ls-files", "--error-unmatch", str(map_path)], results_root) == 0:
+        raise ConfigError(f"scrub map {map_path} is tracked by git; remove it from the index before scrubbing")
+    if _git(["check-ignore", "-q", str(results_root)], results_root) != 0:
+        raise ConfigError(f"results_root {results_root} is not ignored by git, so the scrub map could be committed")
 
 
 def _unselected_entries(fixtures_root: Path, written: Iterable[Path]) -> list[Path]:
     """Return what fixtures_root holds besides the files just written and those kept beside the fixtures."""
     produced = {path.name for path in written} | _KEPT_BESIDE_FIXTURES
     return sorted(entry for entry in fixtures_root.iterdir() if entry.name not in produced)
+
+
+def _loggable_path(path: Path, mapping: Mapping[str, str]) -> str:
+    """Return path scrubbed for a log line, NFKC-normalized first so a fullwidth original is replaced too."""
+    return scrub_text(unicodedata.normalize("NFKC", str(path)), mapping)
 
 
 def _log_short_originals(mapping: Mapping[str, str]) -> None:
@@ -91,7 +107,7 @@ def run_scrub(cfg: P1Config, *, scan_only: bool) -> int:
     then pass unscrubbed.
     """
     try:
-        _require_git_ignored(cfg.results_root)
+        _require_git_ignored(cfg.results_root, cfg.scrub.map_path)
         mapping = build_map(read_secrets(cfg), discover(cfg), load_map(cfg.scrub.map_path))
         save_map(cfg.scrub.map_path, mapping)
         _log_short_originals(mapping)
@@ -126,10 +142,10 @@ def run_scrub(cfg: P1Config, *, scan_only: bool) -> int:
         return 1
 
     for leak in leaks:
-        logger.error("%s:%d:%s", scrub_text(str(leak.path), mapping), leak.line, leak.kind)
+        logger.error("%s:%d:%s", _loggable_path(leak.path, mapping), leak.line, leak.kind)
     for entry in unselected:
         logger.error(
-            "%s was not produced by the current selection; nothing was removed", scrub_text(str(entry), mapping)
+            "%s was not produced by the current selection; nothing was removed", _loggable_path(entry, mapping)
         )
     if leaks or unselected:
         logger.error("found %d leaks and %d files the selection did not produce", len(leaks), len(unselected))

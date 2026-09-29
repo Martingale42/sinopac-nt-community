@@ -791,6 +791,36 @@ def test_short_originals_match_only_whole_tokens(tmp_path: Path) -> None:
     fixture.write_text("A10 CA1 x00y 100 23300 12330 SUBACCOUNT_100\nfill for A1\n", encoding="utf-8")
     assert scan([fixture], mapping) == [Leak(path=fixture, line=2, kind="SUBACCOUNT")]
 
+    # An escape or percent-encoding right before a short value ends in a letter or digit, yet still bounds it
+    escaped = {
+        json.dumps("fill\n2330"): '"fill\\nSUBACCOUNT_103"',
+        json.dumps(json.dumps("fill\n2330")): json.dumps(json.dumps("fill\nSUBACCOUNT_103")),
+        json.dumps("fill\t00"): '"fill\\tSUBACCOUNT_102"',
+        json.dumps("é2330"): '"\\u00e9SUBACCOUNT_103"',
+        quote("code:2330"): "code%3ASUBACCOUNT_103",
+        quote("fill A1"): "fill%20SUBACCOUNT_101",
+    }
+    for text, expected in escaped.items():
+        assert scrub_text(text, mapping) == expected
+    fixture.write_text("\n".join(escaped) + "\n", encoding="utf-8")
+    assert [leak.line for leak in scan([fixture], mapping)] == list(range(1, len(escaped) + 1))
+
+    # Inside an escape the same characters are not a token, as 00 in \u4e00
+    assert scrub_text(json.dumps("一"), mapping) == json.dumps("一")
+
+
+def test_short_identity_values_rejected() -> None:
+    for category in ("ACCOUNT_ID", "USERNAME", "CA_SIGNATURE"):
+        with pytest.raises(ScrubError, match=category) as exc_info:
+            build_map(SECRETS, {category: ["00"]}, {})
+        assert "00" not in str(exc_info.value)
+    with pytest.raises(ScrubError, match="PERSON_ID"):
+        build_map({**SECRETS, "person_id": "Z9"}, {}, {})
+
+    # A short CA password or subaccount is legitimate and matches as a whole token only
+    mapping = build_map({**SECRETS, "ca_passwd": "1234"}, {"SUBACCOUNT": ["A1"]}, {})
+    assert scrub_text("pin 1234 at 12345", mapping) == "pin CA_PASSWD_1 at 12345"
+
 
 def test_short_originals_and_replacements_logged(env: _Env, caplog: pytest.LogCaptureFixture) -> None:
     frame = "event:order_event\ndata:" + json.dumps({"order": {"subaccount": "A1"}}) + "\n\n"
@@ -822,6 +852,9 @@ def test_scan_reports_debug_and_key_value_fields(tmp_path: Path) -> None:
                 "2026-10-01T00:00:02Z  INFO order placed subaccount=S9 ca=AAAA",
                 '2026-10-01T00:00:02Z  INFO order placed subaccount="S9"',
                 'Order { ca: "CA_SIGNATURE_1", subaccount: "" } subaccount=SUBACCOUNT_2 ca= ca_status: "x"',
+                f"{{'ca': '{unknown_signature}', 'subaccount': 'S9'}}",
+                f"Order(ca='{unknown_signature}', subaccount='S9')",
+                "{'ca': 'CA_SIGNATURE_1', 'subaccount': ''} Order(ca=None, subaccount='SUBACCOUNT_2')",
             ]
         )
         + "\n",
@@ -836,6 +869,10 @@ def test_scan_reports_debug_and_key_value_fields(tmp_path: Path) -> None:
         Leak(path=fixture, line=3, kind="CA_SIGNATURE"),
         Leak(path=fixture, line=3, kind="SUBACCOUNT"),
         Leak(path=fixture, line=4, kind="SUBACCOUNT"),
+        Leak(path=fixture, line=6, kind="CA_SIGNATURE"),
+        Leak(path=fixture, line=6, kind="SUBACCOUNT"),
+        Leak(path=fixture, line=7, kind="CA_SIGNATURE"),
+        Leak(path=fixture, line=7, kind="SUBACCOUNT"),
     ]
 
 
@@ -843,6 +880,8 @@ def test_scan_reports_names_and_logs_them_scrubbed(env: _Env, capsys: pytest.Cap
     named = env.cfg.fixtures_root / f"C9_{ACCOUNT_S}_clean.json"
     named.parent.mkdir(parents=True)
     named.write_text("{}\n", encoding="utf-8")
+    fullwidth = ACCOUNT_S.translate({ord(digit): ord(digit) + 0xFEE0 for digit in "0123456789"})
+    (env.cfg.fixtures_root / f"C9_{fullwidth}.json").write_text("{}\n", encoding="utf-8")
     directory = env.cfg.fixtures_root.parent / f"v{ACCOUNT_F}"
     directory.mkdir()
 
@@ -851,6 +890,8 @@ def test_scan_reports_names_and_logs_them_scrubbed(env: _Env, capsys: pytest.Cap
     stderr = capsys.readouterr().err
     assert f"{env.cfg.fixtures_root}/C9_ACCOUNT_ID_1_clean.json:0:ACCOUNT_ID" in stderr
     assert f"{env.cfg.fixtures_root.parent}/vACCOUNT_ID_2:0:ACCOUNT_ID" in stderr
+    assert f"{env.cfg.fixtures_root}/C9_ACCOUNT_ID_1.json:0:ACCOUNT_ID" in stderr
+    assert fullwidth not in stderr
     _assert_no_original(stderr.encode("utf-8"))
 
 
@@ -914,6 +955,15 @@ def test_scrub_refuses_results_root_git_does_not_ignore(
     assert main(["scrub", "--scan-only", "--config", str(env.config_path)]) == 1
     assert "is not ignored by git" in capsys.readouterr().err
     assert not env.cfg.scrub.map_path.exists()
+
+
+def test_scrub_refuses_a_tracked_map(env: _Env, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["scrub", "--scan-only", "--config", str(env.config_path)]) == 0
+    subprocess.run(["git", "add", "--force", str(env.cfg.scrub.map_path)], cwd=tmp_path, check=True)
+    capsys.readouterr()
+
+    assert main(["scrub", "--scan-only", "--config", str(env.config_path), "--tag", "tracked"]) == 1
+    assert "is tracked by git" in capsys.readouterr().err
 
 
 def test_save_map_does_not_follow_a_planted_symlink(tmp_path: Path) -> None:

@@ -19,12 +19,18 @@ from p1rec.scrub._common import CA_CATEGORY, CA_KEY, ScrubError, category_of, de
 # they match only as whole tokens rather than anywhere; measured in UTF-8
 # bytes so that a two-character Chinese name, distinctive and written
 # without separators, still matches anywhere.
-# calibrate: check against the lengths of the real values once recorded.
+# calibrate: check against the lengths of the real values once recorded
 MIN_SUBSTRING_MATCH_LEN = 6
 
 # Characters that continue a token around a short original, the ones
 # placeholders are built from, so a short original never matches inside one.
 _TOKEN_CHAR = "[0-9A-Za-z_]"
+
+# A token also starts right after a JSON escape such as \n or \u00e9, or a
+# percent-encoded byte such as %3A, whose last character is part of the
+# escape rather than of the token; fixed-width lookbehinds on the escape's
+# final characters hold at any escape depth.
+_TOKEN_START = rf"(?:(?<!{_TOKEN_CHAR})|(?<=\\[bfnrt])|(?<=\\u[0-9A-Fa-f]{{4}})|(?<=%[0-9A-Fa-f]{{2}}))"
 
 # A body or frame that is not valid UTF-8 is kept in a *_b64 field, and
 # legacy Taiwanese systems encode Chinese text as Big5.
@@ -37,6 +43,9 @@ _ESCAPE_SEQUENCE_RE = re.compile(r'\\(?:u[0-9a-fA-F]{4}|["\\/bfnrt])')
 # A base64 field as a JSON member at any escape depth
 _B64_FIELD_RE = re.compile(r'(?P<esc>\\*)"[A-Za-z0-9_]*_b64(?P=esc)"\s*:\s*(?P=esc)"(?P<value>.*?)(?P=esc)"')
 UNDECODABLE_B64 = "UNDECODABLE_B64"
+
+# How Python and JSON-style logs print a missing value, which holds nothing to leak
+_NULL_WORDS = frozenset({"None", "null"})
 
 # Unicode's Supplementary Private Use Area-A, U+F0000 to U+FFFFD, which
 # recorded text has no reason to contain, lends one marker character to
@@ -96,12 +105,13 @@ def original_pattern(original: str) -> re.Pattern[str]:
     """Return a pattern matching any textual form of original, ignoring case.
 
     A form of a base shorter than MIN_SUBSTRING_MATCH_LEN matches only
-    where no token character adjoins it.
+    where no token character adjoins it, an escape or percent-encoding
+    before it counting as a boundary.
     """
     groups: list[str] = []
     for base in sorted(_plain_bases(original), key=lambda b: (-len(b), b)):
         body = "|".join(_base_alternatives(base))
-        groups.append(f"(?<!{_TOKEN_CHAR})(?:{body})(?!{_TOKEN_CHAR})" if is_short(base) else f"(?:{body})")
+        groups.append(f"{_TOKEN_START}(?:{body})(?!{_TOKEN_CHAR})" if is_short(base) else f"(?:{body})")
     return re.compile("|".join(groups), re.IGNORECASE)
 
 
@@ -205,17 +215,16 @@ def scrub_text(text: str, mapping: Mapping[str, str]) -> str:
 def _field_patterns(keys: Iterable[str]) -> tuple[re.Pattern[str], ...]:
     """Return patterns capturing a string field named in keys as key and value.
 
-    The field may be a JSON member at any escape depth, a Debug-printed
-    field (key: "value" or key: Some("value")), or a key=value pair,
-    quoted or bare.
+    The field may be a JSON member at any escape depth or a Python repr
+    item ('key': 'value'), a Debug-printed field (key: "value" or
+    key: Some("value")), or a key=value pair, quoted either way or bare.
     """
     names = "(?P<key>" + "|".join(map(re.escape, sorted(keys))) + ")"
-    start = f"(?<!{_TOKEN_CHAR})"
-    quoted = r'(?P<esc>\\*)"(?P<value>.*?)(?P=esc)"'
+    quoted = r"""(?P<esc>\\*)(?P<quote>["'])(?P<value>.*?)(?P=esc)(?P=quote)"""
     return (
-        re.compile(r'(?P<esc>\\*)"' + names + r'(?P=esc)"\s*:\s*(?P=esc)"(?P<value>.*?)(?P=esc)"'),
-        re.compile(start + names + r"\s*:\s*(?:Some\()?" + quoted),
-        re.compile(start + names + "=(?:" + quoted + r"|(?P<bare>[^\s\"',;(){}\[\]]*))"),
+        re.compile(r"""(?P<kesc>\\*)(?P<kquote>["'])""" + names + r"(?P=kesc)(?P=kquote)\s*:\s*" + quoted),
+        re.compile(_TOKEN_START + names + r"\s*:\s*(?:Some\()?" + quoted),
+        re.compile(_TOKEN_START + names + "=(?:" + quoted + r"""|(?P<bare>[^\s"',;(){}\[\]]*))"""),
     )
 
 
@@ -252,7 +261,7 @@ class _Detector:
                 for match in pattern.finditer(candidate):
                     fields = match.groupdict()
                     value = fields["value"] if fields["value"] is not None else fields.get("bare")
-                    if value and not is_placeholder(value):
+                    if value and value not in _NULL_WORDS and not is_placeholder(value):
                         found.add(self.key_categories[fields["key"]])
 
         # Decoded content is shorter than its base64 text, so the recursion ends
