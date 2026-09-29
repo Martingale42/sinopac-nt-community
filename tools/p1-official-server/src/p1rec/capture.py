@@ -4,8 +4,10 @@ Every request made through CapturingClient appends one line to its
 rest.jsonl before the caller sees the outcome, so the file stays the
 complete record of what was sent and received even when a later step
 fails. append_jsonl and make_http_client are shared with the SSE recorder,
-so every JSONL file is written the same way and tests have one place to
-inject a mock transport.
+so every JSONL file is written the same way. A test injects a mock
+transport at one of two points: CapturingClient takes a transport=
+keyword argument directly, while SseRecorder calls make_http_client
+itself, so it is mocked by monkeypatching that function instead.
 """
 
 from __future__ import annotations
