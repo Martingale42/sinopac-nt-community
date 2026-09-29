@@ -131,6 +131,34 @@ _SELF_TEST_BASE_URL = "http://p1rec.self-test.invalid"
 # satisfies CapturingClient's required timeout_s parameter.
 _SELF_TEST_TIMEOUT_S = 1.0
 
+# assert_simulation reads only the interlock and endpoints sections, so
+# the self-test's event fields are never consulted and hold empty values.
+_UNUSED_EVENT_FIELDS = EventFields(
+    order_event_name="",
+    order_states=(),
+    deal_states=(),
+    event_id="",
+    order_key="",
+    op_type="",
+    op_code="",
+    order_qty="",
+    cancel_qty="",
+    deal_key="",
+    deal_qty="",
+    op_code_success="",
+    order_exchange_ts="",
+    deal_exchange_ts="",
+    rest_list="",
+    rest_key="",
+    rest_status="",
+    rest_filled_qty="",
+    rest_order_ts="",
+    exchange_ts_pointers=(),
+    exchange_ts_format=None,
+    heartbeat_event="",
+    gap_threshold_s=float("inf"),
+)
+
 
 def _self_test_cfg(interlock: InterlockConfig) -> P1Config:
     """Build the P1Config self_test() checks interlock against.
@@ -173,9 +201,17 @@ def _self_test_cfg(interlock: InterlockConfig) -> P1Config:
             fill_poll_s=0.0,
             fill_timeout_s=0.0,
         ),
-        events=EventFields(),
+        events=_UNUSED_EVENT_FIELDS,
         history=HistoryConfig(queries=(), usage_bytes_pointer="/bytes"),
-        scrub=ScrubConfig(),
+        scrub=ScrubConfig(
+            account_id_pointers=(),
+            ca_pointers=(),
+            account_id_keys=(),
+            map_path=Path("."),
+            selection=Path("."),
+            contract_doc=Path("."),
+            extra_scan_paths=(),
+        ),
     )
 
 

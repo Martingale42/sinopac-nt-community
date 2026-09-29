@@ -22,7 +22,6 @@ from p1rec.cli import main
 from p1rec.config import ORDER_MARKETS, ConfigError, P1Config, load_config
 from p1rec.interlock import EXIT_INTERLOCK_ABORT, InterlockError
 from p1rec.orders import (
-    EXIT_CHECK_FAILED,
     EXIT_UNEXPECTED,
     ORDERS_JSON,
     check_cases,
@@ -32,6 +31,7 @@ from p1rec.orders import (
     render_template,
     run_orders,
 )
+from p1rec.records import EXIT_CHECK_FAILED
 from p1rec.scenarios import Case, Market, PriceRef, load_scenarios
 
 _TOOL_DIR = Path(__file__).resolve().parent.parent

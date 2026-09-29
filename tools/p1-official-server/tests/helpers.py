@@ -11,6 +11,12 @@ from collections.abc import Callable
 from pathlib import Path
 
 from p1rec.config import OrdersConfig
+from p1rec.interlock import _UNUSED_EVENT_FIELDS
+
+# EventFields for a test config whose event pointers are never read, the
+# same placeholders the interlock self-test builds its config with, named
+# once here so test modules need not import a private name.
+UNUSED_EVENT_FIELDS = _UNUSED_EVENT_FIELDS
 
 # Shape of the write_config fixture in conftest.py: an optional list of
 # TOML lines in, the written file's path out.
@@ -153,6 +159,41 @@ MINIMAL_CONFIG_LINES = [
     """update_price = '{"trade_id": "{trade_id}", "price": "{price}"}'""",
     """update_qty = '{"trade_id": "{trade_id}", "quantity": "{quantity}"}'""",
     """cancel = '{"trade_id": "{trade_id}"}'""",
+    "",
+    "[scrub]",
+    'account_id_pointers = ["/account_id", "/username", "/person_id"]',
+    'ca_pointers = ["/person_id"]',
+    'account_id_keys = ["subaccount"]',
+    'map_path = "results/scrub-map.json"',
+    'selection = "fixtures.toml"',
+    'contract_doc = "contract.md"',
+    "extra_scan_paths = []",
+    # [events], shaped like the official server's order events and trades list
+    "",
+    "[events]",
+    'order_event_name = "order_event"',
+    'order_states = ["StockOrder", "FuturesOrder"]',
+    'deal_states = ["StockDeal", "FuturesDeal"]',
+    'event_id = "/event_id"',
+    'order_key = "/order/id"',
+    'op_type = "/operation/op_type"',
+    'op_code = "/operation/op_code"',
+    'op_code_success = "00"',
+    'order_qty = "/order/quantity"',
+    'cancel_qty = "/status/cancel_quantity"',
+    'deal_key = "/trade_id"',
+    'deal_qty = "/quantity"',
+    'rest_list = ""',
+    'rest_key = "/order/id"',
+    'rest_status = "/status/status"',
+    'rest_filled_qty = "/status/deal_quantity"',
+    'rest_order_ts = "/status/order_ts"',
+    'order_exchange_ts = "/status/exchange_ts"',
+    'deal_exchange_ts = "/ts"',
+    'exchange_ts_pointers = ["/date", "/time"]',
+    'exchange_ts_format = "%Y-%m-%d %H:%M:%S.%f"',
+    'heartbeat_event = "heartbeat"',
+    "gap_threshold_s = 60.0",
 ]
 
 SECRET_ENV_VARS = ("SJ_API_KEY", "SJ_SEC_KEY", "SJ_CA_PASSWD", "P1_PERSON_ID", "P1_EGRESS_IP")

@@ -195,6 +195,201 @@ balance = "/acc_balance"
 # one is missing.
 [funds.futures_margin_twd]
 
+# Identifiers to scrub besides the secrets above: what each pointer finds
+# in every account of a recorded accounts response (an array) or in a
+# ca_status response, its last token naming the placeholder category
+# (ACCOUNT_ID_1, USERNAME_1, ...), and the value of each account_id_keys
+# key at any depth of recorded JSON, while broker_id, a public branch
+# code, is kept.
+[scrub]
+account_id_pointers = ["/account_id", "/username", "/person_id"]
+ca_pointers = ["/person_id"]
+account_id_keys = ["subaccount"]
+map_path = "../../results/p1/scrub-map.json"
+selection = "fixtures.toml"
+contract_doc = "../../docs/official-server-contract.md"
+extra_scan_paths = ["fixtures.toml"]
+
+# Order reports and stream timing, from the order_event and tick frames
+# recorded in simulation mode on 2026-09-29. Report pointers are relative
+# to the report an OrderEvent holds at data/<state>, since the state names
+# that key.
+[events]
+order_event_name = "order_event"
+order_states = ["StockOrder", "FuturesOrder"]
+deal_states = ["StockDeal", "FuturesDeal"]
+event_id = "/event_id"
+order_key = "/order/id"
+op_type = "/operation/op_type"
+op_code = "/operation/op_code"
+op_code_success = "00"
+
+# The order's size comes from the order, since a Cancel's
+# status.order_quantity reads 0.
+order_qty = "/order/quantity"
+cancel_qty = "/status/cancel_quantity"
+
+# calibrate: no deal has been recorded yet, so these follow the OpenAPI
+# StockDealEvent and FuturesDealEvent schemas until the first one is.
+deal_key = "/trade_id"
+deal_qty = "/quantity"
+deal_exchange_ts = "/ts"
+
+# Epoch seconds, which date an order for the calendar-date window
+order_exchange_ts = "/status/exchange_ts"
+
+# trades answers with a bare array of Trade objects
+rest_list = ""
+rest_key = "/order/id"
+rest_status = "/status/status"
+rest_filled_qty = "/status/deal_quantity"
+
+# Epoch seconds: the trades response recorded after a cancel in the
+# futures API test carries 1790677936.694802.
+rest_order_ts = "/status/order_ts"
+
+# Tick frames carry the exchange time as Taipei-local date and time
+# strings without a zone (docs/official-server-contract.md section 2).
+exchange_ts_pointers = ["/date", "/time"]
+exchange_ts_format = "%Y-%m-%d %H:%M:%S.%f"
+
+heartbeat_event = "heartbeat"
+
+# calibrate: twice the largest heartbeat interval stats measures on the
+# first live day, and until then twice the 30 s heartbeat measured in
+# docs/official-server-contract.md section 2.
+gap_threshold_s = 60.0
+
+# Multi-client SSE recording (docs/official-server-contract.md sections 1
+# and 2). Stream subscriptions are server-global, so p1rec stream sends
+# them once for all clients, and again only when the leader stream, the
+# first client's first stream below, connects again.
+[stream]
+
+# The server is local, so a retry costs little and a recording gap
+# outlasts the outage by about one retry interval.
+retry_s = 1.0
+
+# Seconds between retry rounds for requests that failed after the first
+# send. It keeps two retry rounds out of the same 5-second window of the
+# account-query limit of 25 requests per 5 seconds noted in the old gateway
+# (shioaji-server, session.py); whether subscriptions count toward any
+# broker rate limit is unknown (design section 6 F). A full resend, about
+# 22 requests now and 26 with the TXO pair, is not bounded by it.
+request_retry_s = 60.0
+
+# Asia/Taipei time of the daily full resend: just after the server's daily
+# maintenance window (docs/official-server-contract.md section 2), which
+# may drop subscriptions without closing any stream. calibrate: how long
+# maintenance actually runs has not been measured; check its end in the
+# server log on the first live days and move this time if it runs later.
+daily_resend_at = "08:35"
+
+# BaseSubscriptionRequest bodies. A string value that is exactly "{name}"
+# is replaced by that field of the subscription, keeping its JSON type.
+subscribe_body = '{"security_type": "{security_type}", "exchange": "{exchange}", "code": "{code}", "quote_type": "{quote_type}", "intraday_odd": "{intraday_odd}"}'
+unsubscribe_body = '{"security_type": "{security_type}", "exchange": "{exchange}", "code": "{code}", "quote_type": "{quote_type}", "intraday_odd": "{intraday_odd}"}'
+
+# Sent in order before the subscriptions. "@account:<type>" stands for the
+# AccountRequest of the account of that type listed by accounts, so no
+# account identifier is written into this public file.
+startup_requests = [
+  ["subscribe_trade", "@account:S"],
+  ["subscribe_trade", "@account:F"],
+]
+
+# Recorded SSE endpoints, in order: the first is the leader stream.
+[stream.streams.data]
+method = "GET"
+path = "/api/v1/stream/data"
+
+[stream.streams.order_event]
+method = "GET"
+path = "/api/v1/stream/data/order_event"
+
+[stream.streams.contract_event]
+method = "GET"
+path = "/api/v1/stream/data/contract_event"
+
+# Recorded instruments; each quote type of each entry is one subscription.
+[[stream.instrument]]
+code = "2330"
+exchange = "TSE"
+security_type = "STK"
+quote_types = ["Tick", "BidAsk"]
+intraday_odd = false
+
+[[stream.instrument]]
+code = "0050"
+exchange = "TSE"
+security_type = "STK"
+quote_types = ["Tick", "BidAsk"]
+intraday_odd = false
+
+[[stream.instrument]]
+code = "2890"
+exchange = "TSE"
+security_type = "STK"
+quote_types = ["Tick", "BidAsk"]
+intraday_odd = false
+
+[[stream.instrument]]
+code = "00981A"
+exchange = "TSE"
+security_type = "STK"
+quote_types = ["Tick", "BidAsk"]
+intraday_odd = false
+
+[[stream.instrument]]
+code = "00631L"
+exchange = "TSE"
+security_type = "STK"
+quote_types = ["Tick", "BidAsk"]
+intraday_odd = false
+
+# Intraday odd lots, recorded in simulation mode as well.
+[[stream.instrument]]
+code = "00981A"
+exchange = "TSE"
+security_type = "STK"
+quote_types = ["Tick", "BidAsk"]
+intraday_odd = true
+
+[[stream.instrument]]
+code = "00631L"
+exchange = "TSE"
+security_type = "STK"
+quote_types = ["Tick", "BidAsk"]
+intraday_odd = true
+
+# calibrate: on the run date, set the near-month TXF, MXF and TMF codes
+# from the server's contract list, and add the near-month at-the-money
+# TXO call and put.
+[[stream.instrument]]
+code = "TXFJ6"
+exchange = "TAIFEX"
+security_type = "FUT"
+quote_types = ["Tick", "BidAsk"]
+intraday_odd = false
+
+[[stream.instrument]]
+code = "MXFJ6"
+exchange = "TAIFEX"
+security_type = "FUT"
+quote_types = ["Tick", "BidAsk"]
+intraday_odd = false
+
+[[stream.instrument]]
+code = "TMFJ6"
+exchange = "TAIFEX"
+security_type = "FUT"
+quote_types = ["Tick", "BidAsk"]
+intraday_odd = false
+
+# Scheduled subscription changes go in [[stream.action]] tables: at (a time
+# with a UTC offset), op (subscribe or unsubscribe), code and quote_type. An
+# action applies to every instrument entry with that code.
+
 # Order scenarios for `p1rec orders` (openapi.json PlaceOrderRequest,
 # UpdatePriceRequest, UpdateQtyRequest, CancelOrderRequest and Trade). In
 # each body template, a string value that is exactly "{name}" is replaced

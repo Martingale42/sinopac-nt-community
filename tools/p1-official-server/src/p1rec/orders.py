@@ -45,16 +45,16 @@ from p1rec.broker import (
     parse_json_exact,
 )
 from p1rec.capture import CapturedResponse, CapturingClient, describe_exception
-from p1rec.config import TEMPLATE_PLACEHOLDER_RE, ConfigError, OrdersConfig, P1Config
+from p1rec.config import PLACEHOLDER_RE, ConfigError, OrdersConfig, P1Config
 from p1rec.interlock import InterlockError, assert_simulation
 from p1rec.jsonpointer import JsonPointerError, resolve_pointer
 from p1rec.prices import SHARES_PER_BOARD_LOT, format_decimal, resolve_price
+from p1rec.records import EXIT_CHECK_FAILED
 from p1rec.scenarios import EXCEED_FUNDS, Action, Case, Market, PriceRef, parse_step
 
 logger = logging.getLogger(__name__)
 
 EXIT_UNEXPECTED = 1
-EXIT_CHECK_FAILED = 2
 
 ORDERS_JSON = "orders.json"
 
@@ -311,7 +311,7 @@ def render_template(template: str, values: Mapping[str, object]) -> object:
             return {key: substitute(child) for key, child in node.items()}
         if isinstance(node, list):
             return [substitute(child) for child in node]
-        if isinstance(node, str) and (match := TEMPLATE_PLACEHOLDER_RE.fullmatch(node)):
+        if isinstance(node, str) and (match := PLACEHOLDER_RE.fullmatch(node)):
             return values[match.group(1)]
         return node
 

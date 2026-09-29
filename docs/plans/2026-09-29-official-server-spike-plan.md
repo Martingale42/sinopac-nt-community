@@ -53,9 +53,11 @@ tools/p1-official-server/
     preflight.py   # 第 0 步
     stream.py      # 多 client 串流與排程動作
     orders.py      # 劇本執行
-    analysis.py    # 對帳、client 覆蓋、串流統計
+    records.py     # 錄製檔（JSONL、SSE frame）讀取與時間換算，對帳與統計共用
+    reconcile.py   # 對帳、client 覆蓋
+    stats.py       # 串流統計
     history.py     # 歷史資料查詢與額度量測
-    scrub.py       # 去識別化、語料匯出、掃描
+    scrub/         # 去識別化、語料匯出、掃描（比對與掃描、對照表、找值、匯出、流程各一個模組）
   tests/  stub_server.py  data/  test_*.py
 test_data/official/1.7.6/   # openapi.json、fixture、MANIFEST.toml
 docs/official-server-contract.md
@@ -470,9 +472,13 @@ git commit -m "Add scenario model, price references and funds preflight"
 
 - `p1rec stream --clients a,b --until <ISO 8601 含時區>`：連鎖檢查後，每個 client 對 `streams` 中的每條端點（例如綜合行情、`order_event`、`contract_event`）各開一個 `SseRecorder`，輸出 `sse_<client>_<串流名>.jsonl`。
 - 訂閱是 server 全域（契約文件 §1）：所有 recorder 首次連上後，依序送出 `startup_requests`（例如每個帳戶的 `subscribe_trade`），再對 `instruments` 的每個商品與報價類型送出一次訂閱（本體由 `subscribe_body` 代入 `{code}`、`{exchange}`、`{security_type}`、`{quote_type}`、`{intraday_odd}`）。
-- 之後只有「主 recorder」（第一個 client 的第一條串流）重連時，才重送 `startup_requests` 與目前有效的全部訂閱，並記一次 INFO；其他 recorder 重連不重送。訂閱失敗記 ERROR 並繼續其餘訂閱。
+- 首次送出時任一 `startup_requests` 失敗或被跳過（含 `accounts` 查詢失敗；`subscribe_trade` 回應的 `subscribe_trade` 不是 `true` 也算失敗），記 ERROR、不送訂閱，並自行停止：所有 client 照常寫出 `stopped` 後以 2 結束，由操作者排除原因後重新啟動。
+- 之後只有「主 recorder」（第一個 client 的第一條串流）重連時，才重送 `startup_requests` 與目前有效的全部訂閱，並記一次 INFO；其他 recorder 重連不重送。每天台北時間 `daily_resend_at`（08:35，契約文件 §2 的每日維護窗口之後；維護可能丟掉訂閱而不中斷任何串流）也做一次同樣的完整重送。`calibrate:` 維護實際持續多久尚未量測，Task 12／14 由 server log 確認維護結束時間，晚於 08:35 就往後調。
+- 首次送出之後，失敗的 `startup_requests` 與訂閱（非 2xx，或 `success`／`subscribe_trade` 不是 `true`）記下來並繼續其餘請求，每 `request_retry_s`（60 秒：確保兩輪重試不會落在舊 gateway `shioaji-server` 記載的帳務查詢上限「每 5 秒 25 次」的同一個 5 秒窗口；訂閱是否計入任何券商速率上限未知，見設計 §6 F；一次完整重送目前約 22 個請求，加上 TXO 一對為 26 個，不受此間隔限制）以及任一 recorder 下一次連上時重試，直到成功。同一個請求第一次失敗記 ERROR，之後連續失敗記 DEBUG 並附次數，恢復時記 INFO。
+- 控制執行緒本身發生未預期的錯誤時記 ERROR 並自行停止，以 2 結束，而不是在沒有重送與重試的情況下繼續錄製。
+- 所有 REST 請求都由一條控制執行緒送出；recorder 在 `on_connected` 只通知它，因此重送再慢也不耽誤主 recorder 讀取 frame。
 - `[[stream.action]]` 在指定時間送出 `subscribe` 或 `unsubscribe` 並更新有效訂閱集合；啟動時已過期的動作記 WARN 並跳過。
-- 到 `--until` 或收到 SIGINT／SIGTERM 時，所有 client 寫出 `stopped` 後以 0 結束。對每個 recorder 的 join 最多等 `sse.SSE_READ_TIMEOUT_S + retry_s`（讀取逾時為三個心跳間隔，契約文件 §2；recorder 的等待從它發出連線起算，stop 可能晚於連線發出，因此加一個 `retry_s` 作為餘裕）；逾時仍未結束的 recorder（例如卡在等待 response header）記 WARN 並列出名稱，結束碼仍為 0。
+- 到 `--until`（啟動時換算成 `time.monotonic()` 的期限，牆上時鐘跳動不影響停止時間）或收到 SIGINT／SIGTERM 時，所有 client 寫出 `stopped` 後以 0 結束。SIGINT／SIGTERM 在所有執行緒中被擋下、由主執行緒以 `sigtimedwait` 接收，因此 `run_stream` 開始擋訊號前若已有其他執行緒在跑，拋出 `RuntimeError`。對每個 recorder 的 join 最多等 `sse.SSE_READ_TIMEOUT_S + retry_s`（讀取逾時為三個心跳間隔，契約文件 §2；recorder 的等待從它發出連線起算，stop 可能晚於連線發出，因此加一個 `retry_s` 作為餘裕）；逾時仍未結束的 recorder（例如卡在等待 response header）記 WARN 並列出名稱，結束碼仍為 0。
 
 **Interface:**
 
@@ -481,9 +487,15 @@ git commit -m "Add scenario model, price references and funds preflight"
 class Instrument:
     code: str
     exchange: str        # TSE | OTC | TAIFEX
-    security_type: str   # STK | FUT | OPT
+    security_type: str   # STK | FUT | OPT | IND
     quote_types: tuple[str, ...]  # Tick | BidAsk | Quote
     intraday_odd: bool
+
+@dataclass(frozen=True)
+class StartupRequest:  # __post_init__ 要求 body 與 account_type 恰有一個有值
+    op: str                    # [endpoints] 中的邏輯操作
+    body: str | None           # JSON 本體；account_type 有值時為 None
+    account_type: str | None   # S | F | H，由 accounts 回應組成該帳戶的 AccountRequest
 
 @dataclass(frozen=True)
 class StreamAction:
@@ -493,19 +505,23 @@ class StreamAction:
     quote_type: str
 
 @dataclass(frozen=True)
-class StreamConfig:
-    streams: dict[str, Endpoint]        # 串流名 -> SSE 端點
-    subscribe: Endpoint
-    unsubscribe: Endpoint
-    subscribe_body: str                 # JSON 範本
-    unsubscribe_body: str
-    startup_requests: tuple[tuple[str, str], ...]  # (邏輯操作, JSON 本體)
-    retry_s: float
-    instruments: tuple[Instrument, ...]
-    actions: tuple[StreamAction, ...]
+class StreamConfig:  # 預設值代表 p1.toml 沒有 [stream]；有 [stream] 時 subscribe 與 unsubscribe 必有值
+    streams: dict[str, Endpoint] = field(default_factory=dict)  # 串流名 -> SSE 端點
+    subscribe: Endpoint | None = None   # 取自 endpoints.stream_subscribe
+    unsubscribe: Endpoint | None = None  # 取自 endpoints.stream_unsubscribe
+    subscribe_body: str = ""            # JSON 範本
+    unsubscribe_body: str = ""
+    startup_requests: tuple[StartupRequest, ...] = ()
+    retry_s: float = 0.0
+    request_retry_s: float = 0.0         # 首次送出後失敗請求的重試間隔
+    daily_resend_at: time | None = None  # 台北時間，每日完整重送
+    instruments: tuple[Instrument, ...] = ()
+    actions: tuple[StreamAction, ...] = ()
 
 def run_stream(cfg: P1Config, clients: list[str], until: datetime, run_dir: Path) -> int: ...
 ```
+
+`p1.toml` 中 `startup_requests` 寫成 `[邏輯操作, 本體]`，載入時解析成 `StartupRequest`；本體寫成 `"@account:S"`（`F`、`H` 同理）時，代表以 `accounts` 查到的該類型帳戶組成的 `AccountRequest`（`account_type`、`broker_id`、`account_id`、`person_id`）；repo 是公開的，帳號因此不寫進 `p1.toml`：任何設定的請求本體在任何深度出現 `account_id`、`person_id`、`username` 都在載入時拒絕，`[stream]` 及其子表的未知鍵也一樣。帳戶清單查到後沿用；查詢失敗不快取，同一輪送出只查一次。
 
 **Tests:**
 
@@ -625,37 +641,50 @@ git commit -m "Run simulated order scenarios behind the interlock"
 ### Task 8：SSE 分析：對帳、client 覆蓋與串流統計
 
 **Files:**
-- Create: `src/p1rec/analysis.py`
-- Modify: `src/p1rec/config.py`、`src/p1rec/cli.py`
-- Test: `tests/test_analysis.py`
+- Create: `src/p1rec/records.py`（JSONL 與 SSE 檔讀取、數值與時間換算、結束碼）、`src/p1rec/reconcile.py`、`src/p1rec/stats.py`
+- Modify: `src/p1rec/config.py`、`src/p1rec/cli.py`、`p1.toml`（`[events]`）
+- Test: `tests/test_analysis.py`（涵蓋三個模組）
 
 **Behaviour:**
 
-- `p1rec reconcile --sse-run <run_id> [--rest-run <run_id>]`：未給 `--rest-run` 時，連鎖檢查後即時查 `trades` 並落地；給了則用該 run 最後一次 `trades` 回應。
-- 依 `EventFields` 從各 client 的 SSE 檔挑出委託與成交事件，整理為「委託識別 → 最終狀態、累計成交量」。
-- `reconcile.json`：`only_in_rest`、`only_in_sse`、`mismatched`、`per_client_keys`（各 client 看到的委託識別，設計 §6 D）。前三者皆空時回 0，否則回 2。
-- `p1rec stats --sse-run <run_id>` 寫 `stats.json`：每個 client 各事件名稱的數量；每秒 frame 數最高的前 10 秒與其時間；心跳事件（名稱為 `heartbeat_event`）間隔的最小、中位數、最大值；相鄰 frame 間隔超過 `gap_threshold_s` 的清單；`exchange_ts_pointer` 有設定時，收到時間減交易所時間的 p50、p99、最大值。
+- `p1rec reconcile --sse-run <run_id> [--rest-run <run_id>] [--trading-day YYYY-MM-DD]`：run_id 為 `results_root` 下的目錄名，含路徑分隔字元時拒絕。未給 `--rest-run` 時，連鎖檢查後以 `{"refresh": true}`（`TradesRequest` 的帳戶欄位皆可省略，端點回傳全部委託）即時查 `trades`，記在本次 run 的 `rest.jsonl`；給了則用該 run 最後一次 `trades` 回應（非 2xx 時失敗，不退回較舊的回應）。先取 REST 再讀 SSE 檔。
+- 日期窗口（兩側皆套用）：`--trading-day` 是 Asia/Taipei 的日曆日期，不是期交所的交易日（夜盤委託屬於下一個期交所交易日，但依下單當下的日曆日期計）。SSE 側只有第一筆報告的交易所時間（委託取 `order_exchange_ts`、成交取 `deal_exchange_ts`，epoch 秒；不大於 0 或沒有時視為沒有；沒有任何報告帶交易所時間時以第一筆的收到時間代替並記 WARN）落在該日期的委託參與對帳，其餘依 client 計入 `excluded_other_days`；REST 側以同樣的台北日期檢查 `rest_order_ts`，其他日期的委託計入 `rest_excluded_other_days`，沒有委託時間（缺少、null 或不大於 0）的委託保留並記 WARN。兩側皆不默默丟棄。時間落在夜盤（台北 15:00 至次日 05:00）的委託記 WARN。未給 `--trading-day` 時取 REST 快照各委託 `rest_order_ts`（不大於 0 視為沒有）的台北日期；沒有任何時間或跨越兩個以上日期時回 1，要求指定。
+- 依 `EventFields` 從各 client 的全部 SSE 檔（`order_event` 串流與可能也帶委託事件的綜合串流）挑出事件名稱為 `order_event_name` 的 frame；報告在 `data/<state>`（OpenAPI `OrderEvent`），`state` 屬 `order_states` 為委託、屬 `deal_states` 為成交。每筆報告的識別為 `event_id`（空字串時為 data 原文的 SHA-256）；同一 client 內以識別去重並保留最早收到的一筆（同一 `event_id` 內容不同時記 WARN），依收到時間整理為「委託識別 → 最終狀態、累計成交量」，並記下該 client 看到的報告識別。只解碼含事件名稱的行。
+- 官方委託事件不帶狀態字串，SSE 端狀態由 `derive_status` 推得，依序取第一條成立者：New 的 `op_code` 不等於 `op_code_success` → Failed；沒看到成功的 New 或沒有委託數量 → Unknown（缺了 New，其餘歷史不完整）；成交量大於 0 且不小於委託數量 → Filled；有成功的 Cancel 且 `cancel_quantity` 不小於「委託數量 − 成交量」→ Cancelled；成交量大於 0 → PartFilled；其餘 → Submitted。委託數量取自 `order_qty`（`/order/quantity`，三筆真實事件皆為下單數量；真實 Cancel 事件的 `status.order_quantity` 為 0，不能用），只採成功操作回報的最新非零值（UpdateQty 可能調降）；`cancel_quantity` 取成功操作回報的最大值；被拒的操作不更新任何數量（可能帶的是請求的數量）。UpdatePrice、UpdateQty 只更新數量，其他 op_type 記 WARN。`calibrate:` 以下為尚未錄到事件的假設，錯了會以不一致呈現：`cancel_quantity` 為委託歷次操作的累計而非單次；成功的 UpdateQty 之後 `order.quantity` 為調降後的數量；IOC／FOK 逾時以成功的 Cancel 送達；Reject 操作不改變狀態。REST 狀態去掉 `Status.` 前綴後比較；`deal_quantity` 缺少或為 null 時視為 0。
+- `reconcile.json`：`only_in_rest`（至少一個 client 沒看到的 REST 委託；GO 準則 4 與設計 §6 D1 量的是每個 client 都收齊，任一 client 缺一筆即列入）、`only_in_sse`（任一 client 看到而 REST 沒有的委託）、`mismatched`（`Mismatch(client, sse, rest)`：每個看到該委託而狀態或成交量與 REST 不同的 client 各一筆）、`missing_by_client`（各 client 缺的 REST 委託）、`missing_events_by_client`（任一 client 看到而此 client 沒看到的報告識別；只看到 Cancel 而缺 New 的 client 由此失敗）、`per_client_keys`（各 client 看到的委託識別，設計 §6 D）、`excluded_other_days`（各 client 因不在該日期而排除的委託數）、`rest_excluded_other_days`（REST 因不在該日期而排除的委託數），另記 `sse_run`、`rest_run`、`trading_day`。前三者與 `missing_events_by_client` 皆空時回 0，否則回 2；輸入無法分析時回 1。
+- `p1rec stats --sse-run <run_id>` 只讀錄製檔、不連 server，因此不需要密鑰環境變數。寫 `stats.json`：每個 client 各事件名稱的數量；以下皆逐檔（一個 recorder 一檔）計算，同一 client 的綜合串流與 `order_event` 串流才不會重複計數：每秒 frame 數最高的前 10 秒（以 `recv_ts_ns` 取整秒，UTC ISO 時間）；心跳事件（名稱為 `heartbeat_event`）在同一連線內的間隔最小、中位數（`statistics.median`）、最大值；相鄰 frame 間隔超過 `gap_threshold_s` 的清單；斷線到下一次 200 連上的區間（含嘗試次數與第一個錯誤）；`exchange_ts_pointers` 有設定時，收到時間減交易所時間的 p50、p99（nearest-rank）、最大值與無法解析的筆數。
+- JSONL 最後一行無法解析時記 WARN 並略過（寫入未 fsync，斷電會留下截斷的末行）；中間行無法解析時失敗。
 
 **Interface:**
 
 ```python
 @dataclass(frozen=True)
-class EventFields:  # 事件名稱與 JSON 指標，取自 Task 12 的真實事件
-    order_event_names: tuple[str, ...]
-    deal_event_names: tuple[str, ...]
+class EventFields:  # 事件名稱與 JSON 指標，取自 2026-09-29 錄到的真實事件
+    order_event_name: str             # 官方 1.7.6 為 "order_event"
+    order_states: tuple[str, ...]     # StockOrder、FuturesOrder
+    deal_states: tuple[str, ...]      # StockDeal、FuturesDeal
+    event_id: str                     # 此行起八個指標相對於 data/<state> 的報告
     order_key: str
-    order_status: str
+    op_type: str
+    op_code: str
+    order_qty: str                    # /order/quantity；Cancel 事件的 status.order_quantity 為 0
+    cancel_qty: str
     deal_key: str
     deal_qty: str
-    rest_list: str
+    op_code_success: str              # 官方 1.7.6 為 "00"
+    order_exchange_ts: str            # 委託報告的交易所時間（epoch 秒），/status/exchange_ts
+    deal_exchange_ts: str             # 成交報告的交易所時間（epoch 秒），/ts
+    rest_list: str                    # "" 表示回應本身即清單
     rest_key: str
     rest_status: str
     rest_filled_qty: str
-    exchange_ts_pointer: str | None
-    exchange_ts_format: str | None   # strptime 格式；時區固定為 Asia/Taipei
-    heartbeat_event: str             # 官方 1.7.6 為 "heartbeat"
+    rest_order_ts: str                # 各委託的下單時間（epoch 秒），/status/order_ts
+    exchange_ts_pointers: tuple[str, ...]  # 空則不算延遲
+    exchange_ts_format: str | None    # None：單一指標為 epoch 秒數值；否則各字串以空白串接後以 strptime 解析，時區固定為 Asia/Taipei
+    heartbeat_event: str              # 官方 1.7.6 為 "heartbeat"
     gap_threshold_s: float
 
+# p1rec.reconcile
 @dataclass(frozen=True)
 class OrderView:
     key: str
@@ -663,16 +692,51 @@ class OrderView:
     filled_qty: Decimal
 
 @dataclass(frozen=True)
-class ReconcileReport:
-    only_in_rest: list[str]
-    only_in_sse: list[str]
-    mismatched: list[tuple[OrderView, OrderView]]
-    per_client_keys: dict[str, list[str]]
+class Mismatch:
+    client: str
+    sse: OrderView
+    rest: OrderView
 
-def orders_from_sse(paths: Mapping[str, Path], fields: EventFields) -> dict[str, dict[str, OrderView]]: ...
-def orders_from_rest(payload: object, fields: EventFields) -> dict[str, OrderView]: ...
-def reconcile(sse: Mapping[str, dict[str, OrderView]], rest: dict[str, OrderView]) -> ReconcileReport: ...
-def stream_stats(paths: Mapping[str, Path], fields: EventFields) -> dict[str, object]: ...
+@dataclass(frozen=True)
+class ClientOrders:
+    orders: dict[str, OrderView]    # 委託識別 -> 推得的狀態與成交量
+    event_ids: frozenset[str]       # 這些委託背後的報告識別
+    excluded_other_days: int        # 因不在該日期而排除的委託數
+
+@dataclass(frozen=True)
+class RestOrders:
+    orders: dict[str, OrderView]    # 委託識別 -> REST 的狀態與成交量
+    excluded_other_days: int        # 因不在該日期而排除的委託數
+
+@dataclass(frozen=True)
+class ReconcileReport:
+    only_in_rest: list[str]                  # 至少一個 client 缺的 REST 委託
+    only_in_sse: list[str]                   # 任一 client 看到而 REST 沒有
+    mismatched: list[Mismatch]               # 每個不一致的 client 各一筆
+    missing_by_client: dict[str, list[str]]  # client -> 缺的 REST 委託
+    per_client_keys: dict[str, list[str]]    # client -> 看到的委託識別
+    missing_events_by_client: dict[str, list[str]]  # client -> 別的 client 看到而它沒看到的報告識別
+    excluded_other_days: dict[str, int]      # client -> 因不在該日期而排除的委託數
+    rest_excluded_other_days: int            # REST 因不在該日期而排除的委託數
+
+def derive_status(*, new_ok: bool | None, cancel_ok: bool, order_qty: Decimal | None,
+                  cancel_qty: Decimal, filled_qty: Decimal) -> str: ...
+def orders_from_sse(paths: Mapping[str, Sequence[Path]], fields: EventFields,
+                    trading_day: date | None = None) -> dict[str, ClientOrders]: ...
+def trading_day_of(payload: object, fields: EventFields) -> date: ...  # REST 快照委託時間的台北日期
+def orders_from_rest(payload: object, fields: EventFields, trading_day: date | None = None) -> RestOrders: ...
+def reconcile(sse: Mapping[str, ClientOrders], rest_orders: RestOrders) -> ReconcileReport: ...
+def run_reconcile(cfg: P1Config, sse_run: str, rest_run: str | None, run_dir: Path, *,
+                  trading_day: date | None = None, transport: httpx.BaseTransport | None = None) -> int: ...
+
+# p1rec.stats
+def stream_stats(paths: Mapping[str, Sequence[Path]], fields: EventFields) -> dict[str, object]: ...
+def run_stats(cfg: P1Config, sse_run: str, run_dir: Path) -> int: ...
+
+# p1rec.records
+class AnalysisError(ValueError): ...
+def read_jsonl(path: Path, contains: bytes | None = None) -> Iterator[tuple[int, dict[str, object]]]: ...
+def discover_sse_files(run_dir: Path) -> dict[str, list[Path]]: ...  # client -> 該 client 的全部 SSE 檔
 ```
 
 **Tests:**
@@ -680,15 +744,36 @@ def stream_stats(paths: Mapping[str, Path], fields: EventFields) -> dict[str, ob
 - `test_all_match_exit_0` — 兩個 client 與 REST 一致時三份清單皆空。
 - `test_missing_in_sse_reported` — REST 多一筆時列入 `only_in_rest` 並回 2。
 - `test_status_mismatch_reported` — SSE 為 PartFilled、REST 為 Filled 時列入 `mismatched`。
-- `test_client_coverage_difference` — client b 缺一筆時 `per_client_keys` 可看出差集。
+- `test_client_coverage_difference` — client b 缺一筆（client a 有看到）時列入 `only_in_rest` 與 `missing_by_client`，`per_client_keys` 可看出差集，並回 2。
+- `test_stats_runs_without_secret_env` — 未設定密鑰環境變數時 `stats` 照常回 0。
 - `test_deals_accumulate_qty` — 同一委託兩筆成交數量加總。
 - `test_stats_peak_second_and_gaps` — 合成資料中某秒 50 個 frame、某處間隔 90 秒時，`stats.json` 的尖峰與間隔清單正確。
+- `test_derive_status_rules` — 推導規則逐條成立（含部分成交後刪單、只見成交、數量為 0）。
+- `test_partial_fill_then_cancel_is_cancelled` — 依真實事件形狀（Cancel 的 `status.order_quantity` 為 0），New(3)、成交 1、Cancel 後為 Cancelled，成交量 1。
+- `test_rejected_update_qty_does_not_change_size` — 部分成交後被拒的 UpdateQty 不會讓狀態變成 Filled。
+- `test_event_on_two_streams_counted_once` — 同一事件出現在綜合串流與 `order_event` 串流時只算一次。
+- `test_two_day_sse_against_one_day_rest_snapshot` — SSE 檔含前一日與當日委託、REST 只有當日時，交易日取自 REST，前一日委託計入 `excluded_other_days` 且不影響結果。
+- `test_trading_day_required_without_rest_order_times`、`test_rest_snapshot_spanning_two_days_needs_trading_day` — REST 沒有委託時間或跨兩日時要求 `--trading-day`。
+- `test_explicit_trading_day_windows_both_sides` — REST 有 t1（10-01）與 thu（09-30）、SSE 兩個 client 亦同，`--trading-day 2026-10-01` 時 thu 在兩側皆排除，結果一致並回 0。
+- `test_undated_rest_order_kept_with_warning`、`test_default_day_ignores_non_positive_order_times` — REST 委託時間缺少或不大於 0 時保留並記 WARN，推導日期時略過。
+- `test_night_session_orders_warn_on_both_sides` — 夜盤時間的委託在 SSE 與 REST 兩側皆記 WARN。
+- `test_client_missing_reports_fails` — client a 收到 New、UpdatePrice、Cancel，client b 只收到 Cancel 時，b 的委託為 Unknown、`missing_events_by_client` 列出 b 缺的兩筆，回 2。
+- `test_lifecycle_case_under_candidate_shapes` — New(2) → UpdatePrice → UpdateQty:1 → Cancel 在各候選事件形狀下的推導結果（假設的形狀為 Cancelled；保留原數量且 `cancel_quantity` 為單次時為 Submitted，是已知缺口）。
+- `test_reduced_order_filling_its_remainder_is_filled` — 調降為 1 後成交 1 為 Filled。
+- `test_truncated_last_line_skipped_with_warning`、`test_unreadable_middle_line_raises` — 末行截斷略過並記 WARN，中間行損壞則失敗。
+- `test_duplicate_across_streams_keeps_earliest_arrival`、`test_repeated_event_id_with_other_content_warns` — 跨串流重複時保留最早收到的一筆；同一 `event_id` 內容不同時記 WARN。
+- `test_update_price_keeps_status_and_size`、`test_mismatch_in_one_client_only`、`test_trades_item_without_deal_quantity_counts_zero` — UpdatePrice 不改狀態與數量；只有一個 client 不一致時只列該 client；REST 缺 `deal_quantity` 視為 0。
+- `test_outage_ended_by_stop`、`test_last_trades_payload_rejects_non_2xx`、`test_last_trades_payload_decodes_base64_body` — 停止時仍未恢復的斷線照列；最後一次 `trades` 非 2xx 時失敗；`resp_body_b64` 解碼後使用。
+- `test_live_reconcile_aborts_before_trades_when_not_simulation` — 模式非模擬時不送出 `trades` 查詢。
 
 **Numbers:**
 
 - 尖峰取前 10 秒：報告篇幅上的選擇，用來看開盤尖峰的形狀。
-- `gap_threshold_s`：`calibrate:` 取 Task 12 首日量到的心跳最大間隔的兩倍，寫入 `p1.toml`。
-- `EventFields` 其餘指標：`calibrate:` 由 Task 12 第一批真實事件決定，Task 13 對帳前寫入 `p1.toml`。
+- `gap_threshold_s = 60`：契約文件 §2 量到的 30 秒心跳的兩倍；`calibrate:` 改為 Task 12 首日量到的心跳最大間隔的兩倍，寫入 `p1.toml`。
+- 委託事件的指標、`op_code_success` 與 `exchange_ts_*`：取自 2026-09-29 錄到的委託事件與 tick（契約文件 §2）。
+- `deal_key`、`deal_qty`、`deal_exchange_ts`：`calibrate:` 尚未錄到成交事件，暫依 OpenAPI `StockDealEvent`／`FuturesDealEvent`；Task 12 第一批成交事件確認，Task 13 對帳前寫入 `p1.toml`。
+- `rest_order_ts`：epoch 秒，已由期貨 API 測試中刪單後的 `trades` 回應確認（`1790677936.694802`，即 2026-09-29 18:32:16 台北時間）。
+- 夜盤 15:00 至次日 05:00：設計 §4 的期交所夜盤時段。
 
 **Verification:**
 
@@ -758,7 +843,7 @@ git commit -m "Measure history queries and their quota cost"
 ### Task 10：去識別化、語料匯出與洩漏掃描
 
 **Files:**
-- Create: `src/p1rec/scrub.py`、`tools/p1-official-server/fixtures.toml`（空清單）
+- Create: `src/p1rec/scrub/`（套件）、`tools/p1-official-server/fixtures.toml`（空清單）
 - Modify: `src/p1rec/config.py`、`src/p1rec/cli.py`
 - Test: `tests/test_scrub.py`
 
@@ -766,10 +851,19 @@ git commit -m "Measure history queries and their quota cost"
 
 - 替換對照的來源：`secret_env` 的全部密鑰（含 API key 前 10 字元與對外 IP）、以 `account_id_pointers` 從 `accounts` 回應找出的帳號、以 `ca_pointers` 從 `ca_status` 回應找出的憑證內容。
 - 佔位字串依「類別 + 首次出現順序」決定（例如 `ACCOUNT_1`）；同一原始值永遠得到同一佔位字串；對照表存 `results/p1/scrub-map.json`（不進版控），重跑時沿用。
-- 替換由長到短，嵌在較長字串中的值（例如 clientname 內的 key 前綴）也要替換。
-- 原始值的每種寫法都要處理：原文、JSON 跳脫後的形式（含 `\uXXXX`），以及 `*_b64` 欄位解碼後的內容；帳戶物件的 `username` 也屬於要替換的值。
-- `p1rec scrub` 依 `fixtures.toml` 從 `results/` 取出指定檔案與行，替換後寫入 `test_data/official/1.7.6/`，並產生 `MANIFEST.toml`（每筆：檔名、來源 run_id、來源檔、行號、錄製時間、商品、對應的 §6 項目）。
-- `p1rec scrub --scan-only` 掃描 `test_data/official/` 與 `docs/official-server-contract.md`：發現任何原始值時列出「檔案:行號:類別」（不印原始值）並回 2，否則回 0。
+- 替換依原始值長度由長到短逐一進行（每個原始值的全部寫法一起換），兩個原始值重疊時較長者整段替換；嵌在較長字串中的值（例如 clientname 內的 key 前綴）也要替換；佔位字串不得包含任何原始值。
+- 原始值的每種寫法都要處理：原文、去除前後空白的形式、JSON 跳脫後的形式（含 `\uXXXX`，任意跳脫深度）、百分比編碼，以及 `*_b64` 欄位解碼後的內容；掃描另外比對 NFKC 正規化後的文字。帳戶物件的 `username` 也屬於要替換的值。
+- 長度（UTF-8 位元組）低於 `MIN_SUBSTRING_MATCH_LEN`（6）的原始值只以完整 token 比對（前後不接英數字或底線；前面緊接 JSON 跳脫如 `\n`、`\u00e9` 或百分比編碼如 `%3A` 也算邊界），避免 `00`、`2330` 之類的值誤中價格與代碼；這只適用於 `SUBACCOUNT` 與 `CA_PASSWD`，身分類別（API key 與其前綴、`SEC_KEY`、`PERSON_ID`、`EGRESS_IP`、`ACCOUNT_ID`、`USERNAME`、`CA_SIGNATURE`）出現過短的值代表指標或鍵選錯欄位，以 `ScrubError` 依類別回報（不印原始值）。各類別低於門檻的數量，以及每筆 fixture 每個類別的替換次數都記 log（不記原始值）。
+- `account_id_keys`（`subaccount`）列出的鍵，其非空值在錄製 JSON 的任何深度都視為帳號（類別為鍵名大寫，例如 `SUBACCOUNT_1`）。
+- 委託物件的 `ca` 是 CA 簽章（base64 DER，可能內含憑證持有人姓名與身分證字號，字串比對看不到），每個非空值都是原始值，類別 `CA_SIGNATURE`（`CA_SIGNATURE_1`、`CA_SIGNATURE_2`……），與其他類別一樣存入對照表，因此出現在任何形式（例如 log 裡的 Debug 輸出）都會被替換與掃出。
+- `ca` 與 `account_id_keys` 的值從 `results_root` 下全部錄製找出：每個 `rest.jsonl` 與 `sse_*.jsonl` 的請求、回應與 frame（含 `*_b64` 欄位解碼後的內容），不限於選取行。掃描另外以結構檢查：任何非空且非佔位字串的 `ca` 欄位回報為 `CA_SIGNATURE`，`account_id_keys` 的欄位同理以其類別回報，即使該值不在對照表中；欄位形式包含任意跳脫深度的 JSON 成員、Python repr（`'key': 'value'`）、Debug 輸出（`key: "value"`、`key: Some("value")`）與 `key=value`（引號可單可雙，`None`、`null` 視為空值）。無法解碼的 `*_b64` 欄位回報為 `UNDECODABLE_B64`。
+- `account_id_pointers` 的最後一段與 `account_id_keys` 不得以 `_<數字>` 結尾，否則類別與佔位字串的編號無法區分。
+- `p1rec scrub` 依 `fixtures.toml` 從 `results/` 取出指定檔案與行，替換後寫入 `test_data/official/1.7.6/`，並產生 `MANIFEST.toml`（每筆：檔名、來源 run_id、來源檔、行號、錄製時間、商品、對應的 §6 項目）。輸出先在 `results/` 下暫存並掃描，通過才寫入；有洩漏時回 2，fixture 目錄不變。寫入後 fixture 目錄若還有目前選取以外的檔案（`MANIFEST.toml` 與 `openapi.json` 除外），列出後回 2，不刪除任何檔案。
+- `results_root` 必須被 git 忽略（`git check-ignore`），且對照表不得已被 git 追蹤（`git ls-files --error-unmatch`），否則匯出與 `--scan-only` 都回 1；log 中的路徑先做 NFKC 正規化再去識別化；`new_run` 以 0700 建立 `results_root` 與每個 run 目錄，既有的 `results_root` 也改為 0700。
+- 錄製時間取自第一個選取行：REST 紀錄的 `recv_ts_ns`（連線錯誤為 `error_ts_ns`）、SSE frame 的 `recv_ts_ns`、log 行開頭的 ISO-8601 時間戳（先去除 ANSI 色碼；錄製器 log 不帶時區，視為錄製主機的本地時間）。取不到時該筆須在 `fixtures.toml` 寫明帶時區的 `recorded_at`，否則 `ConfigError`；取得到時不接受 `recorded_at`。不使用檔案時間（主機曾發生 RTC 重置）。
+- `fixtures.toml` 某筆會公開的欄位（`name`、`run_id`、`source`、`instrument`、`checklist`）含任何原始值時 `ConfigError`，只以序號指出該筆，不印原始值。
+- `p1rec scrub --scan-only` 一律掃描 `fixtures_root` 的上層（`test_data/official/`）與 `contract_doc`（`docs/official-server-contract.md`），`extra_scan_paths` 只能再增加目標（例如 `fixtures.toml`），空清單不會減少掃描範圍；任一目標不存在或與 `results_root` 重疊時回 1。檔名與目錄名也掃描（相對於掃描根目錄，行號記為 0）。發現任何原始值時列出「檔案:行號:類別」（路徑先去識別化，不印原始值）並回 2，否則回 0。
+- 指標對應的類別（例如 `ACCOUNT_ID`）在對照表與全部錄製中都沒有值時（尚未錄到 `accounts` 回應），掃描無從檢查這些值，匯出與 `--scan-only` 都記 ERROR 並回 1。
 
 **Interface:**
 
@@ -778,8 +872,11 @@ git commit -m "Measure history queries and their quota cost"
 class ScrubConfig:
     account_id_pointers: tuple[str, ...]
     ca_pointers: tuple[str, ...]
+    account_id_keys: tuple[str, ...]  # 值在任何深度都視為帳號的鍵，例如 subaccount
     map_path: Path
-    selection: Path  # fixtures.toml；每筆 name、run_id、source、lines、checklist、instrument
+    selection: Path  # fixtures.toml；每筆 name、run_id、source、lines、checklist、instrument，選填 recorded_at
+    contract_doc: Path  # 與 fixtures_root 的上層一律掃描
+    extra_scan_paths: tuple[Path, ...]  # 只能增加掃描目標
 
 @dataclass(frozen=True)
 class Leak:
@@ -791,7 +888,8 @@ def build_map(secrets: Mapping[str, str], discovered: Mapping[str, Sequence[str]
               existing: Mapping[str, str]) -> dict[str, str]: ...
 def scrub_text(text: str, mapping: Mapping[str, str]) -> str: ...
 def export_fixtures(cfg: P1Config, mapping: Mapping[str, str]) -> list[Path]: ...
-def scan(paths: Iterable[Path], originals: Mapping[str, str]) -> list[Leak]: ...
+def scan(paths: Iterable[Path], originals: Mapping[str, str],
+         keys: Mapping[str, str] | None = None) -> list[Leak]: ...  # keys：鍵名 -> 類別，另加於 ca
 ```
 
 **Tests:**
@@ -802,6 +900,16 @@ def scan(paths: Iterable[Path], originals: Mapping[str, str]) -> list[Leak]: ...
 - `test_scan_reports_without_value` — 有洩漏時回報檔案與行號，輸出不含原始值。
 - `test_scan_clean_returns_zero` — 無洩漏時回 0。
 - `test_manifest_entry_per_fixture` — 匯出兩筆時 `MANIFEST.toml` 有兩筆，欄位齊全。
+- `test_overlapping_originals_replace_longer_whole` — `QQQXYZ` 與 `XYZWWWWWWW` 相鄰重疊時，較長者整段替換。
+- `test_spec_targets_scanned_without_extra_paths` — `extra_scan_paths = []` 時，`test_data/official/` 與契約文件中的洩漏仍被回報。
+- `test_manifest_recorded_at_for_every_kind` — `.json`、`.sse`、`.log`（官方 server log 與錄製器 log）都帶錄製時間。
+- `test_discover_reads_every_recording` — `ca` 與 subaccount 從 SSE 錄製與只存於 `resp_body_b64` 的回應中找出。
+- `test_ca_signature_and_subaccount_scrubbed_on_export` — trades 回應與 `order_event` frame 的 `ca` 換成 `CA_SIGNATURE_<n>`，subaccount 換成 `SUBACCOUNT_<n>`。
+- `test_non_json_log_values_scrubbed_and_detected` — 只在未選取的錄製中以 JSON 出現的 `ca`（log 中為 Debug 格式）與 subaccount（log 中為純文字）在匯出時被替換，植入已提交檔案後 `--scan-only` 回 2。
+- `test_scan_reports_ca_signature_and_account_keys` — 不知道原始值時，非佔位字串的 `ca` 與 `subaccount` 成員在各跳脫深度都被回報。
+- `test_short_originals_match_only_whole_tokens` — `A1`、`00`、`2330` 只在完整 token 處替換與回報，不因出現在佔位字串內而拒絕。
+- `test_scan_reports_debug_and_key_value_fields` — log 中 Debug 與 `key=value` 形式、從未錄到的簽章被回報。
+- `test_scan_reports_names_and_logs_them_scrubbed` — 檔名 `C9_<帳號>_clean.json` 回報為第 0 行，log 中的路徑已去識別化。
 
 **Verification:**
 
@@ -829,7 +937,7 @@ git commit -m "Scrub fixtures and scan for leaked identifiers"
 
 **Tests:**
 
-- `test_full_pipeline_against_stub` — 每一步結束碼符合預期，`reconcile.json` 三份清單皆空，`stats.json` 記到斷線間隔，`MANIFEST.toml` 有兩筆，掃描回 0。
+- `test_full_pipeline_against_stub` — 每一步結束碼符合預期，`reconcile.json` 的 `only_in_rest`、`only_in_sse`、`mismatched` 與 `missing_events_by_client` 皆空（假 server 的 trades 項目要帶 `status.order_ts`），`stats.json` 記到斷線間隔，`MANIFEST.toml` 有兩筆，掃描回 0。
 - `test_mode_flip_stops_orders` — 劇本中途切到 Production 後，假 server 收到的下單請求數不再增加，`orders` 回 3。
 - `test_scan_catches_planted_leak` — 在匯出的 fixture 植入假帳號的原始值後，`scrub --scan-only` 回 2。
 
@@ -857,7 +965,7 @@ git commit -m "Rehearse the full recorder pipeline against a stub server"
 - 排程：選證交所行事曆上週四至下週二皆為營業日（週末除外）的第一週；10/8 那週不行（10/9 補假，依設計 §9.2 推論，排程時查證）。
 - 前一個交易日：依當日合約清單校準 `p1.toml` 的近月期貨代號（TXFJ6、MXFJ6、TMFJ6 於 2026-10-21 到期，soak 跨過該日就改用下一個月份）與近月價平 TXO 買權、賣權各一檔，同步更新 `[stream]` 商品、`[history]` 的 snapshots 查詢與 `scenarios.toml`。
 - 07:30 前：校時狀態（`timedatectl` 與 `chronyc tracking` 或等效指令）存入 `results/p1/<日期>-ntp.txt`；填入 `futures_margin_twd`；啟動官方 server 並依 Task 1 記下的方式把 log 導向 `results/p1/<日期>-server/server.log`（放在自己的 run 目錄內，Task 15 才能以 `fixtures.toml` 挑選）；`p1rec self-test-interlock` 回 0；`p1rec preflight` 回 0，回 2 即停止並交由使用者取得模擬資金。
-- 08:00 前：`p1rec stream --clients a,b --until <下週二 09:30 +08:00>` 於 tmux 啟動，即為 soak 起點；預先排入週五 10:30 取消 2330 tick 訂閱的動作（§6 D2：訂閱為全域，看兩個 client 是否同時停止收到 2330）。
+- 08:00 前：`p1rec stream --clients a,b --until <下週二 09:30 +08:00>` 於 tmux 啟動，即為 soak 起點（關閉期間最長 `SSE_READ_TIMEOUT_S + retry_s`，這段時間再按 Ctrl-C 不會生效，必要時以 SIGKILL 強制結束）；預先排入週五 10:30 取消 2330 tick 訂閱的動作（§6 D2：訂閱為全域，看兩個 client 是否同時停止收到 2330）。
 - 08:30 後（每日維護之後、下單之前）：再跑一次 `p1rec preflight`，以當日更新後的漲跌停價確認資金；回 2 即停止。
 - 09:00 後：`p1rec orders --only <第一個生命週期案例>`，量出延遲後填入 `step_wait_s`、`fill_poll_s`、`fill_timeout_s`，再以 `p1rec orders` 跑其餘案例；從第一批真實事件填入 `EventFields`。同時確認四件事：IOC／FOK 未成交時交易所自動刪單的事件形狀（是否以 Cancel 事件送出）、部分成交後刪單時 REST 的狀態字串、成交事件的 `deal_key` 與 `deal_qty`、改量後刪單時 `cancel_quantity` 是累計值還是單次值；與 `derive_status` 的規則不符時先修正，再進 Task 13。
 - 13:45 後：`p1rec reconcile --sse-run <stream run_id>` 對當日委託對帳。
@@ -909,8 +1017,8 @@ git commit -m "Calibrate recorder settings from the first live session"
 
 **Verification:**
 
-Run: `jq '(.only_in_rest | length), (.only_in_sse | length), (.mismatched | length)' results/p1/<當日 reconcile run>/reconcile.json`
-Expected: 產出三個數字並抄入契約文件；GO 準則 4、5 依此判定，不要求為 0。
+Run: `jq '(.only_in_rest | length), (.only_in_sse | length), (.mismatched | length), ([.missing_events_by_client[] | length] | add)' results/p1/<當日 reconcile run>/reconcile.json`
+Expected: 產出四個數字並抄入契約文件；GO 準則 4、5 依此判定，不要求為 0。
 
 Run: `jq -c 'select(.op=="place_stock")' results/p1/*-orders-harness/rest.jsonl | wc -l`
 Expected: `1`。

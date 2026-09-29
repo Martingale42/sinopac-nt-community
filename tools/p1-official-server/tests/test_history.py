@@ -10,14 +10,13 @@ from typing import NotRequired, TypedDict, cast
 
 import httpx
 import pytest
-from helpers import SECRET_ENV_VARS, UNUSED_ORDERS_CONFIG, WriteConfig
+from helpers import SECRET_ENV_VARS, UNUSED_EVENT_FIELDS, UNUSED_ORDERS_CONFIG, WriteConfig
 
 from p1rec import capture
 from p1rec.cli import main
 from p1rec.config import (
     ContractFields,
     Endpoint,
-    EventFields,
     FundsConfig,
     HistoryConfig,
     HistoryQuery,
@@ -68,9 +67,17 @@ def _build_cfg(tmp_path: Path, queries: tuple[HistoryQuery, ...]) -> P1Config:
         ),
         stream=StreamConfig(),
         orders=UNUSED_ORDERS_CONFIG,
-        events=EventFields(),
+        events=UNUSED_EVENT_FIELDS,
         history=HistoryConfig(queries=queries, usage_bytes_pointer="/bytes"),
-        scrub=ScrubConfig(),
+        scrub=ScrubConfig(
+            account_id_pointers=(),
+            ca_pointers=(),
+            account_id_keys=(),
+            map_path=Path("."),
+            selection=Path("."),
+            contract_doc=Path("."),
+            extra_scan_paths=(),
+        ),
     )
 
 

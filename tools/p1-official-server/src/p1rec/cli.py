@@ -5,8 +5,7 @@ config loading, secret reading, a run directory and redacted logging. Each
 subcommand is registered once, in _SUBCOMMANDS, with its own argument
 hook and handler, so adding a subcommand-specific flag never touches this
 module's dispatch logic. A handler takes (args, cfg, run_dir) and returns
-its exit code; until implemented, a handler logs that it is not
-implemented yet and returns 1.
+its exit code.
 """
 
 from __future__ import annotations
@@ -18,7 +17,7 @@ import re
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import NoReturn
 from urllib.parse import urlsplit
@@ -28,9 +27,13 @@ from p1rec.history import run_history
 from p1rec.interlock import EXIT_INTERLOCK_ABORT, InterlockError, self_test
 from p1rec.orders import run_orders
 from p1rec.preflight import run_preflight
+from p1rec.reconcile import run_reconcile
 from p1rec.redact import redaction_values, setup_logging
 from p1rec.rundir import new_run
 from p1rec.scenarios import load_scenarios
+from p1rec.scrub import run_scrub
+from p1rec.stats import run_stats
+from p1rec.stream import check_client_names, run_stream
 
 Handler = Callable[[argparse.Namespace, P1Config, Path], int]
 ArgumentHook = Callable[[argparse.ArgumentParser], None]
@@ -73,6 +76,117 @@ def _add_scenarios_argument(sub: argparse.ArgumentParser) -> None:
     )
 
 
+def _parse_clients(value: str) -> list[str]:
+    names = value.split(",")
+    try:
+        check_client_names(names)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"invalid --clients {value!r}: {exc}") from exc
+    return names
+
+
+def _parse_until(value: str) -> datetime:
+    try:
+        until = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"invalid --until {value!r}: not an ISO 8601 date and time") from exc
+
+    # A naive time would be read in whatever zone the host happens to use
+    if until.utcoffset() is None:
+        raise argparse.ArgumentTypeError(f"invalid --until {value!r}: must include a UTC offset, such as +08:00")
+    return until
+
+
+def _add_stream_arguments(sub: argparse.ArgumentParser) -> None:
+    sub.add_argument(
+        "--clients",
+        required=True,
+        type=_parse_clients,
+        help="comma-separated SSE client names, such as a,b; the first client's first stream is the leader",
+    )
+    sub.add_argument(
+        "--until",
+        required=True,
+        type=_parse_until,
+        help="ISO 8601 time with a UTC offset at which to stop, such as 2026-10-06T09:30:00+08:00",
+    )
+
+
+def _stream(args: argparse.Namespace, cfg: P1Config, run_dir: Path) -> int:
+    return run_stream(cfg, args.clients, args.until, run_dir)
+
+
+def _add_scrub_arguments(sub: argparse.ArgumentParser) -> None:
+    sub.add_argument(
+        "--scan-only",
+        action="store_true",
+        help=(
+            "only scan fixtures_root's parent, scrub.contract_doc and scrub.extra_scan_paths "
+            "for original values, exiting 2 on any"
+        ),
+    )
+
+
+def _validate_run_id(value: str) -> str:
+    """Reject a run id that could name anything but a directory directly under results_root."""
+    if not _TAG_RE.fullmatch(value) or value in {".", ".."}:
+        raise argparse.ArgumentTypeError(f"invalid run id {value!r}: must be a run directory name, not a path")
+    return value
+
+
+def _add_sse_run_argument(sub: argparse.ArgumentParser) -> None:
+    sub.add_argument(
+        "--sse-run",
+        required=True,
+        type=_validate_run_id,
+        help="run id of the stream run whose sse_*.jsonl files are analysed",
+    )
+
+
+_TRADING_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _parse_trading_day(value: str) -> date:
+    """Parse a --trading-day value, which must be a YYYY-MM-DD calendar date."""
+    try:
+        if not _TRADING_DAY_RE.fullmatch(value):
+            raise ValueError(value)
+        return date.fromisoformat(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid --trading-day {value!r}: must be a YYYY-MM-DD date") from None
+
+
+def _add_reconcile_arguments(sub: argparse.ArgumentParser) -> None:
+    _add_sse_run_argument(sub)
+    sub.add_argument(
+        "--rest-run",
+        default=None,
+        type=_validate_run_id,
+        help="run id whose last recorded trades response is used (default: query trades now)",
+    )
+    sub.add_argument(
+        "--trading-day",
+        default=None,
+        type=_parse_trading_day,
+        help=(
+            "Asia/Taipei calendar date (YYYY-MM-DD), not the TAIFEX trading day, whose orders are reconciled "
+            "on both sides (default: the date of the trades snapshot's order times)"
+        ),
+    )
+
+
+def _run_scrub(args: argparse.Namespace, cfg: P1Config, _run_dir: Path) -> int:
+    return run_scrub(cfg, scan_only=args.scan_only)
+
+
+def _reconcile(args: argparse.Namespace, cfg: P1Config, run_dir: Path) -> int:
+    return run_reconcile(cfg, args.sse_run, args.rest_run, run_dir, trading_day=args.trading_day)
+
+
+def _stats(args: argparse.Namespace, cfg: P1Config, run_dir: Path) -> int:
+    return run_stats(cfg, args.sse_run, run_dir)
+
+
 def _parse_only(value: str) -> set[str]:
     """Parse --only's comma-separated case ids, rejecting an empty id."""
     ids = [part.strip() for part in value.split(",")]
@@ -103,11 +217,6 @@ def _add_orders_arguments(sub: argparse.ArgumentParser) -> None:
         default=None,
         help="official server to send this run to, overriding base_url in p1.toml",
     )
-
-
-def _not_implemented(args: argparse.Namespace, _cfg: P1Config, _run_dir: Path) -> int:
-    logging.getLogger("p1rec.cli").error("%s: not implemented yet", args.command)
-    return 1
 
 
 def _self_test_interlock(_args: argparse.Namespace, cfg: P1Config, _run_dir: Path) -> int:
@@ -146,12 +255,17 @@ _SUBCOMMANDS: dict[str, Subcommand] = {
         needs_secrets=False,
     ),
     "preflight": Subcommand(add_arguments=_add_scenarios_argument, handler=_preflight),
-    "stream": Subcommand(add_arguments=_no_extra_arguments, handler=_not_implemented),
+    "stream": Subcommand(add_arguments=_add_stream_arguments, handler=_stream),
     "orders": Subcommand(add_arguments=_add_orders_arguments, handler=_orders),
-    "reconcile": Subcommand(add_arguments=_no_extra_arguments, handler=_not_implemented),
-    "stats": Subcommand(add_arguments=_no_extra_arguments, handler=_not_implemented),
+    "reconcile": Subcommand(add_arguments=_add_reconcile_arguments, handler=_reconcile),
+    "stats": Subcommand(
+        add_arguments=_add_sse_run_argument,
+        handler=_stats,
+        # stats only reads recorded files and never contacts the server
+        needs_secrets=False,
+    ),
     "history": Subcommand(add_arguments=_no_extra_arguments, handler=_history),
-    "scrub": Subcommand(add_arguments=_no_extra_arguments, handler=_not_implemented),
+    "scrub": Subcommand(add_arguments=_add_scrub_arguments, handler=_run_scrub),
 }
 
 

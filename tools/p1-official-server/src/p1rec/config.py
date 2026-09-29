@@ -16,10 +16,11 @@ import os
 import re
 import tomllib
 from collections.abc import Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, time
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from p1rec.jsonpointer import is_valid_pointer_syntax
 
@@ -74,8 +75,70 @@ class FundsConfig:
 
 
 @dataclass(frozen=True)
+class StartupRequest:
+    """A request sent before the subscriptions: a literal JSON body, or the AccountRequest of an account type."""
+
+    op: str  # Logical operation in [endpoints]
+    body: str | None  # JSON text, set exactly when account_type is not
+    account_type: str | None  # S | F | H, whose account the accounts response supplies
+
+    def __post_init__(self) -> None:
+        if (self.body is None) == (self.account_type is None):
+            raise ValueError(f"startup request {self.op!r} needs exactly one of body and account_type")
+
+    def describe(self) -> str:
+        return f"{self.op} for account type {self.account_type}" if self.account_type else self.op
+
+
+@dataclass(frozen=True)
+class Instrument:
+    code: str
+    exchange: str  # TSE | OTC | TAIFEX
+    security_type: str  # STK | FUT | OPT | IND
+    quote_types: tuple[str, ...]  # Tick | BidAsk | Quote
+    intraday_odd: bool
+
+
+@dataclass(frozen=True)
+class StreamAction:
+    """A subscription change at a set time, applied to every instrument with this code."""
+
+    at: datetime  # Timezone-aware
+    op: Literal["subscribe", "unsubscribe"]
+    code: str
+    quote_type: str
+
+
+@dataclass(frozen=True)
 class StreamConfig:
-    """Placeholder, filled in once SSE client fields are defined."""
+    """The [stream] section: the SSE endpoints to record and the subscriptions to hold.
+
+    The defaults stand for a p1.toml without a [stream] section, which
+    every subcommand other than stream accepts. When the section is
+    present, streams is non-empty and subscribe and unsubscribe are set.
+    """
+
+    # Stream name -> SSE endpoint, in file order, so the first is the leader stream
+    streams: dict[str, Endpoint] = field(default_factory=dict)
+    subscribe: Endpoint | None = None
+    unsubscribe: Endpoint | None = None
+
+    # JSON object templates, in which a string value that is exactly
+    # "{name}" stands for that field of the subscription.
+    subscribe_body: str = ""
+    unsubscribe_body: str = ""
+
+    startup_requests: tuple[StartupRequest, ...] = ()
+    retry_s: float = 0.0
+
+    # Seconds between retry rounds for requests that failed after the first send
+    request_retry_s: float = 0.0
+
+    # Asia/Taipei wall-clock time of the daily full resend
+    daily_resend_at: time | None = None
+
+    instruments: tuple[Instrument, ...] = ()
+    actions: tuple[StreamAction, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -103,7 +166,55 @@ class OrdersConfig:
 
 @dataclass(frozen=True)
 class EventFields:
-    """Placeholder, filled in once order/trade event field names are defined."""
+    """Where order reports, the trades list and stream timing live in recorded JSON."""
+
+    # SSE event name carrying OrderEvent frames, and the OrderEvent state
+    # values that mark an order report or a deal report.
+    order_event_name: str
+    order_states: tuple[str, ...]
+    deal_states: tuple[str, ...]
+
+    # JSON pointers into the report an OrderEvent holds at data/<state>
+    event_id: str
+    order_key: str
+    op_type: str
+    op_code: str
+    order_qty: str
+    cancel_qty: str
+    deal_key: str
+    deal_qty: str
+
+    # op_code of an accepted operation
+    op_code_success: str
+
+    # Pointers to the exchange time, in epoch seconds, of an order report
+    # and of a deal report, which date an order for the calendar-date window.
+    order_exchange_ts: str
+    deal_exchange_ts: str
+
+    # JSON pointers into the trades response: the list ("" for a bare
+    # array), then key, status and filled quantity within each item.
+    rest_list: str
+    rest_key: str
+    rest_status: str
+    rest_filled_qty: str
+
+    # Pointer into each trades item to its order time in epoch seconds,
+    # which dates the snapshot when no --trading-day is given and windows
+    # the REST side by calendar date.
+    rest_order_ts: str
+
+    # Pointers into a frame's data giving the exchange time, empty to skip
+    # latency: one numeric epoch-seconds value when exchange_ts_format is
+    # None, otherwise strings joined by a space and parsed with it as
+    # Taipei local time.
+    exchange_ts_pointers: tuple[str, ...]
+    exchange_ts_format: str | None
+
+    heartbeat_event: str
+
+    # Silence between consecutive frames of one file that stats reports
+    gap_threshold_s: float
 
 
 @dataclass(frozen=True)
@@ -123,7 +234,26 @@ class HistoryConfig:
 
 @dataclass(frozen=True)
 class ScrubConfig:
-    """Placeholder, filled in once de-identification fields are defined."""
+    # JSON pointers applied to every element of each recorded accounts
+    # response, and to each ca_status response, to find the identifiers to
+    # scrub, with the pointer's last token upper-cased naming the category.
+    account_id_pointers: tuple[str, ...]
+    ca_pointers: tuple[str, ...]
+
+    # Key names whose non-empty values, at any depth of recorded JSON, are
+    # account identifiers too, with the key upper-cased naming the category.
+    account_id_keys: tuple[str, ...]
+
+    # Holds the original values themselves, so it must stay under results_root
+    map_path: Path
+
+    # fixtures.toml; each entry has name, run_id, source, lines, checklist, instrument and optionally recorded_at
+    selection: Path
+
+    # scrub --scan-only always scans fixtures_root's parent and this
+    # document, and extra_scan_paths can only add to them.
+    contract_doc: Path
+    extra_scan_paths: tuple[Path, ...]
 
 
 @dataclass(frozen=True)
@@ -429,9 +559,299 @@ def _parse_funds(data: Mapping[str, Any], config_dir: Path) -> FundsConfig:
     )
 
 
+# Logical operations the stream subcommand calls by name (docs/official-server-contract.md section 1)
+ACCOUNTS_OP = "accounts"
+STREAM_SUBSCRIBE_OP = "stream_subscribe"
+STREAM_UNSUBSCRIBE_OP = "stream_unsubscribe"
+
+# One placeholder per BaseSubscriptionRequest field (openapi.json)
+SUBSCRIPTION_PLACEHOLDERS = frozenset({"code", "exchange", "security_type", "quote_type", "intraday_odd"})
+PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+# A startup request body standing for the AccountRequest of the account of
+# this type, one of the AccountType values in openapi.json, so that no
+# account identifier has to be written into the public p1.toml.
+_ACCOUNT_BODY_RE = re.compile(r"@account:(S|F|H)")
+
+# Account fields that identify the holder, refused anywhere in a configured
+# request body for the same reason.
+_ACCOUNT_IDENTIFIER_KEYS = frozenset({"account_id", "person_id", "username"})
+
+# Every key [stream] and its tables may hold, so a misspelt one, such as
+# [[stream.actions]], fails at load instead of being silently ignored.
+_STREAM_KEYS = frozenset(
+    {
+        "retry_s",
+        "request_retry_s",
+        "daily_resend_at",
+        "subscribe_body",
+        "unsubscribe_body",
+        "startup_requests",
+        "streams",
+        "instrument",
+        "action",
+    }
+)
+_STREAM_ENDPOINT_KEYS = frozenset({"method", "path"})
+_INSTRUMENT_KEYS = frozenset({"code", "exchange", "security_type", "quote_types", "intraday_odd"})
+_ACTION_KEYS = frozenset({"at", "op", "code", "quote_type"})
+
+# Hours and minutes, both zero-padded, such as "08:35"
+_WALL_TIME_RE = re.compile(r"([01][0-9]|2[0-3]):[0-5][0-9]")
+
+# Stream names become part of file names, so they are kept to a safe set
+_STREAM_NAME_RE = re.compile(r"[A-Za-z0-9_-]+")
+
+# Values named in BaseSubscriptionRequest's field descriptions (openapi.json)
+_EXCHANGES = ("TSE", "OTC", "TAIFEX")
+_SECURITY_TYPES = ("STK", "FUT", "OPT", "IND")
+_QUOTE_TYPES = ("Tick", "BidAsk", "Quote")
+
+_ACTION_OPS = ("subscribe", "unsubscribe")
+
+
 def _parse_stream(data: Mapping[str, Any], config_dir: Path) -> StreamConfig:
-    _optional_table(data, "stream")
-    return StreamConfig()
+    if "stream" not in data:
+        return StreamConfig()
+    table = _optional_table(data, "stream")
+    _reject_unknown_keys(table, _STREAM_KEYS, "stream")
+
+    instruments = _parse_instruments(table)
+    return StreamConfig(
+        streams=_parse_stream_endpoints(data),
+        subscribe=_named_endpoint(data, STREAM_SUBSCRIBE_OP),
+        unsubscribe=_named_endpoint(data, STREAM_UNSUBSCRIBE_OP),
+        subscribe_body=_get_body_template(data, "stream.subscribe_body"),
+        unsubscribe_body=_get_body_template(data, "stream.unsubscribe_body"),
+        startup_requests=_parse_startup_requests(data),
+        retry_s=_get_interval(data, "stream.retry_s"),
+        request_retry_s=_get_interval(data, "stream.request_retry_s"),
+        daily_resend_at=_get_wall_time(data, "stream.daily_resend_at"),
+        instruments=instruments,
+        actions=_parse_actions(table, instruments),
+    )
+
+
+def _get_interval(data: Mapping[str, Any], dotted_key: str) -> float:
+    """Read dotted_key as a positive, finite number of seconds."""
+    value = _get_number(data, dotted_key)
+    if not math.isfinite(value) or value <= 0:
+        raise ConfigError(f"config key {dotted_key} must be a positive, finite number of seconds, got {value!r}")
+    return value
+
+
+def _get_wall_time(data: Mapping[str, Any], dotted_key: str) -> time:
+    text = _get_str(data, dotted_key)
+    if not _WALL_TIME_RE.fullmatch(text):
+        raise ConfigError(f"config key {dotted_key} must be an HH:MM time, such as 08:35, got {text!r}")
+    return time.fromisoformat(text)
+
+
+def _reject_unknown_keys(table: Mapping[str, Any], allowed: frozenset[str], where: str) -> None:
+    unknown = sorted(set(table) - allowed)
+    if unknown:
+        raise ConfigError(f"unknown config key: {', '.join(f'{where}.{key}' for key in unknown)}")
+
+
+def _identifier_keys(value: object) -> set[str]:
+    """Return every account identifier key found at any depth of a parsed JSON value."""
+    if isinstance(value, dict):
+        found = set(_ACCOUNT_IDENTIFIER_KEYS & value.keys())
+        for item in value.values():
+            found |= _identifier_keys(item)
+        return found
+    if isinstance(value, list):
+        return set().union(*(_identifier_keys(item) for item in value))
+    return set()
+
+
+def _named_endpoint(data: Mapping[str, Any], op: str) -> Endpoint:
+    return Endpoint(method=_get_str(data, f"endpoints.{op}.method"), path=_get_str(data, f"endpoints.{op}.path"))
+
+
+def _parse_stream_endpoints(data: Mapping[str, Any]) -> dict[str, Endpoint]:
+    raw = _lookup(data, "stream.streams")
+    if not isinstance(raw, Mapping) or not raw:
+        raise ConfigError("config key stream.streams must be a non-empty table of SSE endpoints")
+
+    streams: dict[str, Endpoint] = {}
+    for name in raw:
+        if not _STREAM_NAME_RE.fullmatch(name):
+            raise ConfigError(f"config key stream.streams.{name}: a stream name may only use letters, digits, - and _")
+        if not isinstance(raw[name], Mapping):
+            raise ConfigError(f"config key stream.streams.{name} must be a table")
+        _reject_unknown_keys(raw[name], _STREAM_ENDPOINT_KEYS, f"stream.streams.{name}")
+        endpoint = Endpoint(
+            method=_get_str(data, f"stream.streams.{name}.method"),
+            path=_get_str(data, f"stream.streams.{name}.path"),
+        )
+        if endpoint.method != "GET":
+            raise ConfigError(f"config key stream.streams.{name}.method must be GET, got {endpoint.method!r}")
+        streams[name] = endpoint
+    return streams
+
+
+def _get_body_template(data: Mapping[str, Any], dotted_key: str) -> str:
+    """Read dotted_key as the text of a JSON object whose placeholders are all known, whole string values."""
+    text = _get_str(data, dotted_key)
+    try:
+        template = json.loads(text)
+    except ValueError as exc:
+        raise ConfigError(f"config key {dotted_key} is not valid JSON: {exc}") from exc
+    if not isinstance(template, dict):
+        raise ConfigError(f"config key {dotted_key} must be a JSON object")
+    _check_placeholders(template, dotted_key)
+    _reject_identifiers(template, dotted_key)
+    return text
+
+
+def _reject_identifiers(body: object, where: str) -> None:
+    found = _identifier_keys(body)
+    if found:
+        raise ConfigError(
+            f"config key {where} must not name the account ({', '.join(sorted(found))}); "
+            'a startup request takes it from "@account:<S|F|H>"'
+        )
+
+
+def _check_placeholders(value: object, dotted_key: str) -> None:
+    """Raise ConfigError for a placeholder that substitution would not replace.
+
+    Substitution replaces only a string value that is exactly "{name}", so
+    a placeholder inside a longer string or in an object key would
+    otherwise be sent to the server verbatim.
+    """
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if PLACEHOLDER_RE.search(key):
+                raise ConfigError(f"config key {dotted_key}: a placeholder cannot be an object key: {key!r}")
+            _check_placeholders(item, dotted_key)
+    elif isinstance(value, list):
+        for item in value:
+            _check_placeholders(item, dotted_key)
+    elif isinstance(value, str):
+        whole = PLACEHOLDER_RE.fullmatch(value)
+        if whole is None and PLACEHOLDER_RE.search(value):
+            raise ConfigError(f"config key {dotted_key}: a placeholder must be the whole string value: {value!r}")
+        if whole is not None and whole.group(1) not in SUBSCRIPTION_PLACEHOLDERS:
+            raise ConfigError(
+                f"config key {dotted_key}: unknown placeholder {value!r}; "
+                f"known: {', '.join(sorted(SUBSCRIPTION_PLACEHOLDERS))}"
+            )
+
+
+def _parse_startup_requests(data: Mapping[str, Any]) -> tuple[StartupRequest, ...]:
+    dotted_key = "stream.startup_requests"
+    raw = _lookup(data, dotted_key)
+    if not isinstance(raw, list):
+        raise ConfigError(f"config key {dotted_key} must be an array of [operation, body] pairs")
+    endpoints = _lookup(data, "endpoints")
+
+    requests: list[StartupRequest] = []
+    for index, item in enumerate(raw):
+        where = f"{dotted_key}[{index}]"
+        if not (isinstance(item, list) and len(item) == 2 and all(isinstance(part, str) for part in item)):
+            raise ConfigError(f"config key {where} must be an [operation, body] pair of strings")
+        op, body = item
+        if not isinstance(endpoints, Mapping) or op not in endpoints:
+            raise ConfigError(f"config key {where} names unknown endpoint: {op!r}")
+        account = _ACCOUNT_BODY_RE.fullmatch(body)
+        if account is not None:
+            if ACCOUNTS_OP not in endpoints:
+                raise ConfigError(f"config key {where} uses {body!r}, which needs endpoints.{ACCOUNTS_OP}")
+            requests.append(StartupRequest(op=op, body=None, account_type=account.group(1)))
+            continue
+        try:
+            parsed = json.loads(body)
+        except ValueError as exc:
+            raise ConfigError(f'config key {where} body must be JSON or "@account:<S|F|H>"') from exc
+        _reject_identifiers(parsed, where)
+        requests.append(StartupRequest(op=op, body=body, account_type=None))
+    return tuple(requests)
+
+
+def _item(table: Mapping[str, Any], key: str, where: str, kind: type) -> Any:
+    """Return table[key] checked to be a kind, naming where.key in any error."""
+    if key not in table:
+        raise ConfigError(f"missing config key: {where}.{key}")
+    value = table[key]
+    if not isinstance(value, kind):
+        raise ConfigError(f"config key {where}.{key} must be a {kind.__name__}, got {type(value).__name__}")
+    return value
+
+
+def _item_choice(table: Mapping[str, Any], key: str, where: str, choices: tuple[str, ...]) -> str:
+    value = cast(str, _item(table, key, where, str))
+    if value not in choices:
+        raise ConfigError(f"config key {where}.{key} must be one of {', '.join(choices)}, got {value!r}")
+    return value
+
+
+def _array_of_tables(table: Mapping[str, Any], key: str) -> list[Mapping[str, Any]]:
+    raw = table[key]
+    if not isinstance(raw, list) or not all(isinstance(item, Mapping) for item in raw):
+        raise ConfigError(f"config key stream.{key} must be an array of tables ([[stream.{key}]])")
+    return raw
+
+
+def _parse_instruments(table: Mapping[str, Any]) -> tuple[Instrument, ...]:
+    if "instrument" not in table:
+        raise ConfigError("missing config key: stream.instrument")
+    raw = _array_of_tables(table, "instrument")
+    if not raw:
+        raise ConfigError("config key stream.instrument must list at least one instrument")
+
+    instruments: list[Instrument] = []
+    seen: set[tuple[str, str, str, str, bool]] = set()
+    for index, item in enumerate(raw):
+        where = f"stream.instrument[{index}]"
+        _reject_unknown_keys(item, _INSTRUMENT_KEYS, where)
+        code = cast(str, _item(item, "code", where, str))
+        if not code:
+            raise ConfigError(f"config key {where}.code must not be empty")
+        quote_types = _item(item, "quote_types", where, list)
+        if not quote_types or any(quote_type not in _QUOTE_TYPES for quote_type in quote_types):
+            raise ConfigError(f"config key {where}.quote_types must list one or more of {', '.join(_QUOTE_TYPES)}")
+        instrument = Instrument(
+            code=code,
+            exchange=_item_choice(item, "exchange", where, _EXCHANGES),
+            security_type=_item_choice(item, "security_type", where, _SECURITY_TYPES),
+            quote_types=tuple(quote_types),
+            intraday_odd=cast(bool, _item(item, "intraday_odd", where, bool)),
+        )
+        for quote_type in instrument.quote_types:
+            key = (code, instrument.exchange, instrument.security_type, quote_type, instrument.intraday_odd)
+            if key in seen:
+                raise ConfigError(f"config key {where} repeats the {code} {quote_type} subscription")
+            seen.add(key)
+        instruments.append(instrument)
+    return tuple(instruments)
+
+
+def _parse_actions(table: Mapping[str, Any], instruments: tuple[Instrument, ...]) -> tuple[StreamAction, ...]:
+    if "action" not in table:
+        return ()
+    codes = {instrument.code for instrument in instruments}
+
+    actions: list[StreamAction] = []
+    for index, item in enumerate(_array_of_tables(table, "action")):
+        where = f"stream.action[{index}]"
+        _reject_unknown_keys(item, _ACTION_KEYS, where)
+        at = cast(datetime, _item(item, "at", where, datetime))
+        if at.utcoffset() is None:
+            raise ConfigError(f"config key {where}.at must carry a UTC offset, such as 2026-10-02T10:30:00+08:00")
+        code = cast(str, _item(item, "code", where, str))
+        if code not in codes:
+            raise ConfigError(f"config key {where}.code names no [[stream.instrument]]: {code!r}")
+        actions.append(
+            StreamAction(
+                at=at,
+                op=cast(Literal["subscribe", "unsubscribe"], _item_choice(item, "op", where, _ACTION_OPS)),
+                code=code,
+                quote_type=_item_choice(item, "quote_type", where, _QUOTE_TYPES),
+            )
+        )
+    return tuple(actions)
 
 
 # Placeholders each order template must use, and those it may use besides.
@@ -451,15 +871,8 @@ _ORDER_TEMPLATE_PLACEHOLDERS: Mapping[str, tuple[frozenset[str], frozenset[str]]
     "cancel": (frozenset({"trade_id"}), frozenset()),
 }
 
-# Account fields that identify the holder, which only ever come from the
-# live accounts response, never from p1.toml.
-_ACCOUNT_IDENTIFIER_KEYS = frozenset({"account_id", "person_id", "username"})
-
 # scenarios.Market's values; config.py cannot import scenarios, which imports it
 ORDER_MARKETS = ("stock", "odd", "futures")
-
-# A "{name}" placeholder in an order body template
-TEMPLATE_PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
 def _parse_orders(data: Mapping[str, Any], config_dir: Path) -> OrdersConfig:
@@ -540,9 +953,9 @@ def _get_order_template(
                 f"config key {dotted_key} names account field {key!r}; the account comes from the live "
                 'accounts response through "{account}", never from p1.toml'
             )
-        if not isinstance(value, str) or not TEMPLATE_PLACEHOLDER_RE.search(value):
+        if not isinstance(value, str) or not PLACEHOLDER_RE.search(value):
             continue
-        whole = TEMPLATE_PLACEHOLDER_RE.fullmatch(value)
+        whole = PLACEHOLDER_RE.fullmatch(value)
         if whole is None:
             raise ConfigError(f"config key {dotted_key}: placeholder in {value!r} must be the whole string value")
         used.add(whole.group(1))
@@ -566,8 +979,69 @@ def _walk_json(node: object, key: str | None = None) -> Iterator[tuple[str | Non
 
 
 def _parse_events(data: Mapping[str, Any], config_dir: Path) -> EventFields:
-    _optional_table(data, "events")
-    return EventFields()
+    table = _optional_table(data, "events")
+
+    def name(key: str) -> str:
+        value = _get_str(data, f"events.{key}")
+        if not value:
+            raise ConfigError(f"config key events.{key} must not be empty")
+        return value
+
+    def names(key: str) -> tuple[str, ...]:
+        value = _lookup(data, f"events.{key}")
+        if not isinstance(value, list) or not value or not all(isinstance(item, str) and item for item in value):
+            raise ConfigError(f"config key events.{key} must be a non-empty array of non-empty strings")
+        return tuple(value)
+
+    def pointer(key: str, *, allow_root: bool = False) -> str:
+        return _get_pointer(data, f"events.{key}", allow_root=allow_root)
+
+    order_states = names("order_states")
+    deal_states = names("deal_states")
+    if set(order_states) & set(deal_states):
+        raise ConfigError("config keys events.order_states and events.deal_states must not share a state")
+
+    exchange_ts_pointers: tuple[str, ...] = ()
+    if "exchange_ts_pointers" in table:
+        exchange_ts_pointers = names("exchange_ts_pointers")
+        for index, item in enumerate(exchange_ts_pointers):
+            if not is_valid_pointer_syntax(item):
+                raise ConfigError(f"config key events.exchange_ts_pointers[{index}] is not a valid JSON pointer")
+    exchange_ts_format = name("exchange_ts_format") if "exchange_ts_format" in table else None
+    if exchange_ts_format is None and len(exchange_ts_pointers) > 1:
+        raise ConfigError("config key events.exchange_ts_format is required with more than one exchange_ts_pointers")
+    if exchange_ts_format is not None and not exchange_ts_pointers:
+        raise ConfigError("config key events.exchange_ts_format needs events.exchange_ts_pointers")
+
+    gap_threshold_s = _get_number(data, "events.gap_threshold_s")
+    if not 0 < gap_threshold_s < float("inf"):
+        raise ConfigError("config key events.gap_threshold_s must be a positive finite number")
+
+    return EventFields(
+        order_event_name=name("order_event_name"),
+        order_states=order_states,
+        deal_states=deal_states,
+        event_id=pointer("event_id"),
+        order_key=pointer("order_key"),
+        op_type=pointer("op_type"),
+        op_code=pointer("op_code"),
+        order_qty=pointer("order_qty"),
+        cancel_qty=pointer("cancel_qty"),
+        deal_key=pointer("deal_key"),
+        deal_qty=pointer("deal_qty"),
+        op_code_success=name("op_code_success"),
+        order_exchange_ts=pointer("order_exchange_ts"),
+        deal_exchange_ts=pointer("deal_exchange_ts"),
+        rest_list=pointer("rest_list", allow_root=True),
+        rest_key=pointer("rest_key"),
+        rest_status=pointer("rest_status"),
+        rest_filled_qty=pointer("rest_filled_qty"),
+        rest_order_ts=pointer("rest_order_ts"),
+        exchange_ts_pointers=exchange_ts_pointers,
+        exchange_ts_format=exchange_ts_format,
+        heartbeat_event=name("heartbeat_event"),
+        gap_threshold_s=gap_threshold_s,
+    )
 
 
 _HISTORY_OPS = ("ticks", "kbars", "snapshots")
@@ -625,6 +1099,59 @@ def _parse_history_query(item: Any, index: int, known_endpoints: Mapping[str, An
     return HistoryQuery(op=op, body=body)
 
 
+def _get_str_tuple(data: Mapping[str, Any], dotted_key: str) -> tuple[str, ...]:
+    value = _lookup(data, dotted_key)
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ConfigError(f"config key {dotted_key} must be an array of strings")
+    return tuple(value)
+
+
+# A plain field name not ending in _<digits>, since it becomes a
+# placeholder category and <CATEGORY>_<n> must parse back unambiguously.
+_SCRUB_FIELD_NAME = r"(?![A-Za-z0-9_]*_[0-9]+$)[A-Za-z][A-Za-z0-9_]*"
+
+# The last token names the placeholder category of every value the pointer finds
+_SCRUB_POINTER_RE = re.compile(rf"^(/[^/]*)*/{_SCRUB_FIELD_NAME}$")
+
+
+def _get_scrub_pointers(data: Mapping[str, Any], dotted_key: str) -> tuple[str, ...]:
+    pointers = _get_str_tuple(data, dotted_key)
+    if not pointers:
+        raise ConfigError(f"config key {dotted_key} must list at least one JSON pointer")
+    for index, pointer in enumerate(pointers):
+        if not _SCRUB_POINTER_RE.fullmatch(pointer):
+            raise ConfigError(
+                f"config key {dotted_key}[{index}] must be a JSON pointer ending in a field name "
+                "that does not end in _<digits>"
+            )
+    return pointers
+
+
+_SCRUB_KEY_RE = re.compile(rf"^{_SCRUB_FIELD_NAME}$")
+
+
+def _get_scrub_keys(data: Mapping[str, Any], dotted_key: str) -> tuple[str, ...]:
+    keys = _get_str_tuple(data, dotted_key)
+    for index, key in enumerate(keys):
+        if not _SCRUB_KEY_RE.fullmatch(key):
+            raise ConfigError(f"config key {dotted_key}[{index}] must be a plain field name not ending in _<digits>")
+    return keys
+
+
 def _parse_scrub(data: Mapping[str, Any], config_dir: Path) -> ScrubConfig:
     _optional_table(data, "scrub")
-    return ScrubConfig()
+    results_root = _get_fs_path(data, "results_root", config_dir)
+    map_path = _get_fs_path(data, "scrub.map_path", config_dir)
+    if not map_path.is_relative_to(results_root):
+        raise ConfigError("config key scrub.map_path must be inside results_root, which stays out of version control")
+    return ScrubConfig(
+        account_id_pointers=_get_scrub_pointers(data, "scrub.account_id_pointers"),
+        ca_pointers=_get_scrub_pointers(data, "scrub.ca_pointers"),
+        account_id_keys=_get_scrub_keys(data, "scrub.account_id_keys"),
+        map_path=map_path,
+        selection=_get_fs_path(data, "scrub.selection", config_dir),
+        contract_doc=_get_fs_path(data, "scrub.contract_doc", config_dir),
+        extra_scan_paths=tuple(
+            (config_dir / raw).resolve() for raw in _get_str_tuple(data, "scrub.extra_scan_paths")
+        ),
+    )

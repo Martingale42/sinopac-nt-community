@@ -88,7 +88,31 @@ def test_load_config_success(tmp_path: Path, write_config: WriteConfig) -> None:
     )
     # These remaining placeholder types only need to construct and load here
     assert cfg.stream == StreamConfig()
-    assert cfg.events == EventFields()
+    assert cfg.events == EventFields(
+        order_event_name="order_event",
+        order_states=("StockOrder", "FuturesOrder"),
+        deal_states=("StockDeal", "FuturesDeal"),
+        event_id="/event_id",
+        order_key="/order/id",
+        op_type="/operation/op_type",
+        op_code="/operation/op_code",
+        order_qty="/order/quantity",
+        cancel_qty="/status/cancel_quantity",
+        deal_key="/trade_id",
+        deal_qty="/quantity",
+        op_code_success="00",
+        order_exchange_ts="/status/exchange_ts",
+        deal_exchange_ts="/ts",
+        rest_list="",
+        rest_key="/order/id",
+        rest_status="/status/status",
+        rest_filled_qty="/status/deal_quantity",
+        rest_order_ts="/status/order_ts",
+        exchange_ts_pointers=("/date", "/time"),
+        exchange_ts_format="%Y-%m-%d %H:%M:%S.%f",
+        heartbeat_event="heartbeat",
+        gap_threshold_s=60.0,
+    )
     assert cfg.history == HistoryConfig(
         queries=(
             HistoryQuery(
@@ -98,7 +122,15 @@ def test_load_config_success(tmp_path: Path, write_config: WriteConfig) -> None:
         ),
         usage_bytes_pointer="/bytes",
     )
-    assert cfg.scrub == ScrubConfig()
+    assert cfg.scrub == ScrubConfig(
+        account_id_pointers=("/account_id", "/username", "/person_id"),
+        ca_pointers=("/person_id",),
+        account_id_keys=("subaccount",),
+        map_path=(tmp_path / "results" / "scrub-map.json").resolve(),
+        selection=(tmp_path / "fixtures.toml").resolve(),
+        contract_doc=(tmp_path / "contract.md").resolve(),
+        extra_scan_paths=(),
+    )
 
 
 def test_load_real_p1_toml() -> None:
@@ -157,14 +189,14 @@ def test_inline_secret_rejected_inside_array_of_tables(write_config: WriteConfig
 
 def test_inline_secret_rejected_for_person_id_and_egress_ip(write_config: WriteConfig) -> None:
     bogus_value = "A123456789"  # shaped like a Taiwanese national ID
-    lines = [*MINIMAL_CONFIG_LINES, "", "[scrub]", f'person_id = "{bogus_value}"']
+    lines = [*MINIMAL_CONFIG_LINES, "", "[notes]", f'person_id = "{bogus_value}"']
     config_path = write_config(lines)
 
     with pytest.raises(ConfigError) as exc_info:
         load_config(config_path)
 
     message = str(exc_info.value)
-    assert "scrub.person_id" in message
+    assert "notes.person_id" in message
     assert bogus_value not in message
 
 

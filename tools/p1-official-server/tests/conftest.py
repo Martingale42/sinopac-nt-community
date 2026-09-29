@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 from helpers import MINIMAL_CONFIG_LINES, WriteConfig
 
-from p1rec import redact
+from p1rec import cli, redact
 
 # Third-party loggers setup_logging raises to WARNING
 _QUIETED_LOGGERS = ("httpx", "httpcore")
@@ -69,3 +69,16 @@ def _reset_logging() -> Iterator[None]:
     for name, level in original_quiet_levels.items():
         logging.getLogger(name).setLevel(level)
     redact._active_formatter = original_active_formatter
+
+
+@pytest.fixture
+def stub_subcommand(monkeypatch: pytest.MonkeyPatch) -> str:
+    """Register a flagless subcommand named "stub" whose handler returns 0, and return its name.
+
+    Tests of the shared CLI setup use it instead of a real subcommand,
+    whose flags and handler change as that subcommand is implemented.
+    """
+    monkeypatch.setitem(
+        cli._SUBCOMMANDS, "stub", cli.Subcommand(add_arguments=lambda _sub: None, handler=lambda *_args: 0)
+    )
+    return "stub"

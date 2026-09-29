@@ -1,0 +1,23 @@
+# Recorded lines `p1rec scrub` de-identifies and exports from results/p1/
+# into test_data/official/1.7.6/ and lists in MANIFEST.toml there, one
+# [[fixture]] table per exported file with these keys:
+#
+#   name        output file stem without path separators, suffixed by the
+#               source type: rest.jsonl gives .json (the records as a JSON
+#               array), sse_*.jsonl gives .sse (the frames' raw text), and
+#               any other file gives .log (the lines themselves)
+#   run_id      run directory under results/p1/
+#   source      file in that run directory
+#   lines       1-based line numbers in source, in output order
+#   checklist   measurement checklist items the fixture is evidence for
+#   instrument  instrument code, or "" when none applies
+#   recorded_at optional date-time with a UTC offset, required only when
+#               the first selected line carries no timestamp of its own
+#
+# [[fixture]]
+# name = "B1_tick_fop"
+# run_id = "20261001T000000Z-stream"
+# source = "sse_a_tick_fop.jsonl"
+# lines = [3, 4]
+# checklist = ["B1"]
+# instrument = "TMFJ6"
