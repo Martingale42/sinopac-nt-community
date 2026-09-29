@@ -183,11 +183,6 @@ deal_key = "/trade_id"
 deal_qty = "/quantity"
 deal_exchange_ts = "/ts"
 order_exchange_ts = "/status/exchange_ts"
-rest_list = ""
-rest_key = "/order/id"
-rest_status = "/status/status"
-rest_filled_qty = "/status/deal_quantity"
-rest_order_ts = "/status/order_ts"
 exchange_ts_pointers = ["/date", "/time"]
 exchange_ts_format = "%Y-%m-%d %H:%M:%S.%f"
 heartbeat_event = "heartbeat"
@@ -195,6 +190,13 @@ heartbeat_event = "heartbeat"
 # Five of the stub's heartbeat intervals, so only the rehearsal's outage
 # reads as a gap.
 gap_threshold_s = 1.0
+
+[trades]
+list = ""
+id = "/order/id"
+status = "/status/status"
+deal_quantity = "/status/deal_quantity"
+order_ts = "/status/order_ts"
 
 [stream]
 
@@ -246,9 +248,6 @@ code = "TMFJ6"
 quote_type = "Tick"
 
 [orders]
-trade_id_pointer = "/order/id"
-filled_pointer = "/status/status"
-deal_quantity_pointer = "/status/deal_quantity"
 
 # The stub settles every order before answering, so these only need to
 # let the run pace itself like a live one.

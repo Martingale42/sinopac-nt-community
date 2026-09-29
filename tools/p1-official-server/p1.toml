@@ -240,16 +240,6 @@ deal_exchange_ts = "/ts"
 # Epoch seconds, which date an order for the calendar-date window
 order_exchange_ts = "/status/exchange_ts"
 
-# trades answers with a bare array of Trade objects
-rest_list = ""
-rest_key = "/order/id"
-rest_status = "/status/status"
-rest_filled_qty = "/status/deal_quantity"
-
-# Epoch seconds: the trades response recorded after a cancel in the
-# futures API test carries 1790677936.694802.
-rest_order_ts = "/status/order_ts"
-
 # Tick frames carry the exchange time as Taipei-local date and time
 # strings without a zone (docs/official-server-contract.md section 2).
 exchange_ts_pointers = ["/date", "/time"]
@@ -261,6 +251,33 @@ heartbeat_event = "heartbeat"
 # first live day, and until then twice the 30 s heartbeat measured in
 # docs/official-server-contract.md section 2.
 gap_threshold_s = 60.0
+
+# Pointers into the trades response and into one Trade (openapi.json
+# Trade), the shape the place, update and cancel responses share: orders
+# reads each order's id, status and deal quantity through them, and
+# reconcile compares the same fields with what the order events report.
+[trades]
+
+# trades answers with a bare array of Trade objects
+list = ""
+
+# Trade.order.id, which cancel_order accepted as trade_id in the futures
+# API test (docs/official-server-contract.md section 2).
+id = "/order/id"
+
+# OrderStatusInfo.status and deal_quantity within a Trade. An order the
+# exchange rejects shows Failed only in a later trades response
+# (docs/official-server-contract.md section 2). `p1rec orders` counts a
+# Failed order with a null deal quantity as unfilled, and a Cancelled one
+# as possibly filled.
+# calibrate: confirm Filled and the deal quantity on the first order that
+# fills, and whether a Cancelled order ever reports a null deal quantity.
+status = "/status/status"
+deal_quantity = "/status/deal_quantity"
+
+# Epoch seconds: the trades response recorded after a cancel in the
+# futures API test carries 1790677936.694802.
+order_ts = "/status/order_ts"
 
 # Multi-client SSE recording (docs/official-server-contract.md sections 1
 # and 2). Stream subscriptions are server-global, so p1rec stream sends
@@ -393,26 +410,13 @@ intraday_odd = false
 # action applies to every instrument entry with that code.
 
 # Order scenarios for `p1rec orders` (openapi.json PlaceOrderRequest,
-# UpdatePriceRequest, UpdateQtyRequest, CancelOrderRequest and Trade). In
-# each body template, a string value that is exactly "{name}" is replaced
-# by a typed value: price and quantity become JSON numbers, account the
-# full account object from accounts, and order_lot, octype or custom_field
+# UpdatePriceRequest, UpdateQtyRequest and CancelOrderRequest). In each
+# body template, a string value that is exactly "{name}" is replaced by a
+# typed value: price and quantity become JSON numbers, account the full
+# account object from accounts, and order_lot, octype or custom_field
 # null where they do not apply. An odd-lot order's quantity is in shares,
 # since order_lot IntradayOdd marks it; board-lot stock uses Common.
 [orders]
-
-# Trade.order.id, which cancel_order accepted as trade_id in the futures
-# API test (docs/official-server-contract.md section 2).
-trade_id_pointer = "/order/id"
-
-# OrderStatusInfo.status and deal_quantity within a Trade. An order the
-# exchange rejects shows Failed only in a later trades response
-# (docs/official-server-contract.md section 2). A Failed order with a null
-# deal quantity counts as unfilled, a Cancelled one as possibly filled.
-# calibrate: confirm Filled and the deal quantity on the first order that
-# fills, and whether a Cancelled order ever reports a null deal quantity.
-filled_pointer = "/status/status"
-deal_quantity_pointer = "/status/deal_quantity"
 
 # Initial values only. calibrate: set from the submit-to-report latency the
 # first lifecycle case measures, before the remaining cases run.

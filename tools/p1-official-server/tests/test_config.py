@@ -20,6 +20,7 @@ from p1rec.config import (
     OrdersConfig,
     ScrubConfig,
     StreamConfig,
+    TradeFields,
     load_config,
     read_secrets,
 )
@@ -79,12 +80,16 @@ def test_load_config_success(tmp_path: Path, write_config: WriteConfig) -> None:
             "cancel": '{"trade_id": "{trade_id}"}',
         },
         exchange={"stock": "TSE", "odd": "TSE", "futures": "TAIFEX"},
-        trade_id_pointer="/order/id",
-        filled_pointer="/status/status",
-        deal_quantity_pointer="/status/deal_quantity",
         step_wait_s=3.0,
         fill_poll_s=2.0,
         fill_timeout_s=60.0,
+    )
+    assert cfg.trades == TradeFields(
+        list="",
+        id="/order/id",
+        status="/status/status",
+        deal_quantity="/status/deal_quantity",
+        order_ts="/status/order_ts",
     )
     # These remaining placeholder types only need to construct and load here
     assert cfg.stream == StreamConfig()
@@ -103,11 +108,6 @@ def test_load_config_success(tmp_path: Path, write_config: WriteConfig) -> None:
         op_code_success="00",
         order_exchange_ts="/status/exchange_ts",
         deal_exchange_ts="/ts",
-        rest_list="",
-        rest_key="/order/id",
-        rest_status="/status/status",
-        rest_filled_qty="/status/deal_quantity",
-        rest_order_ts="/status/order_ts",
         exchange_ts_pointers=("/date", "/time"),
         exchange_ts_format="%Y-%m-%d %H:%M:%S.%f",
         heartbeat_event="heartbeat",
@@ -503,3 +503,53 @@ def test_stock_report_only_entries_validated(write_config: WriteConfig) -> None:
     repeated = [*MINIMAL_CONFIG_LINES[:at], 'trading_limits = "/trading_available"', *MINIMAL_CONFIG_LINES[at:]]
     with pytest.raises(ConfigError, match=r"repeats funds\.stock_available_op"):
         load_config(write_config(repeated))
+
+
+def _with_trades_line(key: str, line: str | None) -> list[str]:
+    """Return MINIMAL_CONFIG_LINES with the [trades] line setting key replaced by line, or dropped if it is None."""
+    lines = list(MINIMAL_CONFIG_LINES)
+    start = lines.index("[trades]") + 1
+    index = next(i for i in range(start, len(lines)) if lines[i].startswith(f"{key} = "))
+    if line is None:
+        del lines[index]
+    else:
+        lines[index] = line
+    return lines
+
+
+@pytest.mark.parametrize(
+    ("key", "line", "message"),
+    [
+        ("status", 'status = "status"', r"trades\.status is not a valid JSON pointer"),
+        ("id", 'id = ""', r"trades\.id must not be the empty pointer"),
+        ("id", 'id = "/order/account/account_id"', r"trades\.id must not point at an account identifier"),
+        ("deal_quantity", 'deal_quantity = "/x/person_id"', r"trades\.deal_quantity must not point at an account"),
+        ("order_ts", None, r"missing config key: trades\.order_ts"),
+        ("list", 'list = ""\nlist_pointer = ""', r"unknown config key: trades\.list_pointer"),
+    ],
+)
+def test_trades_pointers_validated(write_config: WriteConfig, key: str, line: str | None, message: str) -> None:
+    with pytest.raises(ConfigError, match=message):
+        load_config(write_config(_with_trades_line(key, line)))
+
+
+@pytest.mark.parametrize(
+    ("table", "line"),
+    [
+        ("orders", 'trade_id_pointer = "/order/id"'),
+        ("orders", 'filled_pointer = "/status/status"'),
+        ("orders", 'deal_quantity_pointer = "/status/deal_quantity"'),
+        ("events", 'rest_list = ""'),
+        ("events", 'rest_key = "/order/id"'),
+        ("events", 'rest_status = "/status/status"'),
+        ("events", 'rest_filled_qty = "/status/deal_quantity"'),
+        ("events", 'rest_order_ts = "/status/order_ts"'),
+    ],
+)
+def test_old_trades_keys_rejected(write_config: WriteConfig, table: str, line: str) -> None:
+    lines = list(MINIMAL_CONFIG_LINES)
+    lines.insert(lines.index(f"[{table}]") + 1, line)
+    key = line.partition(" = ")[0]
+
+    with pytest.raises(ConfigError, match=rf"unknown config key: {table}\.{key}$"):
+        load_config(write_config(lines))

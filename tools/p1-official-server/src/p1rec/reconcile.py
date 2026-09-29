@@ -21,9 +21,17 @@ from pathlib import Path
 import httpx
 
 from p1rec.capture import CapturingClient
-from p1rec.config import EventFields, P1Config
+from p1rec.config import EventFields, P1Config, TradeFields
 from p1rec.interlock import assert_simulation
 from p1rec.jsonpointer import JsonPointerError, resolve_pointer
+from p1rec.order_status import (
+    STATUS_CANCELLED,
+    STATUS_FAILED,
+    STATUS_FILLED,
+    STATUS_PART_FILLED,
+    STATUS_SUBMITTED,
+    normalize_status,
+)
 from p1rec.records import (
     EXIT_ANALYSIS_ERROR,
     EXIT_CHECK_FAILED,
@@ -50,15 +58,8 @@ _OP_NEW = "New"
 _OP_CANCEL = "Cancel"
 _OPS_QUANTITY_ONLY = frozenset({"UpdatePrice", "UpdateQty"})
 
-# REST statuses may be spelled with the enum's qualified name
-_STATUS_PREFIX = "Status."
-
-# Derived statuses; all but UNKNOWN are values of the OpenAPI Status enum
-STATUS_FAILED = "Failed"
-STATUS_FILLED = "Filled"
-STATUS_CANCELLED = "Cancelled"
-STATUS_PART_FILLED = "PartFilled"
-STATUS_SUBMITTED = "Submitted"
+# The status derive_status gives an order whose events cannot place it,
+# which is no value of the OpenAPI Status enum and so never matches REST.
 STATUS_UNKNOWN = "Unknown"
 
 # The trades request names no account, since every AccountRequest field
@@ -120,6 +121,10 @@ class RestOrders:
 class ReconcileReport:
     """How the orders every client saw on SSE compare with the REST trades list."""
 
+    # How many distinct orders REST lists, and each client saw, on the day compared
+    rest_order_count: int
+    sse_order_count_by_client: dict[str, int]
+
     # REST orders at least one client missed, and orders some client saw
     # that REST does not list.
     only_in_rest: list[str]
@@ -141,13 +146,21 @@ class ReconcileReport:
 
     @property
     def clean(self) -> bool:
-        """Return whether every client saw every report and SSE and REST agree on every order."""
+        """Return whether REST lists an order, every client saw every report, and SSE and REST agree on every order.
+
+        With no REST order nothing was compared, so a server that lost the
+        day's orders, and clients that never saw them, cannot pass.
+        """
         missed_events = any(self.missing_events_by_client.values())
-        return not (self.only_in_rest or self.only_in_sse or self.mismatched or missed_events)
+        compared = self.rest_order_count > 0
+        return compared and not (self.only_in_rest or self.only_in_sse or self.mismatched or missed_events)
 
     def to_json(self) -> dict[str, object]:
         """Return the report as the reconcile.json document, quantities as decimal strings."""
         return {
+            "clean": self.clean,
+            "rest_order_count": self.rest_order_count,
+            "sse_order_count_by_client": self.sse_order_count_by_client,
             "only_in_rest": self.only_in_rest,
             "only_in_sse": self.only_in_sse,
             "mismatched": [
@@ -180,11 +193,6 @@ def _optional_quantity(doc: object, pointer: str) -> Decimal | None:
     except JsonPointerError:
         return None
     return None if value is None else to_decimal(value)
-
-
-def normalize_status(status: str) -> str:
-    """Return status without the enum's "Status." qualifier, so both spellings compare equal."""
-    return status.removeprefix(_STATUS_PREFIX)
 
 
 def derive_status(
@@ -483,30 +491,30 @@ def _warn_if_night_session(what: str, ts_ns: int) -> None:
         )
 
 
-def _rest_items(payload: object, fields: EventFields) -> list[object]:
+def _rest_items(payload: object, fields: TradeFields) -> list[object]:
     try:
-        items = resolve_pointer(payload, fields.rest_list)
+        items = resolve_pointer(payload, fields.list)
     except JsonPointerError as exc:
-        raise AnalysisError(f"trades response has no list at {fields.rest_list!r}: {exc}") from exc
+        raise AnalysisError(f"trades response has no list at {fields.list!r}: {exc}") from exc
     if not isinstance(items, list):
-        raise AnalysisError(f"trades response at {fields.rest_list!r} is {type(items).__name__}, expected a list")
+        raise AnalysisError(f"trades response at {fields.list!r} is {type(items).__name__}, expected a list")
     return items
 
 
-def _rest_order_ns(item: object, fields: EventFields) -> int | None:
+def _rest_order_ns(item: object, fields: TradeFields) -> int | None:
     """Return a trades item's order time in epoch nanoseconds, or None if it has no usable one.
 
     A missing, null, non-numeric or non-positive order time is treated as
     absent, as an order report's exchange time is.
     """
     try:
-        order_ns = epoch_s_to_ns(resolve_pointer(item, fields.rest_order_ts))
+        order_ns = epoch_s_to_ns(resolve_pointer(item, fields.order_ts))
     except (JsonPointerError, ValueError):
         return None
     return order_ns if order_ns > 0 else None
 
 
-def orders_from_rest(payload: object, fields: EventFields, trading_day: date | None = None) -> RestOrders:
+def orders_from_rest(payload: object, fields: TradeFields, trading_day: date | None = None) -> RestOrders:
     """Return the orders in a trades response keyed by order key.
 
     A missing or null filled quantity counts as zero, since the schema
@@ -524,9 +532,9 @@ def orders_from_rest(payload: object, fields: EventFields, trading_day: date | N
     excluded = 0
     for index, item in enumerate(_rest_items(payload, fields)):
         try:
-            key = _pointer_str(item, fields.rest_key)
-            status = normalize_status(_pointer_str(item, fields.rest_status))
-            reported = _optional_quantity(item, fields.rest_filled_qty)
+            key = _pointer_str(item, fields.id)
+            status = normalize_status(_pointer_str(item, fields.status))
+            reported = _optional_quantity(item, fields.deal_quantity)
             filled = reported if reported is not None else Decimal(0)
         except (JsonPointerError, ValueError) as exc:
             raise AnalysisError(f"trades item {index}: {exc}") from exc
@@ -547,7 +555,7 @@ def orders_from_rest(payload: object, fields: EventFields, trading_day: date | N
     return RestOrders(orders=orders, excluded_other_days=excluded)
 
 
-def trading_day_of(payload: object, fields: EventFields) -> date:
+def trading_day_of(payload: object, fields: TradeFields) -> date:
     """Return the Asia/Taipei calendar date every order time in a trades response falls on.
 
     This is a calendar date, not a TAIFEX trading day. Items without a
@@ -596,6 +604,8 @@ def reconcile(sse: Mapping[str, ClientOrders], rest_orders: RestOrders) -> Recon
         )
     ]
     return ReconcileReport(
+        rest_order_count=len(rest),
+        sse_order_count_by_client={client: len(sse[client].orders) for client in clients},
         only_in_rest=sorted(missed),
         only_in_sse=sorted(seen - rest.keys()),
         mismatched=mismatched,
@@ -660,7 +670,7 @@ def run_reconcile(
     trading_day: date | None = None,
     transport: httpx.BaseTransport | None = None,
 ) -> int:
-    """Write run_dir/reconcile.json and return 0 if SSE and REST agree, 2 if not.
+    """Write run_dir/reconcile.json and return 0 if SSE and REST agree, 2 if not or if nothing was compared.
 
     Without rest_run, the trades list is fetched live after the
     simulation-mode check, and recorded in run_dir; with it, the last
@@ -670,8 +680,11 @@ def run_reconcile(
     only the orders of trading_day take part: an Asia/Taipei calendar
     date, not a TAIFEX trading day, so a night-session order counts on the
     date it was placed. It defaults to the date of the snapshot's order
-    times. InterlockError propagates; any other failure to analyse is
-    logged and returns 1.
+    times, except that an empty snapshot gives no date, so no SSE order
+    is compared either and reconcile.json records trading_day as null.
+    When REST lists no order on the day, nothing was compared, which is
+    logged as an ERROR and returns 2. InterlockError propagates; any
+    other failure to analyse is logged and returns 1.
     """
     try:
         sse_dir = resolve_run_dir(cfg.results_root, sse_run)
@@ -679,10 +692,18 @@ def run_reconcile(
             payload = _query_trades(cfg, run_dir, transport)
         else:
             payload = last_trades_payload(resolve_run_dir(cfg.results_root, rest_run) / "rest.jsonl")
-        day = trading_day if trading_day is not None else trading_day_of(payload, cfg.events)
-        rest = orders_from_rest(payload, cfg.events, day)
+        day = trading_day
+        if day is None and _rest_items(payload, cfg.trades):
+            day = trading_day_of(payload, cfg.trades)
+        rest = orders_from_rest(payload, cfg.trades, day)
         sse_files = discover_sse_files(sse_dir)
-        report = reconcile(orders_from_sse(sse_files, cfg.events, day), rest)
+
+        # With no day to window SSE by, no SSE order takes part either
+        if day is None:
+            sse = {client: ClientOrders(orders={}, event_ids=frozenset()) for client in sse_files}
+        else:
+            sse = orders_from_sse(sse_files, cfg.events, day)
+        report = reconcile(sse, rest)
     except (AnalysisError, OSError) as exc:
         logger.error("reconcile failed: %s", exc)
         return EXIT_ANALYSIS_ERROR
@@ -690,12 +711,18 @@ def run_reconcile(
     document: dict[str, object] = {
         "sse_run": sse_run,
         "rest_run": rest_run,
-        "trading_day": day.isoformat(),
+        "trading_day": day.isoformat() if day is not None else None,
         **report.to_json(),
     }
     write_json(run_dir / "reconcile.json", document)
+    if report.rest_order_count == 0:
+        where = f"on {day.isoformat()}" if day is not None else "at all"
+        logger.error("reconcile: nothing was compared, since trades lists no order %s", where)
     logger.info(
-        "reconcile: %d only in REST, %d only in SSE, %d mismatched, missing orders %s, missing reports %s",
+        "reconcile: %d REST orders, SSE orders %s; %d only in REST, %d only in SSE, %d mismatched, "
+        "missing orders %s, missing reports %s",
+        report.rest_order_count,
+        ", ".join(f"{client}={count}" for client, count in report.sse_order_count_by_client.items()),
         len(report.only_in_rest),
         len(report.only_in_sse),
         len(report.mismatched),

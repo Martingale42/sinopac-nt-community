@@ -1,11 +1,11 @@
 """Load and validate p1.toml into a P1Config.
 
 Each of InterlockConfig, ContractFields, FundsConfig, StreamConfig,
-OrdersConfig, EventFields, HistoryConfig and ScrubConfig is filled in by
-its own `_parse_<section>` function below, which receives the whole
-parsed document plus the config file's directory, so a full dotted key
-(for validation errors) or a relative path can be resolved without
-touching load_config itself.
+OrdersConfig, TradeFields, EventFields, HistoryConfig and ScrubConfig is
+filled in by its own `_parse_<section>` function below, which receives
+the whole parsed document plus the config file's directory, so a full
+dotted key (for validation errors) or a relative path can be resolved
+without touching load_config itself.
 """
 
 from __future__ import annotations
@@ -151,22 +151,38 @@ class OrdersConfig:
     # Market (stock, odd, futures) -> ContractRequest.exchange
     exchange: dict[str, str]
 
-    # JSON pointers into one Trade, the place response and each element of
-    # the trades response alike: the order id that update_price, update_qty
-    # and cancel take as trade_id, the order status ("Filled" once filled,
-    # "Failed" when rejected), and the quantity filled so far.
-    trade_id_pointer: str
-    filled_pointer: str
-    deal_quantity_pointer: str
-
     step_wait_s: float
     fill_poll_s: float
     fill_timeout_s: float
 
 
 @dataclass(frozen=True)
+class TradeFields:
+    """JSON pointers into the trades response and into one Trade.
+
+    The place, update and cancel responses are each one Trade too, so
+    orders and reconcile read every Trade through these same pointers.
+    """
+
+    # The Trade array within the trades response, "" for a bare array
+    list: str
+
+    # The order id, which update_price, update_qty and cancel take as trade_id
+    id: str
+
+    # The order status ("Filled" once filled, "Failed" when rejected) and
+    # the quantity filled so far.
+    status: str
+    deal_quantity: str
+
+    # The order time in epoch seconds, which dates a trades snapshot when
+    # no --trading-day is given and windows the REST side by calendar date.
+    order_ts: str
+
+
+@dataclass(frozen=True)
 class EventFields:
-    """Where order reports, the trades list and stream timing live in recorded JSON."""
+    """Where order reports and stream timing live in recorded JSON."""
 
     # SSE event name carrying OrderEvent frames, and the OrderEvent state
     # values that mark an order report or a deal report.
@@ -191,18 +207,6 @@ class EventFields:
     # and of a deal report, which date an order for the calendar-date window.
     order_exchange_ts: str
     deal_exchange_ts: str
-
-    # JSON pointers into the trades response: the list ("" for a bare
-    # array), then key, status and filled quantity within each item.
-    rest_list: str
-    rest_key: str
-    rest_status: str
-    rest_filled_qty: str
-
-    # Pointer into each trades item to its order time in epoch seconds,
-    # which dates the snapshot when no --trading-day is given and windows
-    # the REST side by calendar date.
-    rest_order_ts: str
 
     # Pointers into a frame's data giving the exchange time, empty to skip
     # latency: one numeric epoch-seconds value when exchange_ts_format is
@@ -274,6 +278,7 @@ class P1Config:
     funds: FundsConfig
     stream: StreamConfig
     orders: OrdersConfig
+    trades: TradeFields
     events: EventFields
     history: HistoryConfig
     scrub: ScrubConfig
@@ -328,6 +333,7 @@ def load_config(path: Path) -> P1Config:
         funds=_parse_funds(data, config_dir),
         stream=_parse_stream(data, config_dir),
         orders=_parse_orders(data, config_dir),
+        trades=_parse_trades(data, config_dir),
         events=_parse_events(data, config_dir),
         history=_parse_history(data, config_dir),
         scrub=_parse_scrub(data, config_dir),
@@ -876,18 +882,7 @@ _ORDER_TEMPLATE_PLACEHOLDERS: Mapping[str, tuple[frozenset[str], frozenset[str]]
 ORDER_MARKETS = ("stock", "odd", "futures")
 
 # Every key [orders] may hold, so a misspelt one fails at load
-_ORDERS_KEYS = frozenset(
-    {
-        "body_templates",
-        "exchange",
-        "trade_id_pointer",
-        "filled_pointer",
-        "deal_quantity_pointer",
-        "step_wait_s",
-        "fill_poll_s",
-        "fill_timeout_s",
-    }
-)
+_ORDERS_KEYS = frozenset({"body_templates", "exchange", "step_wait_s", "fill_poll_s", "fill_timeout_s"})
 
 # ContractRequest.exchange values (openapi.json Exchange)
 _ORDER_EXCHANGES = ("TSE", "OTC", "OES", "TAIFEX", "TIM")
@@ -932,22 +927,36 @@ def _parse_orders(data: Mapping[str, Any], config_dir: Path) -> OrdersConfig:
     return OrdersConfig(
         body_templates=templates,
         exchange=exchange,
-        trade_id_pointer=_get_order_pointer(data, "orders.trade_id_pointer"),
-        filled_pointer=_get_order_pointer(data, "orders.filled_pointer"),
-        deal_quantity_pointer=_get_order_pointer(data, "orders.deal_quantity_pointer"),
         step_wait_s=step_wait_s,
         fill_poll_s=fill_poll_s,
         fill_timeout_s=fill_timeout_s,
     )
 
 
-def _get_order_pointer(data: Mapping[str, Any], dotted_key: str) -> str:
-    """Read an [orders] pointer, refusing one that ends at an account identifier.
+# Every key [trades] may hold, so a misspelt one fails at load
+_TRADES_KEYS = frozenset({"list", "id", "status", "deal_quantity", "order_ts"})
 
-    The values these pointers find are logged and written to orders.json,
-    so none of them may be an account's identifier.
+
+def _parse_trades(data: Mapping[str, Any], config_dir: Path) -> TradeFields:
+    _reject_unknown_keys(_optional_table(data, "trades"), _TRADES_KEYS, "trades")
+    return TradeFields(
+        list=_get_trade_pointer(data, "trades.list", allow_root=True),
+        id=_get_trade_pointer(data, "trades.id"),
+        status=_get_trade_pointer(data, "trades.status"),
+        deal_quantity=_get_trade_pointer(data, "trades.deal_quantity"),
+        order_ts=_get_trade_pointer(data, "trades.order_ts"),
+    )
+
+
+def _get_trade_pointer(data: Mapping[str, Any], dotted_key: str, *, allow_root: bool = False) -> str:
+    """Read a [trades] pointer, refusing one that ends at an account identifier.
+
+    The order id, status and deal quantity these pointers find are logged
+    or written to orders.json and reconcile.json, so none of them may be
+    an account's identifier; the list and order time pointers have no
+    reason to end at one, so the same rule holds for them.
     """
-    pointer = _get_pointer(data, dotted_key)
+    pointer = _get_pointer(data, dotted_key, allow_root=allow_root)
     last = pointer.rsplit("/", 1)[-1].replace("~1", "/").replace("~0", "~")
     if last in ACCOUNT_IDENTIFIER_KEYS:
         raise ConfigError(f"config key {dotted_key} must not point at an account identifier ({last})")
@@ -1011,8 +1020,35 @@ def _template_placeholders(value: object, dotted_key: str) -> set[str]:
     return set()
 
 
+# Every key [events] may hold, so a misspelt key, or one that belongs in
+# another table, fails at load instead of being silently ignored.
+_EVENTS_KEYS = frozenset(
+    {
+        "order_event_name",
+        "order_states",
+        "deal_states",
+        "event_id",
+        "order_key",
+        "op_type",
+        "op_code",
+        "order_qty",
+        "cancel_qty",
+        "deal_key",
+        "deal_qty",
+        "op_code_success",
+        "order_exchange_ts",
+        "deal_exchange_ts",
+        "exchange_ts_pointers",
+        "exchange_ts_format",
+        "heartbeat_event",
+        "gap_threshold_s",
+    }
+)
+
+
 def _parse_events(data: Mapping[str, Any], config_dir: Path) -> EventFields:
     table = _optional_table(data, "events")
+    _reject_unknown_keys(table, _EVENTS_KEYS, "events")
 
     def name(key: str) -> str:
         value = _get_str(data, f"events.{key}")
@@ -1026,8 +1062,8 @@ def _parse_events(data: Mapping[str, Any], config_dir: Path) -> EventFields:
             raise ConfigError(f"config key events.{key} must be a non-empty array of non-empty strings")
         return tuple(value)
 
-    def pointer(key: str, *, allow_root: bool = False) -> str:
-        return _get_pointer(data, f"events.{key}", allow_root=allow_root)
+    def pointer(key: str) -> str:
+        return _get_pointer(data, f"events.{key}")
 
     order_states = names("order_states")
     deal_states = names("deal_states")
@@ -1065,11 +1101,6 @@ def _parse_events(data: Mapping[str, Any], config_dir: Path) -> EventFields:
         op_code_success=name("op_code_success"),
         order_exchange_ts=pointer("order_exchange_ts"),
         deal_exchange_ts=pointer("deal_exchange_ts"),
-        rest_list=pointer("rest_list", allow_root=True),
-        rest_key=pointer("rest_key"),
-        rest_status=pointer("rest_status"),
-        rest_filled_qty=pointer("rest_filled_qty"),
-        rest_order_ts=pointer("rest_order_ts"),
         exchange_ts_pointers=exchange_ts_pointers,
         exchange_ts_format=exchange_ts_format,
         heartbeat_event=name("heartbeat_event"),

@@ -10,7 +10,7 @@ from pathlib import Path
 
 import httpx
 import pytest
-from helpers import SECRET_ENV_VARS, UNUSED_ORDERS_CONFIG, WriteConfig
+from helpers import SECRET_ENV_VARS, UNUSED_ORDERS_CONFIG, UNUSED_TRADE_FIELDS, WriteConfig
 
 from p1rec import cli, interlock
 from p1rec.capture import CapturingClient
@@ -53,6 +53,7 @@ def _build_cfg(tmp_path: Path) -> P1Config:
         ),
         stream=StreamConfig(),
         orders=UNUSED_ORDERS_CONFIG,
+        trades=UNUSED_TRADE_FIELDS,
         events=interlock._UNUSED_EVENT_FIELDS,
         history=HistoryConfig(queries=(), usage_bytes_pointer="/bytes"),
         scrub=ScrubConfig(

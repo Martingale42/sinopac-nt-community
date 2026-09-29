@@ -819,6 +819,26 @@ def test_rejected_cancel_of_failed_order_completes(tmp_path: Path, write_config:
     assert summary["cases"][0]["reason"] == "cancel rejected, but the order had already ended unfilled"
 
 
+def test_trades_list_pointer_followed(tmp_path: Path, write_config: WriteConfig) -> None:
+    server = OrderServer()
+
+    def wrapped_trades(path: str, _body: dict[str, Any]) -> httpx.Response | None:
+        if path != _TRADES_PATH:
+            return None
+        trades = [server._trade(trade_id, refresh=True) for trade_id in server.orders]
+        return httpx.Response(200, json={"trades": trades})
+
+    server.answer = wrapped_trades
+    cfg = _config(write_config)
+    cfg = dataclasses.replace(cfg, trades=dataclasses.replace(cfg.trades, list="/trades"))
+
+    exit_code, summary = _run(tmp_path, cfg, server, [_fill_case("fill")])
+
+    # The fill and its close are only seen through the configured list pointer
+    assert exit_code == 0
+    assert _outcomes(summary) == ["closed"]
+
+
 def test_failed_status_on_a_2xx_place_counts_as_rejected(tmp_path: Path, write_config: WriteConfig) -> None:
     def failed_place(path: str, _body: dict[str, Any]) -> httpx.Response | None:
         body = {"order": {"id": "F00001"}, "status": {"id": "F00001", "status": "Failed", "status_code": "88"}}
@@ -1200,7 +1220,7 @@ def test_repo_scenarios_follow_the_plan() -> None:
 def test_repo_p1_toml_orders_section() -> None:
     cfg = load_config(_TOOL_DIR / "p1.toml")
 
-    assert cfg.orders.trade_id_pointer == "/order/id"
+    assert cfg.trades.id == "/order/id"
     assert set(cfg.orders.body_templates) == {"place_stock", "place_futures", "update_price", "update_qty", "cancel"}
 
 
@@ -1242,12 +1262,9 @@ def test_template_placeholders_validated(write_config: WriteConfig, line: str, m
     [
         ("step_wait_s", "step_wait_s = 0", r"orders\.step_wait_s"),
         ("fill_timeout_s", "fill_timeout_s = 2", r"orders\.fill_timeout_s"),
-        ("filled_pointer", 'filled_pointer = "status"', r"orders\.filled_pointer"),
         ("futures = ", "", r"orders\.exchange"),
         ("futures = ", 'futures = "CME"', r"orders\.exchange\.futures must be one of"),
         ("step_wait_s", "step_wait_s = 3\nstep_wait = 3", r"unknown config key: orders\.step_wait\b"),
-        ("trade_id_pointer", 'trade_id_pointer = "/order/account/account_id"', r"orders\.trade_id_pointer.*account_id"),
-        ("deal_quantity_pointer", 'deal_quantity_pointer = "/x/person_id"', r"orders\.deal_quantity_pointer"),
     ],
 )
 def test_orders_settings_validated(write_config: WriteConfig, prefix: str, line: str, key: str) -> None:
