@@ -53,7 +53,9 @@ tools/p1-official-server/
     preflight.py   # 第 0 步
     stream.py      # 多 client 串流與排程動作
     orders.py      # 劇本執行
-    analysis.py    # 對帳、client 覆蓋、串流統計
+    records.py     # 錄製檔（JSONL、SSE frame）讀取與時間換算，對帳與統計共用
+    reconcile.py   # 對帳、client 覆蓋
+    stats.py       # 串流統計
     history.py     # 歷史資料查詢與額度量測
     scrub/         # 去識別化、語料匯出、掃描（比對與掃描、對照表、找值、匯出、流程各一個模組）
   tests/  stub_server.py  data/  test_*.py
@@ -610,37 +612,50 @@ git commit -m "Run simulated order scenarios behind the interlock"
 ### Task 8：SSE 分析：對帳、client 覆蓋與串流統計
 
 **Files:**
-- Create: `src/p1rec/analysis.py`
-- Modify: `src/p1rec/config.py`、`src/p1rec/cli.py`
-- Test: `tests/test_analysis.py`
+- Create: `src/p1rec/records.py`（JSONL 與 SSE 檔讀取、數值與時間換算、結束碼）、`src/p1rec/reconcile.py`、`src/p1rec/stats.py`
+- Modify: `src/p1rec/config.py`、`src/p1rec/cli.py`、`p1.toml`（`[events]`）
+- Test: `tests/test_analysis.py`（涵蓋三個模組）
 
 **Behaviour:**
 
-- `p1rec reconcile --sse-run <run_id> [--rest-run <run_id>]`：未給 `--rest-run` 時，連鎖檢查後即時查 `trades` 並落地；給了則用該 run 最後一次 `trades` 回應。
-- 依 `EventFields` 從各 client 的 SSE 檔挑出委託與成交事件，整理為「委託識別 → 最終狀態、累計成交量」。
-- `reconcile.json`：`only_in_rest`、`only_in_sse`、`mismatched`、`per_client_keys`（各 client 看到的委託識別，設計 §6 D）。前三者皆空時回 0，否則回 2。
-- `p1rec stats --sse-run <run_id>` 寫 `stats.json`：每個 client 各事件名稱的數量；每秒 frame 數最高的前 10 秒與其時間；心跳事件（名稱為 `heartbeat_event`）間隔的最小、中位數、最大值；相鄰 frame 間隔超過 `gap_threshold_s` 的清單；`exchange_ts_pointer` 有設定時，收到時間減交易所時間的 p50、p99、最大值。
+- `p1rec reconcile --sse-run <run_id> [--rest-run <run_id>] [--trading-day YYYY-MM-DD]`：run_id 為 `results_root` 下的目錄名，含路徑分隔字元時拒絕。未給 `--rest-run` 時，連鎖檢查後以 `{"refresh": true}`（`TradesRequest` 的帳戶欄位皆可省略，端點回傳全部委託）即時查 `trades`，記在本次 run 的 `rest.jsonl`；給了則用該 run 最後一次 `trades` 回應（非 2xx 時失敗，不退回較舊的回應）。先取 REST 再讀 SSE 檔。
+- 日期窗口（兩側皆套用）：`--trading-day` 是 Asia/Taipei 的日曆日期，不是期交所的交易日（夜盤委託屬於下一個期交所交易日，但依下單當下的日曆日期計）。SSE 側只有第一筆報告的交易所時間（委託取 `order_exchange_ts`、成交取 `deal_exchange_ts`，epoch 秒；不大於 0 或沒有時視為沒有；沒有任何報告帶交易所時間時以第一筆的收到時間代替並記 WARN）落在該日期的委託參與對帳，其餘依 client 計入 `excluded_other_days`；REST 側以同樣的台北日期檢查 `rest_order_ts`，其他日期的委託計入 `rest_excluded_other_days`，沒有委託時間（缺少、null 或不大於 0）的委託保留並記 WARN。兩側皆不默默丟棄。時間落在夜盤（台北 15:00 至次日 05:00）的委託記 WARN。未給 `--trading-day` 時取 REST 快照各委託 `rest_order_ts`（不大於 0 視為沒有）的台北日期；沒有任何時間或跨越兩個以上日期時回 1，要求指定。
+- 依 `EventFields` 從各 client 的全部 SSE 檔（`order_event` 串流與可能也帶委託事件的綜合串流）挑出事件名稱為 `order_event_name` 的 frame；報告在 `data/<state>`（OpenAPI `OrderEvent`），`state` 屬 `order_states` 為委託、屬 `deal_states` 為成交。每筆報告的識別為 `event_id`（空字串時為 data 原文的 SHA-256）；同一 client 內以識別去重並保留最早收到的一筆（同一 `event_id` 內容不同時記 WARN），依收到時間整理為「委託識別 → 最終狀態、累計成交量」，並記下該 client 看到的報告識別。只解碼含事件名稱的行。
+- 官方委託事件不帶狀態字串，SSE 端狀態由 `derive_status` 推得，依序取第一條成立者：New 的 `op_code` 不等於 `op_code_success` → Failed；沒看到成功的 New 或沒有委託數量 → Unknown（缺了 New，其餘歷史不完整）；成交量大於 0 且不小於委託數量 → Filled；有成功的 Cancel 且 `cancel_quantity` 不小於「委託數量 − 成交量」→ Cancelled；成交量大於 0 → PartFilled；其餘 → Submitted。委託數量取自 `order_qty`（`/order/quantity`，三筆真實事件皆為下單數量；真實 Cancel 事件的 `status.order_quantity` 為 0，不能用），只採成功操作回報的最新非零值（UpdateQty 可能調降）；`cancel_quantity` 取成功操作回報的最大值；被拒的操作不更新任何數量（可能帶的是請求的數量）。UpdatePrice、UpdateQty 只更新數量，其他 op_type 記 WARN。`calibrate:` 以下為尚未錄到事件的假設，錯了會以不一致呈現：`cancel_quantity` 為委託歷次操作的累計而非單次；成功的 UpdateQty 之後 `order.quantity` 為調降後的數量；IOC／FOK 逾時以成功的 Cancel 送達；Reject 操作不改變狀態。REST 狀態去掉 `Status.` 前綴後比較；`deal_quantity` 缺少或為 null 時視為 0。
+- `reconcile.json`：`only_in_rest`（至少一個 client 沒看到的 REST 委託；GO 準則 4 與設計 §6 D1 量的是每個 client 都收齊，任一 client 缺一筆即列入）、`only_in_sse`（任一 client 看到而 REST 沒有的委託）、`mismatched`（`Mismatch(client, sse, rest)`：每個看到該委託而狀態或成交量與 REST 不同的 client 各一筆）、`missing_by_client`（各 client 缺的 REST 委託）、`missing_events_by_client`（任一 client 看到而此 client 沒看到的報告識別；只看到 Cancel 而缺 New 的 client 由此失敗）、`per_client_keys`（各 client 看到的委託識別，設計 §6 D）、`excluded_other_days`（各 client 因不在該日期而排除的委託數）、`rest_excluded_other_days`（REST 因不在該日期而排除的委託數），另記 `sse_run`、`rest_run`、`trading_day`。前三者與 `missing_events_by_client` 皆空時回 0，否則回 2；輸入無法分析時回 1。
+- `p1rec stats --sse-run <run_id>` 只讀錄製檔、不連 server，因此不需要密鑰環境變數。寫 `stats.json`：每個 client 各事件名稱的數量；以下皆逐檔（一個 recorder 一檔）計算，同一 client 的綜合串流與 `order_event` 串流才不會重複計數：每秒 frame 數最高的前 10 秒（以 `recv_ts_ns` 取整秒，UTC ISO 時間）；心跳事件（名稱為 `heartbeat_event`）在同一連線內的間隔最小、中位數（`statistics.median`）、最大值；相鄰 frame 間隔超過 `gap_threshold_s` 的清單；斷線到下一次 200 連上的區間（含嘗試次數與第一個錯誤）；`exchange_ts_pointers` 有設定時，收到時間減交易所時間的 p50、p99（nearest-rank）、最大值與無法解析的筆數。
+- JSONL 最後一行無法解析時記 WARN 並略過（寫入未 fsync，斷電會留下截斷的末行）；中間行無法解析時失敗。
 
 **Interface:**
 
 ```python
 @dataclass(frozen=True)
-class EventFields:  # 事件名稱與 JSON 指標，取自 Task 12 的真實事件
-    order_event_names: tuple[str, ...]
-    deal_event_names: tuple[str, ...]
+class EventFields:  # 事件名稱與 JSON 指標，取自 2026-09-29 錄到的真實事件
+    order_event_name: str             # 官方 1.7.6 為 "order_event"
+    order_states: tuple[str, ...]     # StockOrder、FuturesOrder
+    deal_states: tuple[str, ...]      # StockDeal、FuturesDeal
+    event_id: str                     # 此行起八個指標相對於 data/<state> 的報告
     order_key: str
-    order_status: str
+    op_type: str
+    op_code: str
+    order_qty: str                    # /order/quantity；Cancel 事件的 status.order_quantity 為 0
+    cancel_qty: str
     deal_key: str
     deal_qty: str
-    rest_list: str
+    op_code_success: str              # 官方 1.7.6 為 "00"
+    order_exchange_ts: str            # 委託報告的交易所時間（epoch 秒），/status/exchange_ts
+    deal_exchange_ts: str             # 成交報告的交易所時間（epoch 秒），/ts
+    rest_list: str                    # "" 表示回應本身即清單
     rest_key: str
     rest_status: str
     rest_filled_qty: str
-    exchange_ts_pointer: str | None
-    exchange_ts_format: str | None   # strptime 格式；時區固定為 Asia/Taipei
-    heartbeat_event: str             # 官方 1.7.6 為 "heartbeat"
+    rest_order_ts: str                # 各委託的下單時間（epoch 秒），/status/order_ts
+    exchange_ts_pointers: tuple[str, ...]  # 空則不算延遲
+    exchange_ts_format: str | None    # None：單一指標為 epoch 秒數值；否則各字串以空白串接後以 strptime 解析，時區固定為 Asia/Taipei
+    heartbeat_event: str              # 官方 1.7.6 為 "heartbeat"
     gap_threshold_s: float
 
+# p1rec.reconcile
 @dataclass(frozen=True)
 class OrderView:
     key: str
@@ -648,16 +663,51 @@ class OrderView:
     filled_qty: Decimal
 
 @dataclass(frozen=True)
-class ReconcileReport:
-    only_in_rest: list[str]
-    only_in_sse: list[str]
-    mismatched: list[tuple[OrderView, OrderView]]
-    per_client_keys: dict[str, list[str]]
+class Mismatch:
+    client: str
+    sse: OrderView
+    rest: OrderView
 
-def orders_from_sse(paths: Mapping[str, Path], fields: EventFields) -> dict[str, dict[str, OrderView]]: ...
-def orders_from_rest(payload: object, fields: EventFields) -> dict[str, OrderView]: ...
-def reconcile(sse: Mapping[str, dict[str, OrderView]], rest: dict[str, OrderView]) -> ReconcileReport: ...
-def stream_stats(paths: Mapping[str, Path], fields: EventFields) -> dict[str, object]: ...
+@dataclass(frozen=True)
+class ClientOrders:
+    orders: dict[str, OrderView]    # 委託識別 -> 推得的狀態與成交量
+    event_ids: frozenset[str]       # 這些委託背後的報告識別
+    excluded_other_days: int        # 因不在該日期而排除的委託數
+
+@dataclass(frozen=True)
+class RestOrders:
+    orders: dict[str, OrderView]    # 委託識別 -> REST 的狀態與成交量
+    excluded_other_days: int        # 因不在該日期而排除的委託數
+
+@dataclass(frozen=True)
+class ReconcileReport:
+    only_in_rest: list[str]                  # 至少一個 client 缺的 REST 委託
+    only_in_sse: list[str]                   # 任一 client 看到而 REST 沒有
+    mismatched: list[Mismatch]               # 每個不一致的 client 各一筆
+    missing_by_client: dict[str, list[str]]  # client -> 缺的 REST 委託
+    per_client_keys: dict[str, list[str]]    # client -> 看到的委託識別
+    missing_events_by_client: dict[str, list[str]]  # client -> 別的 client 看到而它沒看到的報告識別
+    excluded_other_days: dict[str, int]      # client -> 因不在該日期而排除的委託數
+    rest_excluded_other_days: int            # REST 因不在該日期而排除的委託數
+
+def derive_status(*, new_ok: bool | None, cancel_ok: bool, order_qty: Decimal | None,
+                  cancel_qty: Decimal, filled_qty: Decimal) -> str: ...
+def orders_from_sse(paths: Mapping[str, Sequence[Path]], fields: EventFields,
+                    trading_day: date | None = None) -> dict[str, ClientOrders]: ...
+def trading_day_of(payload: object, fields: EventFields) -> date: ...  # REST 快照委託時間的台北日期
+def orders_from_rest(payload: object, fields: EventFields, trading_day: date | None = None) -> RestOrders: ...
+def reconcile(sse: Mapping[str, ClientOrders], rest_orders: RestOrders) -> ReconcileReport: ...
+def run_reconcile(cfg: P1Config, sse_run: str, rest_run: str | None, run_dir: Path, *,
+                  trading_day: date | None = None, transport: httpx.BaseTransport | None = None) -> int: ...
+
+# p1rec.stats
+def stream_stats(paths: Mapping[str, Sequence[Path]], fields: EventFields) -> dict[str, object]: ...
+def run_stats(cfg: P1Config, sse_run: str, run_dir: Path) -> int: ...
+
+# p1rec.records
+class AnalysisError(ValueError): ...
+def read_jsonl(path: Path, contains: bytes | None = None) -> Iterator[tuple[int, dict[str, object]]]: ...
+def discover_sse_files(run_dir: Path) -> dict[str, list[Path]]: ...  # client -> 該 client 的全部 SSE 檔
 ```
 
 **Tests:**
@@ -665,15 +715,36 @@ def stream_stats(paths: Mapping[str, Path], fields: EventFields) -> dict[str, ob
 - `test_all_match_exit_0` — 兩個 client 與 REST 一致時三份清單皆空。
 - `test_missing_in_sse_reported` — REST 多一筆時列入 `only_in_rest` 並回 2。
 - `test_status_mismatch_reported` — SSE 為 PartFilled、REST 為 Filled 時列入 `mismatched`。
-- `test_client_coverage_difference` — client b 缺一筆時 `per_client_keys` 可看出差集。
+- `test_client_coverage_difference` — client b 缺一筆（client a 有看到）時列入 `only_in_rest` 與 `missing_by_client`，`per_client_keys` 可看出差集，並回 2。
+- `test_stats_runs_without_secret_env` — 未設定密鑰環境變數時 `stats` 照常回 0。
 - `test_deals_accumulate_qty` — 同一委託兩筆成交數量加總。
 - `test_stats_peak_second_and_gaps` — 合成資料中某秒 50 個 frame、某處間隔 90 秒時，`stats.json` 的尖峰與間隔清單正確。
+- `test_derive_status_rules` — 推導規則逐條成立（含部分成交後刪單、只見成交、數量為 0）。
+- `test_partial_fill_then_cancel_is_cancelled` — 依真實事件形狀（Cancel 的 `status.order_quantity` 為 0），New(3)、成交 1、Cancel 後為 Cancelled，成交量 1。
+- `test_rejected_update_qty_does_not_change_size` — 部分成交後被拒的 UpdateQty 不會讓狀態變成 Filled。
+- `test_event_on_two_streams_counted_once` — 同一事件出現在綜合串流與 `order_event` 串流時只算一次。
+- `test_two_day_sse_against_one_day_rest_snapshot` — SSE 檔含前一日與當日委託、REST 只有當日時，交易日取自 REST，前一日委託計入 `excluded_other_days` 且不影響結果。
+- `test_trading_day_required_without_rest_order_times`、`test_rest_snapshot_spanning_two_days_needs_trading_day` — REST 沒有委託時間或跨兩日時要求 `--trading-day`。
+- `test_explicit_trading_day_windows_both_sides` — REST 有 t1（10-01）與 thu（09-30）、SSE 兩個 client 亦同，`--trading-day 2026-10-01` 時 thu 在兩側皆排除，結果一致並回 0。
+- `test_undated_rest_order_kept_with_warning`、`test_default_day_ignores_non_positive_order_times` — REST 委託時間缺少或不大於 0 時保留並記 WARN，推導日期時略過。
+- `test_night_session_orders_warn_on_both_sides` — 夜盤時間的委託在 SSE 與 REST 兩側皆記 WARN。
+- `test_client_missing_reports_fails` — client a 收到 New、UpdatePrice、Cancel，client b 只收到 Cancel 時，b 的委託為 Unknown、`missing_events_by_client` 列出 b 缺的兩筆，回 2。
+- `test_lifecycle_case_under_candidate_shapes` — New(2) → UpdatePrice → UpdateQty:1 → Cancel 在各候選事件形狀下的推導結果（假設的形狀為 Cancelled；保留原數量且 `cancel_quantity` 為單次時為 Submitted，是已知缺口）。
+- `test_reduced_order_filling_its_remainder_is_filled` — 調降為 1 後成交 1 為 Filled。
+- `test_truncated_last_line_skipped_with_warning`、`test_unreadable_middle_line_raises` — 末行截斷略過並記 WARN，中間行損壞則失敗。
+- `test_duplicate_across_streams_keeps_earliest_arrival`、`test_repeated_event_id_with_other_content_warns` — 跨串流重複時保留最早收到的一筆；同一 `event_id` 內容不同時記 WARN。
+- `test_update_price_keeps_status_and_size`、`test_mismatch_in_one_client_only`、`test_trades_item_without_deal_quantity_counts_zero` — UpdatePrice 不改狀態與數量；只有一個 client 不一致時只列該 client；REST 缺 `deal_quantity` 視為 0。
+- `test_outage_ended_by_stop`、`test_last_trades_payload_rejects_non_2xx`、`test_last_trades_payload_decodes_base64_body` — 停止時仍未恢復的斷線照列；最後一次 `trades` 非 2xx 時失敗；`resp_body_b64` 解碼後使用。
+- `test_live_reconcile_aborts_before_trades_when_not_simulation` — 模式非模擬時不送出 `trades` 查詢。
 
 **Numbers:**
 
 - 尖峰取前 10 秒：報告篇幅上的選擇，用來看開盤尖峰的形狀。
-- `gap_threshold_s`：`calibrate:` 取 Task 12 首日量到的心跳最大間隔的兩倍，寫入 `p1.toml`。
-- `EventFields` 其餘指標：`calibrate:` 由 Task 12 第一批真實事件決定，Task 13 對帳前寫入 `p1.toml`。
+- `gap_threshold_s = 60`：契約文件 §2 量到的 30 秒心跳的兩倍；`calibrate:` 改為 Task 12 首日量到的心跳最大間隔的兩倍，寫入 `p1.toml`。
+- 委託事件的指標、`op_code_success` 與 `exchange_ts_*`：取自 2026-09-29 錄到的委託事件與 tick（契約文件 §2）。
+- `deal_key`、`deal_qty`、`deal_exchange_ts`：`calibrate:` 尚未錄到成交事件，暫依 OpenAPI `StockDealEvent`／`FuturesDealEvent`；Task 12 第一批成交事件確認，Task 13 對帳前寫入 `p1.toml`。
+- `rest_order_ts`：epoch 秒，已由期貨 API 測試中刪單後的 `trades` 回應確認（`1790677936.694802`，即 2026-09-29 18:32:16 台北時間）。
+- 夜盤 15:00 至次日 05:00：設計 §4 的期交所夜盤時段。
 
 **Verification:**
 

@@ -18,7 +18,6 @@ from p1rec.cli import main
 from p1rec.config import (
     ContractFields,
     Endpoint,
-    EventFields,
     FundsConfig,
     HistoryConfig,
     InterlockConfig,
@@ -55,7 +54,7 @@ def _build_cfg(tmp_path: Path) -> P1Config:
         ),
         stream=StreamConfig(),
         orders=OrdersConfig(),
-        events=EventFields(),
+        events=interlock._UNUSED_EVENT_FIELDS,
         history=HistoryConfig(queries=(), usage_bytes_pointer="/bytes"),
         scrub=ScrubConfig(
             account_id_pointers=(),

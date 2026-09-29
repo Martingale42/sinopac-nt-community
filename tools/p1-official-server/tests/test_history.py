@@ -17,7 +17,6 @@ from p1rec.cli import main
 from p1rec.config import (
     ContractFields,
     Endpoint,
-    EventFields,
     FundsConfig,
     HistoryConfig,
     HistoryQuery,
@@ -28,7 +27,7 @@ from p1rec.config import (
     StreamConfig,
 )
 from p1rec.history import EXIT_HISTORY_QUERY_FAILED, run_history
-from p1rec.interlock import EXIT_INTERLOCK_ABORT
+from p1rec.interlock import _UNUSED_EVENT_FIELDS, EXIT_INTERLOCK_ABORT
 
 _BASE_URL = "http://127.0.0.1:8080"
 _INFO_PATH = "/api/v1/info"
@@ -69,7 +68,7 @@ def _build_cfg(tmp_path: Path, queries: tuple[HistoryQuery, ...]) -> P1Config:
         ),
         stream=StreamConfig(),
         orders=OrdersConfig(),
-        events=EventFields(),
+        events=_UNUSED_EVENT_FIELDS,
         history=HistoryConfig(queries=queries, usage_bytes_pointer="/bytes"),
         scrub=ScrubConfig(
             account_id_pointers=(),

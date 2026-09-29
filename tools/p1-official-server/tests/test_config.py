@@ -68,7 +68,31 @@ def test_load_config_success(tmp_path: Path, write_config: WriteConfig) -> None:
     # These remaining placeholder types only need to construct and load here
     assert cfg.stream == StreamConfig()
     assert cfg.orders == OrdersConfig()
-    assert cfg.events == EventFields()
+    assert cfg.events == EventFields(
+        order_event_name="order_event",
+        order_states=("StockOrder", "FuturesOrder"),
+        deal_states=("StockDeal", "FuturesDeal"),
+        event_id="/event_id",
+        order_key="/order/id",
+        op_type="/operation/op_type",
+        op_code="/operation/op_code",
+        order_qty="/order/quantity",
+        cancel_qty="/status/cancel_quantity",
+        deal_key="/trade_id",
+        deal_qty="/quantity",
+        op_code_success="00",
+        order_exchange_ts="/status/exchange_ts",
+        deal_exchange_ts="/ts",
+        rest_list="",
+        rest_key="/order/id",
+        rest_status="/status/status",
+        rest_filled_qty="/status/deal_quantity",
+        rest_order_ts="/status/order_ts",
+        exchange_ts_pointers=("/date", "/time"),
+        exchange_ts_format="%Y-%m-%d %H:%M:%S.%f",
+        heartbeat_event="heartbeat",
+        gap_threshold_s=60.0,
+    )
     assert cfg.history == HistoryConfig(
         queries=(
             HistoryQuery(
