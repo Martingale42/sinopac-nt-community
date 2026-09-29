@@ -31,7 +31,8 @@ class Endpoint:
 
 @dataclass(frozen=True)
 class InterlockConfig:
-    """Placeholder, filled in once mode-interlock checking is implemented."""
+    endpoint_op: str  # Logical operation name in [endpoints]; defaults to "mode"
+    pointer: str  # JSON pointer into that operation's response, e.g. "/simulation"
 
 
 @dataclass(frozen=True)
@@ -254,9 +255,22 @@ def _optional_table(data: Mapping[str, Any], key: str) -> Mapping[str, Any]:
     return value
 
 
+_DEFAULT_INTERLOCK_ENDPOINT_OP = "mode"
+
+
 def _parse_interlock(data: Mapping[str, Any], config_dir: Path) -> InterlockConfig:
-    _optional_table(data, "interlock")
-    return InterlockConfig()
+    table = _optional_table(data, "interlock")
+    if "endpoint_op" in table:
+        endpoint_op = _get_str(data, "interlock.endpoint_op")
+    else:
+        endpoint_op = _DEFAULT_INTERLOCK_ENDPOINT_OP
+    pointer = _get_str(data, "interlock.pointer")
+
+    known_endpoints = _lookup(data, "endpoints")
+    if not isinstance(known_endpoints, Mapping) or endpoint_op not in known_endpoints:
+        raise ConfigError(f"config key interlock.endpoint_op names unknown endpoint: {endpoint_op!r}")
+
+    return InterlockConfig(endpoint_op=endpoint_op, pointer=pointer)
 
 
 def _parse_contracts(data: Mapping[str, Any], config_dir: Path) -> ContractFields:

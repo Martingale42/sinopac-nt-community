@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import NoReturn
 
 from p1rec.config import ConfigError, P1Config, load_config, read_secrets
+from p1rec.interlock import InterlockError, self_test
 from p1rec.redact import redaction_values, setup_logging
 from p1rec.rundir import new_run
 
@@ -71,6 +72,10 @@ def _not_implemented(args: argparse.Namespace, _cfg: P1Config, _run_dir: Path) -
     return 1
 
 
+def _self_test_interlock(_args: argparse.Namespace, _cfg: P1Config, _run_dir: Path) -> int:
+    return self_test()
+
+
 @dataclass(frozen=True)
 class Subcommand:
     add_arguments: ArgumentHook
@@ -81,7 +86,7 @@ class Subcommand:
 _SUBCOMMANDS: dict[str, Subcommand] = {
     "self-test-interlock": Subcommand(
         add_arguments=_no_extra_arguments,
-        handler=_not_implemented,
+        handler=_self_test_interlock,
         # self-test-interlock never touches the network and is run
         # without the env file loaded, so it must work with no secrets
         # available.
@@ -140,10 +145,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         setup_logging(run_dir, redaction_values(secrets), "INFO")
         logging_ready = True
         return spec.handler(args, cfg, run_dir)
+    except InterlockError as exc:
+        # assert_simulation already logged the reason at ERROR before
+        # raising, so this only records which subcommand aborted.
+        logging.getLogger("p1rec.cli").error("%s: aborted by interlock: %s", args.command, exc)
+        return 3
     except Exception as exc:
-        # A future subcommand-specific error, such as an interlock abort,
-        # will get its own except clause here ahead of this catch-all, so
-        # this stays the one place that decides how a failure is reported.
+        # A future subcommand-specific error will get its own except
+        # clause here ahead of this catch-all, so this stays the one place
+        # that decides how a failure is reported.
         if logging_ready:
             logging.getLogger("p1rec.cli").exception("%s failed", args.command)
         else:
