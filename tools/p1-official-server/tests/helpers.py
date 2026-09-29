@@ -10,6 +10,13 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
+from p1rec.interlock import _UNUSED_EVENT_FIELDS
+
+# EventFields for a test config whose event pointers are never read, the
+# same placeholders the interlock self-test builds its config with, named
+# once here so test modules need not import a private name.
+UNUSED_EVENT_FIELDS = _UNUSED_EVENT_FIELDS
+
 # Shape of the write_config fixture in conftest.py: an optional list of
 # TOML lines in, the written file's path out.
 WriteConfig = Callable[..., Path]

@@ -29,7 +29,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
-from helpers import MINIMAL_CONFIG_LINES, SECRET_ENV_VARS, WriteConfig
+from helpers import MINIMAL_CONFIG_LINES, SECRET_ENV_VARS, UNUSED_EVENT_FIELDS, WriteConfig
 
 from p1rec import capture, cli, sse, stream
 from p1rec.capture import CapturingClient
@@ -49,8 +49,9 @@ from p1rec.config import (
     StreamConfig,
     load_config,
 )
-from p1rec.interlock import _UNUSED_EVENT_FIELDS, EXIT_INTERLOCK_ABORT
-from p1rec.stream import EXIT_CHECK_FAILED, render_template, run_stream
+from p1rec.interlock import EXIT_INTERLOCK_ABORT
+from p1rec.records import EXIT_CHECK_FAILED
+from p1rec.stream import render_template, run_stream
 
 INFO_PATH = "/api/v1/info"
 ACCOUNTS_PATH = "/api/v1/auth/accounts"
@@ -182,7 +183,7 @@ def _cfg(
             actions=actions,
         ),
         orders=OrdersConfig(),
-        events=_UNUSED_EVENT_FIELDS,
+        events=UNUSED_EVENT_FIELDS,
         history=HistoryConfig(queries=(), usage_bytes_pointer="/bytes"),
         scrub=ScrubConfig(
             account_id_pointers=(),
@@ -859,6 +860,35 @@ def test_control_failure_stops_the_run(
     assert _messages(caplog, logging.ERROR) == ["stream control failed; stopping the run"]
 
 
+def test_control_error_during_shutdown_keeps_a_normal_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    sending = threading.Event()
+
+    def _fails_once_stopping(self: stream._Coordinator) -> list[str]:
+        # Like a request cut short when shutdown closes the client under it
+        sending.set()
+        self._stop.wait()
+        raise httpx.ReadError("client closed")
+
+    monkeypatch.setattr(stream._Coordinator, "send_initial", _fails_once_stopping)
+    api = _FakeApi()
+
+    with (
+        caplog.at_level(logging.WARNING, logger="p1rec.stream"),
+        _session(tmp_path, api, _cfg("http://fake")) as run,
+    ):
+        _connect_all(run)
+        assert sending.wait(WAIT_S)
+
+    assert not run.session.failed
+    assert _messages(caplog, logging.ERROR) == []
+
+    # A failure reported by any path once shutdown has begun leaves the outcome alone
+    run.session._fail()
+    assert not run.session.failed
+
+
 def test_resend_does_not_delay_leader_frames(
     fake_server: _FakeServer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -995,6 +1025,12 @@ STREAM_CONFIG_LINES = [
     'code = "2330"',
     'quote_type = "Tick"',
 ]
+
+
+@pytest.mark.parametrize(("body", "account_type"), [(None, None), ('{"a": 1}', "S")])
+def test_startup_request_needs_exactly_one_body_source(body: str | None, account_type: str | None) -> None:
+    with pytest.raises(ValueError, match="exactly one of body and account_type"):
+        StartupRequest(op="subscribe_trade", body=body, account_type=account_type)
 
 
 def test_stream_section_loads(write_config: WriteConfig) -> None:

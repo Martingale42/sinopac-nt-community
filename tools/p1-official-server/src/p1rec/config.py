@@ -82,6 +82,10 @@ class StartupRequest:
     body: str | None  # JSON text, set exactly when account_type is not
     account_type: str | None  # S | F | H, whose account the accounts response supplies
 
+    def __post_init__(self) -> None:
+        if (self.body is None) == (self.account_type is None):
+            raise ValueError(f"startup request {self.op!r} needs exactly one of body and account_type")
+
     def describe(self) -> str:
         return f"{self.op} for account type {self.account_type}" if self.account_type else self.op
 
@@ -570,12 +574,12 @@ _STREAM_KEYS = frozenset(
         "action",
     }
 )
-
-# Hours and minutes, both zero-padded, such as "08:35"
-_WALL_TIME_RE = re.compile(r"([01][0-9]|2[0-3]):[0-5][0-9]")
 _STREAM_ENDPOINT_KEYS = frozenset({"method", "path"})
 _INSTRUMENT_KEYS = frozenset({"code", "exchange", "security_type", "quote_types", "intraday_odd"})
 _ACTION_KEYS = frozenset({"at", "op", "code", "quote_type"})
+
+# Hours and minutes, both zero-padded, such as "08:35"
+_WALL_TIME_RE = re.compile(r"([01][0-9]|2[0-3]):[0-5][0-9]")
 
 # Stream names become part of file names, so they are kept to a safe set
 _STREAM_NAME_RE = re.compile(r"[A-Za-z0-9_-]+")
@@ -929,7 +933,9 @@ def _parse_history(data: Mapping[str, Any], config_dir: Path) -> HistoryConfig:
     if not raw_queries:
         raise ConfigError("config key history.query must not be empty")
 
-    queries = tuple(_parse_history_query(item, index, known_endpoints) for index, item in enumerate(raw_queries))
+    queries = tuple(
+        _parse_history_query(item, index, known_endpoints) for index, item in enumerate(raw_queries)
+    )
     return HistoryConfig(queries=queries, usage_bytes_pointer=usage_bytes_pointer)
 
 
@@ -1008,5 +1014,7 @@ def _parse_scrub(data: Mapping[str, Any], config_dir: Path) -> ScrubConfig:
         map_path=map_path,
         selection=_get_fs_path(data, "scrub.selection", config_dir),
         contract_doc=_get_fs_path(data, "scrub.contract_doc", config_dir),
-        extra_scan_paths=tuple((config_dir / raw).resolve() for raw in _get_str_tuple(data, "scrub.extra_scan_paths")),
+        extra_scan_paths=tuple(
+            (config_dir / raw).resolve() for raw in _get_str_tuple(data, "scrub.extra_scan_paths")
+        ),
     )

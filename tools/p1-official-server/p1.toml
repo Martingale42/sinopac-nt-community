@@ -271,15 +271,18 @@ gap_threshold_s = 60.0
 retry_s = 1.0
 
 # Seconds between retry rounds for requests that failed after the first
-# send. A round is at most the startup requests and subscriptions, so one
-# a minute stays far below the broker's accounting-query limit of 25
-# requests per 5 seconds noted in the old gateway (shioaji-server,
-# session.py).
+# send. It keeps two retry rounds out of the same 5-second window of the
+# account-query limit of 25 requests per 5 seconds noted in the old gateway
+# (shioaji-server, session.py); whether subscriptions count toward any
+# broker rate limit is unknown (design section 6 F). A full resend, about
+# 22 requests now and 26 with the TXO pair, is not bounded by it.
 request_retry_s = 60.0
 
 # Asia/Taipei time of the daily full resend: just after the server's daily
 # maintenance window (docs/official-server-contract.md section 2), which
-# may drop subscriptions without closing any stream.
+# may drop subscriptions without closing any stream. calibrate: how long
+# maintenance actually runs has not been measured; check its end in the
+# server log on the first live days and move this time if it runs later.
 daily_resend_at = "08:35"
 
 # BaseSubscriptionRequest bodies. A string value that is exactly "{name}"

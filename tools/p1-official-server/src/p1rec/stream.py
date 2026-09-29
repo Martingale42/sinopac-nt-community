@@ -59,12 +59,9 @@ from p1rec.config import (
     StreamAction,
 )
 from p1rec.interlock import assert_simulation
-from p1rec.records import EXCHANGE_TZ_NAME
+from p1rec.records import EXCHANGE_TZ_NAME, EXIT_CHECK_FAILED
 
 logger = logging.getLogger(__name__)
-
-# The exit code shared by every subcommand for a check that did not pass
-EXIT_CHECK_FAILED = 2
 
 # Stream names may contain "_", so a client name may not, or the client and
 # stream in a file name sse_<client>_<stream>.jsonl could not be told apart.
@@ -614,12 +611,22 @@ class _Session:
             )
 
     def _fail(self) -> None:
-        """Mark the run failed and stop it, waking run_stream unless shutdown has already begun."""
-        self.failed = True
+        """Mark the run failed, stop it and wake run_stream, unless shutdown has already begun.
+
+        Checked under the lock shutdown takes, so a control thread still
+        running after shutdown, failing on the closed client, cannot turn a
+        normal stop into a failed run.
+        """
         with self._stop_lock:
+            if self._shutting_down:
+                return
+            self.failed = True
             self._stop.set()
-            if not self._shutting_down:
-                self._on_self_stop()
+            self._on_self_stop()
+
+    def _is_shutting_down(self) -> bool:
+        with self._stop_lock:
+            return self._shutting_down
 
     def _run_control(self) -> None:
         try:
@@ -641,6 +648,11 @@ class _Session:
                 return
             self._serve(collections.deque(self._pending))
         except Exception:
+            if self._is_shutting_down():
+                # Expected once shutdown has closed the client under a request still in flight
+                logger.debug("stream control ended with an error during shutdown", exc_info=True)
+                return
+
             # Recording on without resends or retries would lose subscriptions unnoticed for days
             logger.exception("stream control failed; stopping the run")
             self._fail()

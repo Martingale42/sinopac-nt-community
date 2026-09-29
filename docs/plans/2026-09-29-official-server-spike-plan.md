@@ -473,8 +473,8 @@ git commit -m "Add scenario model, price references and funds preflight"
 - `p1rec stream --clients a,b --until <ISO 8601 含時區>`：連鎖檢查後，每個 client 對 `streams` 中的每條端點（例如綜合行情、`order_event`、`contract_event`）各開一個 `SseRecorder`，輸出 `sse_<client>_<串流名>.jsonl`。
 - 訂閱是 server 全域（契約文件 §1）：所有 recorder 首次連上後，依序送出 `startup_requests`（例如每個帳戶的 `subscribe_trade`），再對 `instruments` 的每個商品與報價類型送出一次訂閱（本體由 `subscribe_body` 代入 `{code}`、`{exchange}`、`{security_type}`、`{quote_type}`、`{intraday_odd}`）。
 - 首次送出時任一 `startup_requests` 失敗或被跳過（含 `accounts` 查詢失敗；`subscribe_trade` 回應的 `subscribe_trade` 不是 `true` 也算失敗），記 ERROR、不送訂閱，並自行停止：所有 client 照常寫出 `stopped` 後以 2 結束，由操作者排除原因後重新啟動。
-- 之後只有「主 recorder」（第一個 client 的第一條串流）重連時，才重送 `startup_requests` 與目前有效的全部訂閱，並記一次 INFO；其他 recorder 重連不重送。每天台北時間 `daily_resend_at`（08:35，契約文件 §2 的每日維護窗口之後；維護可能丟掉訂閱而不中斷任何串流）也做一次同樣的完整重送。
-- 首次送出之後，失敗的 `startup_requests` 與訂閱（非 2xx，或 `success`／`subscribe_trade` 不是 `true`）記下來並繼續其餘請求，每 `request_retry_s`（60 秒；一輪最多就是全部 startup 請求與訂閱，遠低於舊 gateway `shioaji-server` 記載的帳務查詢上限每 5 秒 25 次）以及任一 recorder 下一次連上時重試，直到成功。同一個請求第一次失敗記 ERROR，之後連續失敗記 DEBUG 並附次數，恢復時記 INFO。
+- 之後只有「主 recorder」（第一個 client 的第一條串流）重連時，才重送 `startup_requests` 與目前有效的全部訂閱，並記一次 INFO；其他 recorder 重連不重送。每天台北時間 `daily_resend_at`（08:35，契約文件 §2 的每日維護窗口之後；維護可能丟掉訂閱而不中斷任何串流）也做一次同樣的完整重送。`calibrate:` 維護實際持續多久尚未量測，Task 12／14 由 server log 確認維護結束時間，晚於 08:35 就往後調。
+- 首次送出之後，失敗的 `startup_requests` 與訂閱（非 2xx，或 `success`／`subscribe_trade` 不是 `true`）記下來並繼續其餘請求，每 `request_retry_s`（60 秒：確保兩輪重試不會落在舊 gateway `shioaji-server` 記載的帳務查詢上限「每 5 秒 25 次」的同一個 5 秒窗口；訂閱是否計入任何券商速率上限未知，見設計 §6 F；一次完整重送目前約 22 個請求，加上 TXO 一對為 26 個，不受此間隔限制）以及任一 recorder 下一次連上時重試，直到成功。同一個請求第一次失敗記 ERROR，之後連續失敗記 DEBUG 並附次數，恢復時記 INFO。
 - 控制執行緒本身發生未預期的錯誤時記 ERROR 並自行停止，以 2 結束，而不是在沒有重送與重試的情況下繼續錄製。
 - 所有 REST 請求都由一條控制執行緒送出；recorder 在 `on_connected` 只通知它，因此重送再慢也不耽誤主 recorder 讀取 frame。
 - `[[stream.action]]` 在指定時間送出 `subscribe` 或 `unsubscribe` 並更新有效訂閱集合；啟動時已過期的動作記 WARN 並跳過。
@@ -492,7 +492,7 @@ class Instrument:
     intraday_odd: bool
 
 @dataclass(frozen=True)
-class StartupRequest:
+class StartupRequest:  # __post_init__ 要求 body 與 account_type 恰有一個有值
     op: str                    # [endpoints] 中的邏輯操作
     body: str | None           # JSON 本體；account_type 有值時為 None
     account_type: str | None   # S | F | H，由 accounts 回應組成該帳戶的 AccountRequest
