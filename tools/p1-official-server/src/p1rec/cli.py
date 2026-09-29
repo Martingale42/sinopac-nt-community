@@ -23,6 +23,7 @@ from typing import NoReturn
 
 from p1rec.config import ConfigError, P1Config, load_config, read_secrets
 from p1rec.interlock import EXIT_INTERLOCK_ABORT, InterlockError, self_test
+from p1rec.preflight import run_preflight
 from p1rec.redact import redaction_values, setup_logging
 from p1rec.rundir import new_run
 
@@ -76,6 +77,10 @@ def _self_test_interlock(_args: argparse.Namespace, cfg: P1Config, _run_dir: Pat
     return self_test(cfg.interlock)
 
 
+def _preflight(args: argparse.Namespace, cfg: P1Config, run_dir: Path) -> int:
+    return run_preflight(cfg, Path(args.scenarios), run_dir)
+
+
 @dataclass(frozen=True)
 class Subcommand:
     add_arguments: ArgumentHook
@@ -92,7 +97,7 @@ _SUBCOMMANDS: dict[str, Subcommand] = {
         # available.
         needs_secrets=False,
     ),
-    "preflight": Subcommand(add_arguments=_add_scenarios_argument, handler=_not_implemented),
+    "preflight": Subcommand(add_arguments=_add_scenarios_argument, handler=_preflight),
     "stream": Subcommand(add_arguments=_no_extra_arguments, handler=_not_implemented),
     "orders": Subcommand(add_arguments=_add_scenarios_argument, handler=_not_implemented),
     "reconcile": Subcommand(add_arguments=_no_extra_arguments, handler=_not_implemented),
@@ -149,6 +154,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         # assert_simulation already logged the reason at ERROR before
         # raising; logging again here would print the same abort twice.
         return EXIT_INTERLOCK_ABORT
+    except ConfigError as exc:
+        # A handler that loads its own input, such as scenarios.toml,
+        # reports a malformed file the way a malformed p1.toml is reported.
+        logging.getLogger("p1rec.cli").error("%s: %s", args.command, exc)
+        return 1
     except Exception as exc:
         # A future subcommand-specific error will get its own except
         # clause here ahead of this catch-all, so this stays the one place

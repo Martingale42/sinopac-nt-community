@@ -123,3 +123,28 @@ path = "/api/v1/agent/harness"
 [interlock]
 endpoint_op = "mode"
 pointer = "/simulation"
+
+# Contract price limits: contracts_stock's record and each element of
+# contracts_futures' array are both ContractInfoRecord, with these fields
+# at the top level (openapi.json).
+[contracts]
+code = "/code"
+limit_up = "/limit_up"
+limit_down = "/limit_down"
+reference = "/reference"
+
+# Every ETF among the recorded stocks, since ETFs follow their own tick table
+etf_codes = ["0050", "00981A", "00631L"]
+
+# Funds the scenarios draw on, from AccountBalance and Margin (openapi.json).
+# calibrate: confirm both pointers against the simulation account's real
+# balance and margin responses.
+[funds]
+stock_available_pointer = "/acc_balance"
+futures_available_pointer = "/available_margin"
+
+# Futures contract code -> initial margin per contract in TWD, as an
+# integer or a quoted decimal string. calibrate: before preflight, fill in
+# TAIFEX's initial margin published for the run date, for every futures
+# code an expect_fill case trades; preflight fails while one is missing.
+[funds.futures_margin_twd]

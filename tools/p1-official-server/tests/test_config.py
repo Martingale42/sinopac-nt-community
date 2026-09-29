@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -45,9 +46,13 @@ def test_load_config_success(tmp_path: Path, write_config: WriteConfig) -> None:
         "place_stock": Endpoint(method="POST", path="/api/v1/order/place_order"),
     }
     assert cfg.interlock == InterlockConfig(endpoint_op="mode", pointer="/simulation")
+    assert cfg.contracts == ContractFields(
+        code="/code", limit_up="/limit_up", limit_down="/limit_down", reference="/reference", etf_codes=("0050",)
+    )
+    assert cfg.funds == FundsConfig(
+        stock_available_pointer="/acc_balance", futures_available_pointer="/available_margin", futures_margin_twd={}
+    )
     # These remaining placeholder types only need to construct and load here
-    assert cfg.contracts == ContractFields()
-    assert cfg.funds == FundsConfig()
     assert cfg.stream == StreamConfig()
     assert cfg.orders == OrdersConfig()
     assert cfg.events == EventFields()
@@ -284,3 +289,49 @@ def test_read_secrets_success(write_config: WriteConfig, monkeypatch: pytest.Mon
         "person_id": "A123456789",
         "egress_ip": "203.0.113.1",
     }
+
+
+def _with_margins(*entries: str) -> list[str]:
+    """Return MINIMAL_CONFIG_LINES with entries placed in [funds.futures_margin_twd]."""
+    lines = list(MINIMAL_CONFIG_LINES)
+    at = lines.index("[funds.futures_margin_twd]") + 1
+    lines[at:at] = list(entries)
+    return lines
+
+
+def test_futures_margins_accept_integer_and_decimal_string(write_config: WriteConfig) -> None:
+    cfg = load_config(write_config(_with_margins("TMFJ6 = 12000", 'TXFJ6 = "184000.5"')))
+
+    assert cfg.funds.futures_margin_twd == {"TMFJ6": Decimal("12000"), "TXFJ6": Decimal("184000.5")}
+
+
+@pytest.mark.parametrize("entry", ["TMFJ6 = 12000.5", "TMFJ6 = 0", 'TMFJ6 = "abc"', "TMFJ6 = true"])
+def test_futures_margin_rejects_float_and_non_positive(write_config: WriteConfig, entry: str) -> None:
+    with pytest.raises(ConfigError, match=r"funds\.futures_margin_twd\.TMFJ6"):
+        load_config(write_config(_with_margins(entry)))
+
+
+def test_funds_pointer_validated(write_config: WriteConfig) -> None:
+    lines = [
+        'stock_available_pointer = "acc_balance"' if line.startswith("stock_available_pointer") else line
+        for line in MINIMAL_CONFIG_LINES
+    ]
+
+    with pytest.raises(ConfigError, match=r"funds\.stock_available_pointer"):
+        load_config(write_config(lines))
+
+
+def test_contracts_etf_codes_must_be_strings(write_config: WriteConfig) -> None:
+    lines = ["etf_codes = [50]" if line.startswith("etf_codes") else line for line in MINIMAL_CONFIG_LINES]
+
+    with pytest.raises(ConfigError, match=r"contracts\.etf_codes"):
+        load_config(write_config(lines))
+
+
+def test_missing_contracts_section_names_key(write_config: WriteConfig) -> None:
+    start = MINIMAL_CONFIG_LINES.index("[contracts]")
+    end = MINIMAL_CONFIG_LINES.index("[funds]")
+    lines = MINIMAL_CONFIG_LINES[:start] + MINIMAL_CONFIG_LINES[end:]
+
+    with pytest.raises(ConfigError, match=r"contracts\."):
+        load_config(write_config(lines))

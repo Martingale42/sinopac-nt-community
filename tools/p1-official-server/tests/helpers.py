@@ -40,6 +40,21 @@ MINIMAL_CONFIG_LINES = [
     "[interlock]",
     'endpoint_op = "mode"',
     'pointer = "/simulation"',
+
+    # [contracts] and [funds]: contract limit and available-funds pointers
+    "",
+    "[contracts]",
+    'code = "/code"',
+    'limit_up = "/limit_up"',
+    'limit_down = "/limit_down"',
+    'reference = "/reference"',
+    'etf_codes = ["0050"]',
+    "",
+    "[funds]",
+    'stock_available_pointer = "/acc_balance"',
+    'futures_available_pointer = "/available_margin"',
+    "",
+    "[funds.futures_margin_twd]",
 ]
 
 SECRET_ENV_VARS = ("SJ_API_KEY", "SJ_SEC_KEY", "SJ_CA_PASSWD", "P1_PERSON_ID", "P1_EGRESS_IP")
