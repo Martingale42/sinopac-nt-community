@@ -796,7 +796,8 @@ git commit -m "Rehearse the full recorder pipeline against a stub server"
 - 排程：選證交所行事曆上週四至下週二皆為營業日（週末除外）的第一週；10/8 那週不行（10/9 補假，依設計 §9.2 推論，排程時查證）。
 - 07:30 前：校時狀態（`timedatectl` 與 `chronyc tracking` 或等效指令）存入 `results/p1/<日期>-ntp.txt`；填入 `futures_margin_twd`；啟動官方 server 並依 Task 1 記下的方式把 log 導向 `results/p1/<日期>-server/server.log`（放在自己的 run 目錄內，Task 15 才能以 `fixtures.toml` 挑選）；`p1rec self-test-interlock` 回 0；`p1rec preflight` 回 0，回 2 即停止並交由使用者取得模擬資金。
 - 08:00 前：`p1rec stream --clients a,b --until <下週二 09:30 +08:00>` 於 tmux 啟動，即為 soak 起點；預先排入週五 10:30 取消 2330 tick 訂閱的動作（§6 D2：訂閱為全域，看兩個 client 是否同時停止收到 2330）。
-- 09:00 後：`p1rec orders --only <第一個生命週期案例>`，量出延遲後填入 `step_wait_s`、`fill_poll_s`、`fill_timeout_s`，再以 `p1rec orders` 跑其餘案例；從第一批真實事件填入 `EventFields`。
+- 09:00 後：`p1rec orders --only <第一個生命週期案例>`，量出延遲後填入 `step_wait_s`、`fill_poll_s`、`fill_timeout_s`，再以 `p1rec orders` 跑其餘案例；從第一批真實事件填入 `EventFields`。同時確認三件事：IOC／FOK 未成交時交易所自動刪單的事件形狀（是否以 Cancel 事件送出）、部分成交後刪單時 REST 的狀態字串、成交事件的 `deal_key` 與 `deal_qty`；與 `derive_status` 的規則不符時先修正，再進 Task 13。
+- 13:45 後：`p1rec reconcile --sse-run <stream run_id>` 對當日委託對帳。
 - 14:00 後：`p1rec history`；`p1rec stats --sse-run <stream run_id>` 取心跳最大間隔，設定 `gap_threshold_s`。
 - 之後由持續運行的 `stream` 錄下夜盤；當日不再觸碰官方 server。
 
@@ -866,7 +867,7 @@ git commit -m "Record multi-client, harness and restart runs"
 
 **Behaviour:**
 
-- 09:30 `stream` 自動結束；停止官方 server；以 `p1rec reconcile --sse-run <stream run_id>` 與 `p1rec stats --sse-run <stream run_id>` 涵蓋整個 soak。
+- 09:30 `stream` 自動結束；停止官方 server；以 `p1rec stats --sse-run <stream run_id>` 涵蓋整個 soak。對帳只在下單當日做（Task 12、13）：`trades` 是否只回當日委託（§6 C7）尚未確認，跨日對帳可能把前幾日的委託誤報為遺漏。
 - 官方 server log 與全部 `recorder.log` 中的每一類 WARN／ERROR／CRITICAL（依訊息樣板歸類）各記：次數、首末次時間、處置（接受並說明原因，或記為契約發現並寫明對 go/no-go 的影響）；IP 白名單的 `not allow` 為必列類別（設計 §4）。
 - 從 server log 量出 session 過期的實際週期與次數，寫入契約文件，作為 P2 watchdog 依據（設計 §9.2 的 `calibrate:`）。
 - 任何一類說不出原因時，契約文件標明「P1 未通過驗收」並停止。
