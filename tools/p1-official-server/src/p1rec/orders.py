@@ -12,19 +12,22 @@ handled here: it ends the run before anything further is sent.
 A request the server refuses with a 4xx is recorded, since the rejection
 is itself corpus, and a rejected place skips the rest of its case. Any
 other failure of a mutation, a 5xx or no response at all, leaves its
-effect unknown and stops the run. A case expected to fill is
-polled through trades until it fills, ends unfilled, or fill_timeout_s
-passes, and a fill is closed at once with a marketable limit order the
-other way. Whenever a position may remain, the run logs CRITICAL and starts
-no further fill case. orders.json summarises every case, without any
-account identifier.
+effect unknown and stops the run. Every accepted order is then polled
+through trades until it ends or fill_timeout_s passes: a case expected to
+fill has its fill closed at once with a marketable limit order the other
+way, and a case not meant to fill must end with nothing filled. Whenever
+a position may remain, the run logs CRITICAL and starts no further fill
+case. orders.json summarises every case, without any account identifier,
+and is rewritten after each one.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 import time
+from collections import Counter
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -48,7 +51,7 @@ from p1rec.broker import (
 )
 from p1rec.capture import CapturedResponse, CapturingClient, describe_exception
 from p1rec.config import PLACEHOLDER_RE, ConfigError, OrdersConfig, P1Config
-from p1rec.interlock import InterlockError, assert_simulation
+from p1rec.interlock import EXIT_INTERLOCK_ABORT, InterlockError, assert_simulation
 from p1rec.jsonpointer import JsonPointerError, resolve_pointer
 from p1rec.prices import SHARES_PER_BOARD_LOT, format_decimal, resolve_price
 from p1rec.records import EXIT_CHECK_FAILED
@@ -70,19 +73,23 @@ _TAIPEI = ZoneInfo("Asia/Taipei")
 
 @dataclass(frozen=True)
 class TradingSession:
-    """One exchange's regular trading hours, in Asia/Taipei wall-clock time."""
+    """A window of an exchange's trading day, in Asia/Taipei wall-clock time."""
 
     name: str
     open: time_of_day
     close: time_of_day
 
 
-# TAIFEX and TWSE regular trading hours. The contract file's futures price
-# limits hold for the TAIFEX day session only (docs/official-server-contract.md
-# section 2), and a filled stock or odd-lot order must be closed while TWSE
-# still trades.
+# The contract file's futures price limits hold for the TAIFEX day session
+# only (docs/official-server-contract.md section 2). calibrate: confirm
+# whether the day session ends with a closing call auction, which would
+# end continuous trading, and so this window, before 13:45.
 FUTURES_DAY_SESSION = TradingSession("TAIFEX day session", time_of_day(8, 45), time_of_day(13, 45))
-TWSE_SESSION = TradingSession("TWSE session", time_of_day(9, 0), time_of_day(13, 30))
+
+# TWSE continuous trading, which ends when the closing call auction starts
+# at 13:25, so a stock or odd-lot fill and its close both happen before a
+# single auction price could decide them.
+TWSE_CONTINUOUS_SESSION = TradingSession("TWSE continuous trading", time_of_day(9, 0), time_of_day(13, 25))
 
 # ContractRequest.security_type per market (openapi.json SecurityType)
 _SECURITY_TYPE: Mapping[Market, str] = {Market.STOCK: "STK", Market.ODD: "STK", Market.FUTURES: "FUT"}
@@ -104,6 +111,13 @@ _STATUS_CANCELLED = "Cancelled"
 # counter order, and ROD, so it waits for one rather than expiring.
 _CLOSE_PRICE_TYPE = "LMT"
 _CLOSE_ORDER_TYPE = "ROD"
+
+# Prices a buy not meant to fill may use: far_below (limit_down for stock
+# and odd lots, reference * 0.95 for futures), limit_down, or one tick
+# above either, all far enough below the market to rest without a seller.
+_RESTING_PRICE_REFS = frozenset(
+    {PriceRef.FAR_BELOW, PriceRef.FAR_BELOW_PLUS_TICK, PriceRef.LIMIT_DOWN, PriceRef.LIMIT_DOWN_PLUS_TICK}
+)
 
 
 class Outcome(StrEnum):
@@ -134,6 +148,14 @@ _FAILED_OUTCOMES = frozenset(
         Outcome.SKIPPED_AFTER_RESIDUAL,
     }
 )
+
+# Outcomes whose case may have left an order or a position behind
+_ATTENTION_OUTCOMES = frozenset(
+    {Outcome.RESIDUAL_POSITION, Outcome.ORDER_MAY_REST, Outcome.UNKNOWN_OUTCOME, Outcome.INTERRUPTED}
+)
+
+# A case's outcome and the reason orders.json records for it
+_Ending = tuple[Outcome, str | None]
 
 
 class Clock(Protocol):
@@ -176,15 +198,17 @@ def run_orders(
     anything, if the cases break a rule in check_cases or only names an
     unknown case. InterlockError, and anything else that escapes a case,
     such as KeyboardInterrupt, propagates after a CRITICAL if that case
-    may have left an order behind. orders.json is written whenever a
-    request may have been sent. transport and clock are None for live use;
-    tests pass an httpx.MockTransport and a fake clock.
+    may have left an order behind. orders.json is rewritten after every
+    case and once more at the end, and a failure to write it never hides
+    the exception that stopped the run. transport and clock are None for
+    live use; tests pass an httpx.MockTransport and a fake clock.
     """
     selected = select_cases(cases, only)
     missing = [op for op in _REQUIRED_OPS if op not in cfg.endpoints]
     if missing:
         raise ConfigError(f"orders needs endpoints missing from p1.toml: {', '.join(missing)}")
 
+    summary_path = run_dir / ORDERS_JSON
     records = [_CaseRecord(id=case.id) for case in selected]
     try:
         with CapturingClient(
@@ -198,25 +222,35 @@ def run_orders(
                 # so nothing further is sent.
                 except InterlockError:
                     record.outcome = Outcome.INTERLOCK_ABORT
+                    record.reason = "the interlock aborted before the next request"
                     if record.may_hold_order():
-                        _log_residual(case.id, "the interlock aborted after an order was sent")
+                        _log_residual(record, "the interlock aborted after an order was sent")
                     raise
-                except _UnknownOutcome:
+                except _UnknownOutcome as exc:
                     record.outcome = Outcome.UNKNOWN_OUTCOME
+                    record.reason = str(exc)
                     break
-                except BaseException:
+                except BaseException as exc:
                     record.outcome = Outcome.INTERRUPTED
+                    record.reason = describe_exception(exc)
                     if record.may_hold_order():
-                        _log_residual(case.id, "the run was interrupted after an order was sent")
+                        _log_residual(record, "the run was interrupted after an order was sent")
                     raise
-    finally:
-        _write_summary(run_dir / ORDERS_JSON, records)
+                _write_summary(summary_path, cfg, records)
+    except BaseException as exc:
+        _write_summary_or_log(summary_path, cfg, records)
+        _log_run_summary(summary_path, records, _exit_code_for(exc))
+        raise
+    _write_summary(summary_path, cfg, records)
 
     if any(record.outcome is Outcome.UNKNOWN_OUTCOME for record in records):
-        return EXIT_UNEXPECTED
-    if any(record.outcome in _FAILED_OUTCOMES for record in records):
-        return EXIT_CHECK_FAILED
-    return 0
+        exit_code = EXIT_UNEXPECTED
+    elif any(record.outcome in _FAILED_OUTCOMES for record in records):
+        exit_code = EXIT_CHECK_FAILED
+    else:
+        exit_code = 0
+    _log_run_summary(summary_path, records, exit_code)
+    return exit_code
 
 
 def select_cases(cases: Sequence[Case], only: Collection[str] | None) -> list[Case]:
@@ -236,20 +270,39 @@ def select_cases(cases: Sequence[Case], only: Collection[str] | None) -> list[Ca
 
 
 def check_cases(cases: Sequence[Case]) -> None:
-    """Raise ConfigError naming the case unless every case can run on its own.
+    """Raise ConfigError naming the case unless every case can run without leaving a position.
 
-    A ROD case that does not expect a fill must end with cancel, since its
-    order would otherwise still rest when the next case starts and the
-    funds preflight counts one case at a time; IOC and FOK orders expire by
-    themselves. An exceed_funds quantity is sized in board lots at
-    limit_down, so it needs a stock case priced at limit_down.
+    A case that does not expect a fill must be a limit buy priced, at place
+    and at every update_price, at far_below (limit_down for stock and odd
+    lots, reference * 0.95 for futures), at limit_down, or one tick above
+    either, so it rests without meeting a seller. If it is ROD it must end
+    with cancel, since its order would otherwise still rest when the next
+    case starts and the funds preflight counts one case at a time, while
+    IOC and FOK orders expire by themselves. A case expected to fill must
+    not update its quantity, since its close sends the quantity it placed.
+    An exceed_funds quantity is sized in board lots at limit_down, so it
+    needs a stock case priced at limit_down.
     """
     for case in cases:
-        if not case.expect_fill and case.order_type == "ROD" and case.steps[-1] != "cancel":
-            raise ConfigError(
-                f"case {case.id!r}: a ROD case that does not expect a fill must end with 'cancel', "
-                "so its order never rests into the next case"
-            )
+        steps = [parse_step(raw) for raw in case.steps]
+        if case.expect_fill:
+            if any(step.verb == "update_qty" for step in steps):
+                raise ConfigError(
+                    f"case {case.id!r}: a case that expects a fill cannot update_qty, "
+                    "since its close sends the quantity it placed"
+                )
+        else:
+            refs = [case.price_ref, *(step.price_ref for step in steps if step.price_ref is not None)]
+            if case.price_type != "LMT" or case.action != "Buy" or not set(refs) <= _RESTING_PRICE_REFS:
+                raise ConfigError(
+                    f"case {case.id!r}: a case that does not expect a fill must be an LMT Buy priced at "
+                    f"{', '.join(sorted(_RESTING_PRICE_REFS))}, at place and at every update_price"
+                )
+            if case.order_type == "ROD" and case.steps[-1] != "cancel":
+                raise ConfigError(
+                    f"case {case.id!r}: a ROD case that does not expect a fill must end with 'cancel', "
+                    "so its order never rests into the next case"
+                )
         if case.quantity == EXCEED_FUNDS and (
             case.market is not Market.STOCK or case.price_ref is not PriceRef.LIMIT_DOWN
         ):
@@ -284,19 +337,18 @@ def case_budget_s(case: Case, orders: OrdersConfig) -> float:
     """Return the longest a case can take from its place to its last request.
 
     Definition: An upper bound on a case's duration, excluding HTTP round trips.
-    Formula:    B = n * W + (2 * (T + P) if expect_fill else 0), where n is
-                the number of steps, W is step_wait_s, T is fill_timeout_s
-                and P is fill_poll_s.
+    Formula:    B = n * W + k * (T + P), where n is the number of steps, W is
+                step_wait_s, T is fill_timeout_s, P is fill_poll_s, and k is
+                2 for a case expected to fill and 1 otherwise.
     Domain:     W, P, T > 0 as p1.toml validation guarantees. Every step is
-                followed by W; a fill wait polls every P until T has passed,
-                so it can overrun T by up to one P, and a fill case waits
-                twice, once for its order and once for its close.
+                followed by W; each wait for an order to end polls every P
+                until T has passed, so it can overrun T by up to one P. A fill
+                case waits for its order and then for its close; any other
+                case waits once, to confirm its order ended unfilled.
     Returns:    Seconds.
     """
-    budget = len(case.steps) * orders.step_wait_s
-    if case.expect_fill:
-        budget += 2 * (orders.fill_timeout_s + orders.fill_poll_s)
-    return budget
+    waits = 2 if case.expect_fill else 1
+    return len(case.steps) * orders.step_wait_s + waits * (orders.fill_timeout_s + orders.fill_poll_s)
 
 
 def fits_session(start: datetime, budget_s: float, session: TradingSession) -> bool:
@@ -306,9 +358,9 @@ def fits_session(start: datetime, budget_s: float, session: TradingSession) -> b
                 session on start's Taipei date.
     Formula:    open <= start < close and start + budget_s <= close, in
                 Asia/Taipei wall-clock time.
-    Domain:     start is timezone-aware; budget_s >= 0 from case_budget_s.
-                Exchange holidays are not checked, since the exchange itself
-                rejects orders on them.
+    Domain:     start is timezone-aware, in any zone; budget_s >= 0 from
+                case_budget_s. Exchange holidays are not checked, since the
+                exchange itself rejects orders on them.
     Returns:    True when the case may run.
     """
     local = start.astimezone(_TAIPEI)
@@ -322,13 +374,13 @@ def session_for(case: Case) -> TradingSession | None:
 
     A futures order is priced from limits that hold in the day session
     only; a stock or odd-lot case expected to fill must also be closed
-    before TWSE stops trading. A resting stock case is cancelled whenever
-    it runs.
+    while TWSE still trades continuously. A resting stock case is
+    cancelled whenever it runs.
     """
     if case.market is Market.FUTURES:
         return FUTURES_DAY_SESSION
     if case.expect_fill:
-        return TWSE_SESSION
+        return TWSE_CONTINUOUS_SESSION
     return None
 
 
@@ -375,6 +427,7 @@ class _UnknownOutcome(Exception):
 
 class _OrderState(StrEnum):
     PENDING = "pending"
+    PARTLY_FILLED = "partly_filled"  # Not ended yet, with some quantity already filled
     FILLED = "filled"
     ENDED_UNFILLED = "ended_unfilled"
     ENDED_PARTIAL = "ended_partial"
@@ -397,6 +450,7 @@ class _CaseRecord:
     close_trade_id: str | None = None
     steps: list[_StepRecord] = field(default_factory=list)
     outcome: Outcome = Outcome.NOT_RUN
+    reason: str | None = None
 
     def may_hold_order(self) -> bool:
         """Return whether an order of this case may exist: one was accepted, or one got no answer."""
@@ -415,6 +469,8 @@ class _Prepared:
 
 
 class _Runner:
+    """Run cases one at a time on one client, remembering whether a position may remain."""
+
     def __init__(self, client: CapturingClient, cfg: P1Config, clock: Clock) -> None:
         self._client = client
         self._cfg = cfg
@@ -425,36 +481,50 @@ class _Runner:
         self._residual = False
 
     def run_case(self, case: Case, record: _CaseRecord) -> None:
+        """Run one case and set record's outcome and reason.
+
+        Raises InterlockError, _UnknownOutcome, or whatever else interrupts
+        the case, leaving record's outcome for the caller to set.
+        """
         if case.expect_fill and self._residual:
             logger.error("case %s skipped: an earlier case may have left a position", case.id)
-            record.outcome = Outcome.SKIPPED_AFTER_RESIDUAL
+            record.outcome, record.reason = Outcome.SKIPPED_AFTER_RESIDUAL, "an earlier case may have left a position"
             return
 
-        session = session_for(case)
-        if session is not None:
-            budget_s = case_budget_s(case, self._orders)
-            if not fits_session(self._clock.now(), budget_s, session):
-                logger.error(
-                    "case %s refused, nothing sent: it must start and end within the %s, %s-%s Asia/Taipei, "
-                    "and it can take up to %g s",
-                    case.id,
-                    session.name,
-                    session.open.strftime("%H:%M"),
-                    session.close.strftime("%H:%M"),
-                    budget_s,
-                )
-                record.outcome = Outcome.REFUSED_OUTSIDE_SESSION
+        refusal = self._session_refusal(case)
+        if refusal is None:
+            prepared = self._prepare(case, record)
+            if prepared is None:
                 return
 
-        prepared = self._prepare(case)
-        if prepared is None:
-            record.outcome = Outcome.NOT_PREPARED
-            return
+            # Preparation queries take time too, so the session is checked again before any mutation
+            refusal = self._session_refusal(case)
+            if refusal is None:
+                record.outcome, record.reason = self._run_steps(case, record, prepared)
+                return
 
-        record.outcome = self._run_steps(case, record, prepared)
+        logger.error("case %s refused, no order sent: %s", case.id, refusal)
+        record.outcome, record.reason = Outcome.REFUSED_OUTSIDE_SESSION, refusal
 
-    def _prepare(self, case: Case) -> _Prepared | None:
-        """Query the account and limits case needs and price every order it sends, or return None."""
+    def _session_refusal(self, case: Case) -> str | None:
+        """Return why case cannot run now, or None if it has no session or fits in its session."""
+        session = session_for(case)
+        if session is None:
+            return None
+        budget_s = case_budget_s(case, self._orders)
+        if fits_session(self._clock.now(), budget_s, session):
+            return None
+        return (
+            f"it must start and end within {session.name}, {session.open:%H:%M}-{session.close:%H:%M} "
+            f"Asia/Taipei, and it can take up to {budget_s:g} s"
+        )
+
+    def _prepare(self, case: Case, record: _CaseRecord) -> _Prepared | None:
+        """Query the account and limits case needs and price every order it sends.
+
+        Returns None, with record's outcome set to NOT_PREPARED, if a query
+        or a price fails.
+        """
         is_etf = case.code in self._cfg.contracts.etf_codes
         try:
             account = account_for_market(fetch_accounts(self._client, self._cfg), case.market)
@@ -465,7 +535,7 @@ class _Runner:
             else:
                 quantity = case.quantity
             step_refs = [step.price_ref for step in map(parse_step, case.steps) if step.price_ref is not None]
-            prepared = _Prepared(
+            return _Prepared(
                 account=account,
                 quantity=quantity,
                 price=json_number(resolve_price(case.price_ref, limits, case.market, is_etf=is_etf)),
@@ -476,8 +546,8 @@ class _Runner:
             )
         except (BrokerError, ValueError, httpx.RequestError) as exc:
             logger.error("case %s not prepared, nothing sent: %s", case.id, describe_exception(exc))
+            record.outcome, record.reason = Outcome.NOT_PREPARED, describe_exception(exc)
             return None
-        return prepared
 
     def _max_stock_funds(self, case: Case, account: Mapping[str, object]) -> Decimal:
         """Return the largest figure across every stock funds source, raising BrokerError if one fails."""
@@ -495,7 +565,7 @@ class _Runner:
         )
         return figures[largest_op]
 
-    def _run_steps(self, case: Case, record: _CaseRecord, prepared: _Prepared) -> Outcome:
+    def _run_steps(self, case: Case, record: _CaseRecord, prepared: _Prepared) -> _Ending:
         place_op = "place_futures" if case.market is Market.FUTURES else "place_stock"
         values = self._order_values(
             case,
@@ -514,21 +584,17 @@ class _Runner:
         self._clock.sleep(self._orders.step_wait_s)
         if not accepted:
             logger.warning("case %s: place rejected, remaining steps skipped", case.id)
-            return Outcome.REJECTED
+            return Outcome.REJECTED, f"place rejected with HTTP {record.steps[-1].status}"
 
         trade_id = record.trade_id
-        later_steps = [parse_step(raw) for raw in case.steps[1:]]
         if trade_id is None:
             reason = f"place accepted but its response has no trade id at {self._orders.trade_id_pointer!r}"
             if case.expect_fill:
-                return self._residual_position(case, reason)
-            if later_steps:
-                logger.error("case %s: %s; the order may still rest, check manually", case.id, reason)
-                return Outcome.ORDER_MAY_REST
-            return Outcome.COMPLETED
+                return self._residual_position(record, reason)
+            return self._order_may_rest(record, reason)
 
         cancel_rejected = False
-        for raw, step in zip(case.steps[1:], later_steps, strict=True):
+        for raw, step in zip(case.steps[1:], map(parse_step, case.steps[1:]), strict=True):
             op: str = step.verb
             step_values: dict[str, object] = {"trade_id": trade_id}
             if step.verb == "update_price":
@@ -542,20 +608,35 @@ class _Runner:
             cancel_rejected = cancel_rejected or (op == "cancel" and not step_accepted)
             self._clock.sleep(self._orders.step_wait_s)
 
-        if cancel_rejected:
-            return self._after_rejected_cancel(case, trade_id, prepared.account)
         if case.expect_fill:
             return self._settle_fill(case, record, prepared, trade_id)
-        return Outcome.COMPLETED
+        return self._confirm_unfilled(case, record, trade_id, prepared.account, cancel_rejected=cancel_rejected)
 
-    def _settle_fill(self, case: Case, record: _CaseRecord, prepared: _Prepared, trade_id: str) -> Outcome:
+    def _confirm_unfilled(
+        self, case: Case, record: _CaseRecord, trade_id: str, account: Mapping[str, object], *, cancel_rejected: bool
+    ) -> _Ending:
+        """Wait for the order of a case not meant to fill to end, and check that nothing filled."""
+        state = self._wait_for_end(trade_id, account)
+        after = "its cancel was rejected and " if cancel_rejected else ""
+        if state is _OrderState.ENDED_UNFILLED:
+            if cancel_rejected:
+                logger.warning("case %s: cancel rejected, but order %s had already ended unfilled", case.id, trade_id)
+                return Outcome.COMPLETED, "cancel rejected, but the order had already ended unfilled"
+            return Outcome.COMPLETED, None
+        if state is _OrderState.TIMED_OUT:
+            return self._order_may_rest(record, f"{after}order {trade_id} did not end within fill_timeout_s")
+        return self._residual_position(
+            record, f"{after}order {trade_id}, not meant to fill, shows a fill ({state.value})"
+        )
+
+    def _settle_fill(self, case: Case, record: _CaseRecord, prepared: _Prepared, trade_id: str) -> _Ending:
         """Wait for a fill case's order to end, then close whatever it filled."""
         state = self._wait_for_end(trade_id, prepared.account)
         if state is _OrderState.ENDED_UNFILLED:
             logger.warning("case %s: order ended without a fill, nothing to close", case.id)
-            return Outcome.ENDED_UNFILLED
+            return Outcome.ENDED_UNFILLED, f"order {trade_id} ended without a fill"
         if state is not _OrderState.FILLED:
-            return self._residual_position(case, f"order {trade_id} did not fill completely ({state.value})")
+            return self._residual_position(record, f"order {trade_id} did not fill completely ({state.value})")
 
         place_op = "place_futures" if case.market is Market.FUTURES else "place_stock"
         close_action: Action = "Sell" if case.action == "Buy" else "Buy"
@@ -570,35 +651,26 @@ class _Runner:
         )
         accepted, trade = self._mutate(case, record, "close", place_op, values)
         if not accepted:
-            return self._residual_position(case, "close rejected")
+            return self._residual_position(record, "close rejected")
         close_id = self._trade_id(trade)
         record.close_trade_id = close_id
         if close_id is None:
-            return self._residual_position(case, "close accepted but its response has no trade id")
+            return self._residual_position(record, "close accepted but its response has no trade id")
 
         state = self._wait_for_end(close_id, prepared.account)
         if state is not _OrderState.FILLED:
-            return self._residual_position(case, f"close {close_id} did not fill ({state.value})")
+            return self._residual_position(record, f"close {close_id} did not fill ({state.value})")
         logger.info("case %s: filled and closed", case.id)
-        return Outcome.CLOSED
+        return Outcome.CLOSED, None
 
-    def _after_rejected_cancel(self, case: Case, trade_id: str, account: Mapping[str, object]) -> Outcome:
-        """Classify a case whose cancel was rejected from one trades query after its last step."""
-        state = self._poll(trade_id, account)
-        if state is _OrderState.ENDED_UNFILLED:
-            logger.warning("case %s: cancel rejected, but order %s had already ended unfilled", case.id, trade_id)
-            return Outcome.COMPLETED
-        if state in (_OrderState.FILLED, _OrderState.ENDED_PARTIAL, _OrderState.ENDED_UNKNOWN):
-            return self._residual_position(
-                case, f"cancel rejected and order {trade_id} may have filled ({state.value})"
-            )
-        logger.error("case %s: cancel rejected and order %s may still rest, check manually", case.id, trade_id)
-        return Outcome.ORDER_MAY_REST
-
-    def _residual_position(self, case: Case, reason: str) -> Outcome:
-        _log_residual(case.id, reason)
+    def _residual_position(self, record: _CaseRecord, reason: str) -> _Ending:
+        _log_residual(record, reason)
         self._residual = True
-        return Outcome.RESIDUAL_POSITION
+        return Outcome.RESIDUAL_POSITION, reason
+
+    def _order_may_rest(self, record: _CaseRecord, reason: str) -> _Ending:
+        logger.error("case %s: %s; the order may still rest or have filled: %s", record.id, reason, _what_to_do(record))
+        return Outcome.ORDER_MAY_REST, reason
 
     def _order_values(
         self,
@@ -646,15 +718,17 @@ class _Runner:
         try:
             response = self._client.request(op, self._cfg.endpoints[op], json_body=body)
         except httpx.RequestError as exc:
-            _log_residual(case.id, f"{step} got no response ({describe_exception(exc)}), so its outcome is unknown")
-            raise _UnknownOutcome from exc
+            reason = f"{step} got no response ({describe_exception(exc)}), so its outcome is unknown"
+            _log_residual(record, reason)
+            raise _UnknownOutcome(reason) from exc
         sent.status = response.status
 
         # A synchronous refusal is a 4xx (docs/official-server-contract.md
         # section 2), while a 5xx may come after the server already acted.
         if not (200 <= response.status < 300 or 400 <= response.status < 500):
-            _log_residual(case.id, f"{step} got HTTP {response.status}, so its outcome is unknown")
-            raise _UnknownOutcome
+            reason = f"{step} got HTTP {response.status}, so its outcome is unknown"
+            _log_residual(record, reason)
+            raise _UnknownOutcome(reason)
 
         accepted, parsed = self._judge(response)
         sent.accepted = accepted
@@ -680,19 +754,24 @@ class _Runner:
         return _value_or_none(parsed, self._orders.filled_pointer) != _STATUS_FAILED, parsed
 
     def _trade_id(self, trade: object) -> str | None:
+        """Return the non-empty string trade id a Trade carries at trade_id_pointer, or None."""
         value = _value_or_none(trade, self._orders.trade_id_pointer)
         return value if isinstance(value, str) and value else None
 
     def _wait_for_end(self, trade_id: str, account: Mapping[str, object]) -> _OrderState:
-        """Poll trades every fill_poll_s until the order fills or ends, or fill_timeout_s passes."""
+        """Poll trades every fill_poll_s until the order fills or ends, or fill_timeout_s passes.
+
+        At the deadline, returns TIMED_OUT if nothing had filled yet, or
+        PARTLY_FILLED if some quantity had.
+        """
         deadline = self._clock.monotonic() + self._orders.fill_timeout_s
         while True:
             self._clock.sleep(self._orders.fill_poll_s)
             state = self._poll(trade_id, account)
-            if state is not _OrderState.PENDING:
+            if state not in (_OrderState.PENDING, _OrderState.PARTLY_FILLED):
                 return state
             if self._clock.monotonic() >= deadline:
-                return _OrderState.TIMED_OUT
+                return _OrderState.TIMED_OUT if state is _OrderState.PENDING else state
 
     def _poll(self, trade_id: str, account: Mapping[str, object]) -> _OrderState:
         """Query trades once and return the state of the order trade_id, PENDING if unknown."""
@@ -723,15 +802,17 @@ def _order_state(trade: object, orders: OrdersConfig) -> _OrderState:
     A Failed order was refused, so it holds nothing unless it reports a
     filled quantity. A Cancelled order holds nothing only when its filled
     quantity is known to be zero, since it may have filled in part before
-    it was cancelled, so a missing quantity makes it ENDED_UNKNOWN.
+    it was cancelled, so a missing quantity makes it ENDED_UNKNOWN. An
+    order that has not ended yet but reports a filled quantity is
+    PARTLY_FILLED.
     """
     status = _value_or_none(trade, orders.filled_pointer)
     if status == _STATUS_FILLED:
         return _OrderState.FILLED
-    if status not in (_STATUS_FAILED, _STATUS_CANCELLED):
-        return _OrderState.PENDING
     filled = _value_or_none(trade, orders.deal_quantity_pointer)
     known = isinstance(filled, int) and not isinstance(filled, bool)
+    if status not in (_STATUS_FAILED, _STATUS_CANCELLED):
+        return _OrderState.PARTLY_FILLED if known and filled else _OrderState.PENDING
     if known and filled:
         return _OrderState.ENDED_PARTIAL
     if known or (status == _STATUS_FAILED and filled is None):
@@ -739,8 +820,18 @@ def _order_state(trade: object, orders: OrdersConfig) -> _OrderState:
     return _OrderState.ENDED_UNKNOWN
 
 
-def _log_residual(case_id: str, reason: str) -> None:
-    logger.critical("case %s: %s; possible residual position, check manually", case_id, reason)
+def _what_to_do(record: _CaseRecord) -> str:
+    return (
+        f"check trades for trade_id {record.trade_id or 'unknown'}, close_trade_id "
+        f"{record.close_trade_id or 'none'}; cancel or close it in the simulator before rerunning"
+    )
+
+
+def _log_residual(record: _CaseRecord, reason: str) -> None:
+    """Log CRITICAL that record's case may have left a position, naming its orders and what to do."""
+    logger.critical(
+        "case %s: %s; possible residual position, check manually: %s", record.id, reason, _what_to_do(record)
+    )
 
 
 def _value_or_none(doc: object, pointer: str) -> object:
@@ -750,8 +841,20 @@ def _value_or_none(doc: object, pointer: str) -> object:
         return None
 
 
-def _write_summary(path: Path, records: Sequence[_CaseRecord]) -> None:
+def _write_summary(path: Path, cfg: P1Config, records: Sequence[_CaseRecord]) -> None:
+    """Write orders.json atomically, so a reader never sees a half-written file.
+
+    Holds the server and the [orders] timings the run used, then every
+    selected case in order: its trade ids, each step's HTTP status and
+    whether it was accepted, its outcome and the reason for it.
+    """
     doc = {
+        "base_url": cfg.base_url,
+        "timings": {
+            "step_wait_s": cfg.orders.step_wait_s,
+            "fill_poll_s": cfg.orders.fill_poll_s,
+            "fill_timeout_s": cfg.orders.fill_timeout_s,
+        },
         "cases": [
             {
                 "id": record.id,
@@ -762,8 +865,60 @@ def _write_summary(path: Path, records: Sequence[_CaseRecord]) -> None:
                     for step in record.steps
                 ],
                 "outcome": record.outcome.value,
+                "reason": record.reason,
             }
             for record in records
-        ]
+        ],
     }
-    path.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    temporary = path.with_name(f"{path.name}.tmp")
+
+    # Synced before and after the rename, since a power loss could
+    # otherwise leave the new name pointing at unwritten blocks.
+    with temporary.open("w", encoding="utf-8") as fh:
+        fh.write(json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(temporary, path)
+    directory = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
+def _write_summary_or_log(path: Path, cfg: P1Config, records: Sequence[_CaseRecord]) -> None:
+    """Write orders.json while another exception is propagating, logging a failure instead of raising it."""
+    try:
+        _write_summary(path, cfg, records)
+    except OSError as exc:
+        logger.error("could not write %s: %s", path, describe_exception(exc))
+
+
+def _exit_code_for(exc: BaseException) -> int | None:
+    """Return the exit code the CLI turns exc into, or None for one it does not catch, such as KeyboardInterrupt."""
+    if isinstance(exc, InterlockError):
+        return EXIT_INTERLOCK_ABORT
+    return EXIT_UNEXPECTED if isinstance(exc, Exception) else None
+
+
+def _log_run_summary(path: Path, records: Sequence[_CaseRecord], exit_code: int | None) -> None:
+    """Log the run's exit code, its outcome counts, the cases needing attention and where orders.json is.
+
+    A case needs attention when its outcome says an order or a position may
+    remain, and so does one the interlock stopped after its order was sent.
+    """
+    counts = Counter(record.outcome.value for record in records)
+    attention = [
+        record.id
+        for record in records
+        if record.outcome in _ATTENTION_OUTCOMES
+        or (record.outcome is Outcome.INTERLOCK_ABORT and record.may_hold_order())
+    ]
+    logger.info(
+        "orders: exit code %s; %d cases: %s; needing attention: %s; summary in %s",
+        "none, interrupted" if exit_code is None else exit_code,
+        len(records),
+        ", ".join(f"{count} {outcome}" for outcome, count in sorted(counts.items())),
+        ", ".join(attention) or "none",
+        path,
+    )
