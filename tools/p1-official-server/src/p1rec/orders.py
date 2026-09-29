@@ -400,7 +400,7 @@ class _CaseRecord:
 
     def may_hold_order(self) -> bool:
         """Return whether an order of this case may exist: one was accepted, or one got no answer."""
-        return self.trade_id is not None or any(step.status is None for step in self.steps)
+        return self.trade_id is not None or any(step.accepted or step.status is None for step in self.steps)
 
 
 @dataclass(frozen=True)
@@ -507,13 +507,16 @@ class _Runner:
             custom_field=case.custom_field,
         )
         accepted, trade = self._mutate(case, record, "place", place_op, values)
+
+        # Recorded before the wait, so an interrupt during it still names the order
+        if accepted:
+            record.trade_id = self._trade_id(trade)
         self._clock.sleep(self._orders.step_wait_s)
         if not accepted:
             logger.warning("case %s: place rejected, remaining steps skipped", case.id)
             return Outcome.REJECTED
 
-        trade_id = self._trade_id(trade)
-        record.trade_id = trade_id
+        trade_id = record.trade_id
         later_steps = [parse_step(raw) for raw in case.steps[1:]]
         if trade_id is None:
             reason = f"place accepted but its response has no trade id at {self._orders.trade_id_pointer!r}"

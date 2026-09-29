@@ -578,6 +578,50 @@ def test_interrupt_during_fill_wait(
     assert "possible residual position, check manually" in critical
 
 
+def _no_trade_id_place(path: str, _body: dict[str, Any]) -> httpx.Response | None:
+    return httpx.Response(200, json={}) if path == _PLACE_PATH else None
+
+
+@pytest.mark.parametrize(
+    ("case", "answer", "trade_id"),
+    [
+        (_fill_case("interrupted"), None, "000001"),
+        (_case("interrupted", quantity=2, steps=_LIFECYCLE_STEPS), None, "000001"),
+        (_case("interrupted"), _no_trade_id_place, None),
+    ],
+    ids=["fill", "lifecycle", "accepted_without_trade_id"],
+)
+def test_interrupt_during_step_wait_after_accepted_place(
+    tmp_path: Path,
+    write_config: WriteConfig,
+    caplog: pytest.LogCaptureFixture,
+    case: Case,
+    answer: Answer | None,
+    trade_id: str | None,
+) -> None:
+    server = OrderServer(answer=answer)
+    cfg = _config(write_config)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    with pytest.raises(KeyboardInterrupt):
+        run_orders(
+            cfg,
+            [case],
+            run_dir,
+            None,
+            transport=server.transport(),
+            clock=InterruptingClock(interrupt_on_s=cfg.orders.step_wait_s),
+        )
+
+    assert [path for path, _ in server.mutations()] == [_PLACE_PATH]
+    (recorded,) = json.loads((run_dir / ORDERS_JSON).read_text(encoding="utf-8"))["cases"]
+    assert (recorded["trade_id"], recorded["outcome"]) == (trade_id, "interrupted")
+    (critical,) = _messages(caplog, logging.CRITICAL)
+    assert "interrupted" in critical
+    assert "possible residual position, check manually" in critical
+
+
 # Rejections
 
 
