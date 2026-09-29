@@ -101,6 +101,8 @@ SERVER_LOG_LINES = [
     "\x1b[2m2026-10-01T00:00:01.724337Z\x1b[0m \x1b[32m INFO\x1b[0m "
     f"Subscribed trade events for account {ACCOUNT_S}\n",
     "    at the end of a multi-line message\n",
+    f'\x1b[2m2026-10-01T00:00:02.000000Z\x1b[0m DEBUG Order {{ id: "o1", ca: "{FAKE_CA}", combo: false }}\n',
+    f"\x1b[2m2026-10-01T00:00:03.000000Z\x1b[0m \x1b[32m INFO\x1b[0m attached subaccount {SUBACCOUNT_SSE}\n",
 ]
 RECORDER_LOG_LINE = "2026-10-01 08:00:02,500 INFO p1rec.cli: preflight finished\n"
 
@@ -658,8 +660,22 @@ def test_export_refuses_bad_entries(env: _Env, entry: str, message: str) -> None
     assert not env.cfg.fixtures_root.exists()
 
 
+def test_discover_reads_every_recording(env: _Env) -> None:
+    # A body that is not UTF-8 is kept only in resp_body_b64
+    body = b'{"note": "\xff", "order": {"subaccount": "S0977011"}}'
+    record = _rest("trades", "POST", "/api/v1/order/trades", None, "", TS + 60)
+    del record["resp_body"]
+    record["resp_body_b64"] = base64.b64encode(body).decode("ascii")
+    append_jsonl(env.cfg.results_root / RECONCILE_RUN / "rest.jsonl", record)
+
+    found = discover(env.cfg)
+
+    # The stream run sorts before the reconcile run, so its frame is seen first
+    assert found["CA_SIGNATURE"] == [FAKE_CA]
+    assert found["SUBACCOUNT"] == [SUBACCOUNT_SSE, SUBACCOUNT_REST, "S0977011"]
+
+
 def test_ca_signature_and_subaccount_scrubbed_on_export(env: _Env) -> None:
-    assert discover(env.cfg)["SUBACCOUNT"] == [SUBACCOUNT_REST]
     _select(
         env,
         _fixture_table("C3_trades", RECONCILE_RUN, "rest.jsonl", [1], ["C3"], "TMFJ6"),
@@ -670,23 +686,51 @@ def test_ca_signature_and_subaccount_scrubbed_on_export(env: _Env) -> None:
 
     root = env.cfg.fixtures_root
     [trade] = json.loads(json.loads((root / "C3_trades.json").read_text(encoding="utf-8"))[0]["resp_body"])
-    assert trade["order"]["ca"] == "CA_SIGNATURE"
-    assert trade["order"]["subaccount"] == "SUBACCOUNT_1"
+    assert trade["order"]["ca"] == "CA_SIGNATURE_1"
+    assert trade["order"]["subaccount"] == "SUBACCOUNT_2"
     assert trade["order"]["account"]["account_id"] == "ACCOUNT_ID_2"
     frame = (root / "C1_futures_order.sse").read_text(encoding="utf-8")
     order = json.loads(frame.split("data:", 1)[1])["data"]["FuturesOrder"]["order"]
-    assert order["ca"] == "CA_SIGNATURE"
-
-    # Seen on the order stream alone, it still gets a placeholder, saved so a later scan knows it
-    assert order["subaccount"] == "SUBACCOUNT_2"
-    assert load_map(env.cfg.scrub.map_path)[SUBACCOUNT_SSE] == "SUBACCOUNT_2"
+    assert order["ca"] == "CA_SIGNATURE_1"
+    assert order["subaccount"] == "SUBACCOUNT_1"
     for path in written:
         _assert_no_original(path.read_bytes())
 
 
+def test_non_json_log_values_scrubbed_and_detected(
+    env: _Env, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # These log lines show the signature and subaccount outside JSON, and
+    # only unselected recordings show them in JSON.
+    _select(env, _fixture_table("E1_order_debug", PREFLIGHT_RUN, "server-start.log", [4, 5], ["E1"], ""))
+
+    assert main(["scrub", "--config", str(env.config_path)]) == 0
+
+    exported = (env.cfg.fixtures_root / "E1_order_debug.log").read_text(encoding="utf-8")
+    assert 'ca: "CA_SIGNATURE_1"' in exported
+    assert "attached subaccount SUBACCOUNT_1" in exported
+    _assert_no_original(exported.encode("utf-8"))
+
+    planted = env.cfg.fixtures_root / "C9_planted.log"
+    planted.write_text(f'Order {{ ca: "{FAKE_CA}" }}\n', encoding="utf-8")
+    contract = tmp_path / "contract.md"
+    contract.write_text(f"# Contract\nsubaccount {SUBACCOUNT_SSE}\n", encoding="utf-8")
+    capsys.readouterr()
+
+    # Tagged so its run directory cannot collide with the export's within the same second
+    assert main(["scrub", "--scan-only", "--config", str(env.config_path), "--tag", "scan"]) == 2
+
+    stderr = capsys.readouterr().err
+    assert f"{planted}:1:CA_SIGNATURE" in stderr
+    assert f"{contract.resolve()}:2:SUBACCOUNT" in stderr
+    _assert_no_original(stderr.encode("utf-8"))
+
+
 def test_scan_reports_ca_signature_and_account_keys(tmp_path: Path) -> None:
     member = json.dumps({"order": {"ca": FAKE_CA, "subaccount": "S1"}})
-    clean = json.dumps({"order": {"ca": "CA_SIGNATURE", "subaccount": "SUBACCOUNT_1"}, "empty": {"ca": "", "x": None}})
+    clean = json.dumps(
+        {"order": {"ca": "CA_SIGNATURE_1", "subaccount": "SUBACCOUNT_1"}, "empty": {"ca": "", "x": None}}
+    )
     fixture = tmp_path / "scan" / "C1_mixed.jsonl"
     fixture.parent.mkdir()
     fixture.write_text(

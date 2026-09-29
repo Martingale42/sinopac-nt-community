@@ -1,8 +1,9 @@
 """De-identify recorded data, export fixtures and scan for leaked identifiers.
 
 The originals are every secret read from the environment, the API key
-prefix the server embeds in clientname, and the identifiers the configured
-JSON pointers find in recorded accounts and ca_status responses. build_map
+prefix the server embeds in clientname, the identifiers the configured
+JSON pointers find in recorded accounts and ca_status responses, and every
+"ca" signature and scrub.account_id_keys value in any recording. build_map
 gives each original a placeholder, <CATEGORY>_<n>, numbered per category in
 order of first appearance and kept stable across runs by the map file under
 results_root, which is the only place originals are written.
@@ -67,10 +68,14 @@ _ARRAY_INDEX_RE = re.compile(r"0|[1-9][0-9]*")
 
 # An order object's CA signature is base64 DER that may embed the
 # certificate holder's name and national ID where no string match can see
-# them, so every non-empty one is replaced by this fixed placeholder, which
-# is also the category a leaked one is reported under.
+# them, so every non-empty one is an original of this category.
 _CA_KEY = "ca"
 _CA_CATEGORY = "CA_SIGNATURE"
+
+# Recordings whose lines can hold identifiers by key, and the marker of a
+# line keeping a body or frame that is not UTF-8 in a *_b64 field.
+_SSE_RECORDING_GLOB = "sse_*.jsonl"
+_B64_FIELD_MARKER = b'_b64"'
 
 # Unicode's Supplementary Private Use Area-A, U+F0000 to U+FFFFD, which
 # recorded text has no reason to contain, lends one marker character to
@@ -299,7 +304,7 @@ def _member_pattern(keys: Iterable[str]) -> re.Pattern[str]:
 
 
 def _is_placeholder(value: str) -> bool:
-    return value == _CA_CATEGORY or _PLACEHOLDER_RE.fullmatch(value) is not None
+    return _PLACEHOLDER_RE.fullmatch(value) is not None
 
 
 def _iter_files(paths: Iterable[Path]) -> Iterator[Path]:
@@ -520,12 +525,30 @@ def _key_categories(cfg: P1Config) -> dict[str, str]:
     return {key: key.upper() for key in cfg.scrub.account_id_keys}
 
 
+def _record_keys(cfg: P1Config) -> dict[str, str]:
+    """Return every key whose values are originals wherever recorded JSON holds it: "ca" and account_id_keys."""
+    return {_CA_KEY: _CA_CATEGORY, **_key_categories(cfg)}
+
+
+def _field_text(record: Mapping[str, object], key: str) -> str | None:
+    """Return a recorded text field, decoding its *_b64 twin instead when the text was not UTF-8."""
+    encoded = record.get(f"{key}_b64")
+    if isinstance(encoded, str):
+        try:
+            return base64.b64decode(encoded, validate=True).decode("utf-8", "replace")
+        except (binascii.Error, ValueError):
+            pass
+    value = record.get(key)
+    return value if isinstance(value, str) else None
+
+
 def _record_documents(record: Mapping[str, object]) -> Iterator[object]:
     """Yield each JSON document a recorded line carries: its request and response bodies, or its frame's data."""
-    texts = [record.get("req_body"), record.get("resp_body")]
-    raw = record.get("raw")
-    if isinstance(raw, str):
-        texts.append(parse_frame(raw).data)
+    texts = [_field_text(record, "req_body"), _field_text(record, "resp_body")]
+    for key in ("raw", "partial"):
+        frame = _field_text(record, key)
+        if frame is not None:
+            texts.append(parse_frame(frame).data)
     for text in texts:
         if isinstance(text, str):
             try:
@@ -551,28 +574,37 @@ def _collect_key_values(document: object, keys: Mapping[str, str], found: dict[s
 
 
 def discover(cfg: P1Config) -> dict[str, list[str]]:
-    """Return category -> identifiers found in every recorded REST exchange.
+    """Return category -> identifiers found in every recording under results_root.
 
-    The scrub pointers apply to accounts and ca_status responses, each to
-    every element of a response that is a JSON array, and the
-    scrub.account_id_keys to every request and response body at any depth.
-    Runs are read in name order, which is chronological. Logs a warning for
-    an operation with no recorded response, or a pointer that found
-    nothing, but never logs a value found.
+    The scrub pointers apply to recorded accounts and ca_status responses,
+    each to every element of a response that is a JSON array. The "ca"
+    signatures and scrub.account_id_keys values are collected at any depth
+    of every request, response and frame in every rest.jsonl and
+    sse_*.jsonl, including bodies and frames kept in *_b64 fields, so a
+    value is known even where a fixture shows it in another form, such as
+    a log line. Runs and their files are read in name order, which is
+    chronological for runs. Logs a warning for an operation with no
+    recorded response, or a pointer that found nothing, but never logs a
+    value found.
     """
     pointers_by_op = {_ACCOUNTS_OP: cfg.scrub.account_id_pointers, _CA_STATUS_OP: cfg.scrub.ca_pointers}
-    keys = _key_categories(cfg)
+    keys = _record_keys(cfg)
     responses = dict.fromkeys(pointers_by_op, 0)
     hits = {(op, pointer): 0 for op, pointers in pointers_by_op.items() for pointer in pointers}
     found: dict[str, list[str]] = {}
 
-    # A key inside a body shows in the JSONL line as \"key\", since the body is itself a JSON string
-    markers = [op.encode("utf-8") for op in pointers_by_op]
-    markers += [b'\\"' + key.encode("utf-8") + b'\\"' for key in keys]
-    for rest_log in sorted(cfg.results_root.glob("*/rest.jsonl")):
-        for record in _iter_jsonl_records(rest_log, markers):
-            for body in _record_documents(record):
-                _collect_key_values(body, keys, found)
+    # A key inside a body or frame shows in the JSONL line as \"key\", since that text is itself a JSON string
+    key_markers = [b'\\"' + key.encode("utf-8") + b'\\"' for key in keys] + [_B64_FIELD_MARKER]
+    op_markers = [op.encode("utf-8") for op in pointers_by_op]
+    root = cfg.results_root
+    recordings = sorted([*root.glob(f"*/{_REST_SOURCE}"), *root.glob(f"*/{_SSE_RECORDING_GLOB}")])
+    for recording in recordings:
+        is_rest = recording.name == _REST_SOURCE
+        for record in _iter_jsonl_records(recording, key_markers + op_markers if is_rest else key_markers):
+            for document in _record_documents(record):
+                _collect_key_values(document, keys, found)
+            if not is_rest:
+                continue
             op = record.get("op")
             if not isinstance(op, str) or op not in pointers_by_op:
                 continue
@@ -950,32 +982,6 @@ def _render_manifest(entries: Sequence[Mapping[str, object]]) -> str:
     return "\n".join(out)
 
 
-def _extend_for_selections(
-    cfg: P1Config, mapping: Mapping[str, str], selections: Sequence[_Selection]
-) -> dict[str, str]:
-    """Return mapping extended with what the selected records alone reveal.
-
-    A scrub.account_id_keys value found only there, such as a subaccount
-    seen on the order stream alone, gets the next placeholder of its
-    category and is saved to the scrub map, so a later scan knows it. Each
-    non-empty "ca" signature maps to CA_SIGNATURE for this export only.
-    """
-    keys = {**_key_categories(cfg), _CA_KEY: _CA_CATEGORY}
-    found: dict[str, list[str]] = {}
-    for selection in selections:
-        for record in selection.records:
-            for document in _record_documents(record):
-                _collect_key_values(document, keys, found)
-    signatures = found.pop(_CA_CATEGORY, [])
-
-    extended = build_map({}, found, mapping)
-    if extended != dict(mapping):
-        save_map(cfg.scrub.map_path, extended)
-    effective = {**dict.fromkeys(signatures, _CA_CATEGORY), **extended}
-    _check_contained(effective)
-    return effective
-
-
 def export_fixtures(cfg: P1Config, mapping: Mapping[str, str]) -> list[Path]:
     """Scrub the lines fixtures.toml selects from results_root and write them to fixtures_root.
 
@@ -986,9 +992,9 @@ def export_fixtures(cfg: P1Config, mapping: Mapping[str, str]) -> list[Path]:
     items; the recording time comes from the first selected line (its
     recv_ts_ns or error_ts_ns, or the time a log line starts with), or
     else from the entry's explicit recorded_at, never from file times.
-    Besides the originals in mapping, every non-empty "ca" signature in
-    the selected JSON becomes CA_SIGNATURE, and a scrub.account_id_keys
-    value found only there is added to the saved scrub map first.
+    mapping must hold every original, "ca" signatures and
+    scrub.account_id_keys values included, as build_map over discover's
+    result does; one it lacks is caught by the scan as a leak.
     Every entry is validated, and the output staged and scanned under
     results_root, before anything reaches fixtures_root: an invalid entry,
     or one with an original in a field that goes public, raises
@@ -1000,8 +1006,7 @@ def export_fixtures(cfg: P1Config, mapping: Mapping[str, str]) -> list[Path]:
     for entry in entries:
         _check_entry_fields(cfg.scrub.selection, entry, mapping)
     selections = [_select(cfg, entry) for entry in entries]
-    effective = _extend_for_selections(cfg, mapping, selections)
-    replacer = _replacer(effective)
+    replacer = _replacer(mapping)
 
     outputs: dict[str, bytes] = {}
     manifest: list[dict[str, object]] = []
@@ -1028,7 +1033,7 @@ def export_fixtures(cfg: P1Config, mapping: Mapping[str, str]) -> list[Path]:
     for filename, data in outputs.items():
         (staging / filename).write_bytes(data)
         staged.append(staging / filename)
-    leaks = scan(staged, effective, _key_categories(cfg))
+    leaks = scan(staged, mapping, _key_categories(cfg))
     if leaks:
         raise LeakError(leaks, staging)
 

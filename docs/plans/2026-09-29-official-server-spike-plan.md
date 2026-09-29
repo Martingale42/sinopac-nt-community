@@ -707,8 +707,9 @@ git commit -m "Measure history queries and their quota cost"
 - 佔位字串依「類別 + 首次出現順序」決定（例如 `ACCOUNT_1`）；同一原始值永遠得到同一佔位字串；對照表存 `results/p1/scrub-map.json`（不進版控），重跑時沿用。
 - 替換依原始值長度由長到短逐一進行（每個原始值的全部寫法一起換），兩個原始值重疊時較長者整段替換；嵌在較長字串中的值（例如 clientname 內的 key 前綴）也要替換；佔位字串不得包含任何原始值。
 - 原始值的每種寫法都要處理：原文、JSON 跳脫後的形式（含 `\uXXXX`），以及 `*_b64` 欄位解碼後的內容；帳戶物件的 `username` 也屬於要替換的值。
-- `account_id_keys`（`subaccount`）列出的鍵，其非空值在錄製 JSON 的任何深度都視為帳號：從全部 `rest.jsonl` 的請求與回應找出，匯出時再從選取行補上只出現在該處的值（例如只見於 `order_event` 串流的 subaccount），並存入對照表。
-- 委託物件的 `ca` 是 CA 簽章（base64 DER，可能內含憑證持有人姓名與身分證字號，字串比對看不到），匯出時選取 JSON 中每個非空的 `ca` 值一律換成固定佔位字串 `CA_SIGNATURE`（不進對照表）；掃描時任何非空且非佔位字串的 `ca` 成員（任何跳脫深度）回報為 `CA_SIGNATURE`，`account_id_keys` 的成員同理以其類別回報。
+- `account_id_keys`（`subaccount`）列出的鍵，其非空值在錄製 JSON 的任何深度都視為帳號（類別為鍵名大寫，例如 `SUBACCOUNT_1`）。
+- 委託物件的 `ca` 是 CA 簽章（base64 DER，可能內含憑證持有人姓名與身分證字號，字串比對看不到），每個非空值都是原始值，類別 `CA_SIGNATURE`（`CA_SIGNATURE_1`、`CA_SIGNATURE_2`……），與其他類別一樣存入對照表，因此出現在任何形式（例如 log 裡的 Debug 輸出）都會被替換與掃出。
+- `ca` 與 `account_id_keys` 的值從 `results_root` 下全部錄製找出：每個 `rest.jsonl` 與 `sse_*.jsonl` 的請求、回應與 frame（含 `*_b64` 欄位解碼後的內容），不限於選取行。掃描另外以結構檢查：任何非空且非佔位字串的 `ca` 成員（任何跳脫深度）回報為 `CA_SIGNATURE`，`account_id_keys` 的成員同理以其類別回報，即使該值不在對照表中。
 - `p1rec scrub` 依 `fixtures.toml` 從 `results/` 取出指定檔案與行，替換後寫入 `test_data/official/1.7.6/`，並產生 `MANIFEST.toml`（每筆：檔名、來源 run_id、來源檔、行號、錄製時間、商品、對應的 §6 項目）。輸出先在 `results/` 下暫存並掃描，通過才寫入；有洩漏時回 2，fixture 目錄不變。
 - 錄製時間取自第一個選取行：REST 紀錄的 `recv_ts_ns`（連線錯誤為 `error_ts_ns`）、SSE frame 的 `recv_ts_ns`、log 行開頭的 ISO-8601 時間戳（先去除 ANSI 色碼；錄製器 log 不帶時區，視為錄製主機的本地時間）。取不到時該筆須在 `fixtures.toml` 寫明帶時區的 `recorded_at`，否則 `ConfigError`；取得到時不接受 `recorded_at`。不使用檔案時間（主機曾發生 RTC 重置）。
 - `fixtures.toml` 某筆會公開的欄位（`name`、`run_id`、`source`、`instrument`、`checklist`）含任何原始值時 `ConfigError`，只以序號指出該筆，不印原始值。
@@ -753,7 +754,9 @@ def scan(paths: Iterable[Path], originals: Mapping[str, str],
 - `test_overlapping_originals_replace_longer_whole` — `QQQXYZ` 與 `XYZWWWWWWW` 相鄰重疊時，較長者整段替換。
 - `test_spec_targets_scanned_without_extra_paths` — `extra_scan_paths = []` 時，`test_data/official/` 與契約文件中的洩漏仍被回報。
 - `test_manifest_recorded_at_for_every_kind` — `.json`、`.sse`、`.log`（官方 server log 與錄製器 log）都帶錄製時間。
-- `test_ca_signature_and_subaccount_scrubbed_on_export` — trades 回應與 `order_event` frame 的 `ca` 換成 `CA_SIGNATURE`，只出現在串流的 subaccount 也被替換並存入對照表。
+- `test_discover_reads_every_recording` — `ca` 與 subaccount 從 SSE 錄製與只存於 `resp_body_b64` 的回應中找出。
+- `test_ca_signature_and_subaccount_scrubbed_on_export` — trades 回應與 `order_event` frame 的 `ca` 換成 `CA_SIGNATURE_<n>`，subaccount 換成 `SUBACCOUNT_<n>`。
+- `test_non_json_log_values_scrubbed_and_detected` — 只在未選取的錄製中以 JSON 出現的 `ca`（log 中為 Debug 格式）與 subaccount（log 中為純文字）在匯出時被替換，植入已提交檔案後 `--scan-only` 回 2。
 - `test_scan_reports_ca_signature_and_account_keys` — 不知道原始值時，非佔位字串的 `ca` 與 `subaccount` 成員在各跳脫深度都被回報。
 
 **Verification:**

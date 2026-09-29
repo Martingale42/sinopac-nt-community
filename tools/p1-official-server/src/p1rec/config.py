@@ -79,7 +79,7 @@ class ScrubConfig:
     # Holds the original values themselves, so it must stay under results_root
     map_path: Path
 
-    # fixtures.toml; each entry has name, run_id, source, lines, checklist, instrument
+    # fixtures.toml; each entry has name, run_id, source, lines, checklist, instrument and optionally recorded_at
     selection: Path
 
     # scrub --scan-only always scans fixtures_root's parent and this
