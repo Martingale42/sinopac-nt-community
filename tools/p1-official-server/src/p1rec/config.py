@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from p1rec.jsonpointer import is_valid_pointer_syntax
+
 
 class ConfigError(ValueError):
     """Raised when p1.toml is missing a required key or has the wrong type."""
@@ -31,7 +33,8 @@ class Endpoint:
 
 @dataclass(frozen=True)
 class InterlockConfig:
-    """Placeholder, filled in once mode-interlock checking is implemented."""
+    endpoint_op: str  # Logical operation name in [endpoints]; defaults to "mode"
+    pointer: str  # JSON pointer into that operation's response, e.g. "/simulation"
 
 
 @dataclass(frozen=True)
@@ -219,6 +222,23 @@ def _get_fs_path(data: Mapping[str, Any], dotted_key: str, base_dir: Path) -> Pa
     return (base_dir / raw).resolve()
 
 
+def _get_pointer(data: Mapping[str, Any], dotted_key: str, *, allow_root: bool = False) -> str:
+    """Read dotted_key as a string and validate it is a syntactically valid JSON pointer.
+
+    Rejects the empty (whole-document) pointer unless allow_root is set:
+    that pointer resolves to the whole response body, so any endpoint
+    whose body happened to be the bare JSON value true would satisfy a
+    caller checking "is this value true", regardless of what the body
+    actually means.
+    """
+    pointer = _get_str(data, dotted_key)
+    if not is_valid_pointer_syntax(pointer):
+        raise ConfigError(f"config key {dotted_key} is not a valid JSON pointer: {pointer!r}")
+    if pointer == "" and not allow_root:
+        raise ConfigError(f"config key {dotted_key} must not be the empty pointer")
+    return pointer
+
+
 def _get_secret_env(data: Mapping[str, Any]) -> dict[str, str]:
     result: dict[str, str] = {}
     for role in _SECRET_ROLES:
@@ -254,9 +274,32 @@ def _optional_table(data: Mapping[str, Any], key: str) -> Mapping[str, Any]:
     return value
 
 
+_DEFAULT_INTERLOCK_ENDPOINT_OP = "mode"
+
+
 def _parse_interlock(data: Mapping[str, Any], config_dir: Path) -> InterlockConfig:
-    _optional_table(data, "interlock")
-    return InterlockConfig()
+    table = _optional_table(data, "interlock")
+    if "endpoint_op" in table:
+        endpoint_op = _get_str(data, "interlock.endpoint_op")
+    else:
+        endpoint_op = _DEFAULT_INTERLOCK_ENDPOINT_OP
+    pointer = _get_pointer(data, "interlock.pointer")
+
+    known_endpoints = _lookup(data, "endpoints")
+    if not isinstance(known_endpoints, Mapping) or endpoint_op not in known_endpoints:
+        raise ConfigError(f"config key interlock.endpoint_op names unknown endpoint: {endpoint_op!r}")
+
+    # A POST that reports simulation mode as a side effect would still be
+    # a mutation the interlock must not itself trigger, so only a GET may
+    # back the check.
+    endpoint_table = known_endpoints[endpoint_op]
+    endpoint_method = endpoint_table.get("method") if isinstance(endpoint_table, Mapping) else None
+    if endpoint_method != "GET":
+        raise ConfigError(
+            f"config key interlock.endpoint_op must name a GET endpoint, but {endpoint_op!r} is {endpoint_method!r}"
+        )
+
+    return InterlockConfig(endpoint_op=endpoint_op, pointer=pointer)
 
 
 def _parse_contracts(data: Mapping[str, Any], config_dir: Path) -> ContractFields:

@@ -36,6 +36,10 @@ MINIMAL_CONFIG_LINES = [
     "[endpoints.place_stock]",
     'method = "POST"',
     'path = "/api/v1/order/place_order"',
+    "",
+    "[interlock]",
+    'endpoint_op = "mode"',
+    'pointer = "/simulation"',
 ]
 
 SECRET_ENV_VARS = ("SJ_API_KEY", "SJ_SEC_KEY", "SJ_CA_PASSWD", "P1_PERSON_ID", "P1_EGRESS_IP")

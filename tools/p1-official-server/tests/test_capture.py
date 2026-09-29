@@ -27,7 +27,9 @@ Handler = Callable[[httpx.Request], httpx.Response]
 
 
 def _use_transport(monkeypatch: pytest.MonkeyPatch, handler: Handler) -> None:
-    def _make(base_url: str, timeout: httpx.Timeout) -> httpx.Client:
+    def _make(
+        base_url: str, timeout: httpx.Timeout, *, transport: httpx.BaseTransport | None = None
+    ) -> httpx.Client:
         return httpx.Client(base_url=base_url, timeout=timeout, transport=httpx.MockTransport(handler))
 
     monkeypatch.setattr(capture, "make_http_client", _make)

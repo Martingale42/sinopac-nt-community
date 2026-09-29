@@ -64,8 +64,7 @@ def test_self_test_interlock_runs_without_secret_env_vars(
     assert "environment variable" not in stderr
     for var in SECRET_ENV_VARS:
         assert var not in stderr
-    assert "self-test-interlock: not implemented yet" in stderr
-    assert exit_code == 1  # stub handler, reached without a secrets ConfigError
+    assert exit_code == 0  # all five canned responses behaved as expected
 
 
 def test_handler_exception_is_redacted(

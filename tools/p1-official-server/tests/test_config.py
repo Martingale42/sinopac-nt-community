@@ -44,8 +44,8 @@ def test_load_config_success(tmp_path: Path, write_config: WriteConfig) -> None:
         "mode": Endpoint(method="GET", path="/api/v1/info"),
         "place_stock": Endpoint(method="POST", path="/api/v1/order/place_order"),
     }
-    # These placeholder types only need to construct and load here
-    assert cfg.interlock == InterlockConfig()
+    assert cfg.interlock == InterlockConfig(endpoint_op="mode", pointer="/simulation")
+    # These remaining placeholder types only need to construct and load here
     assert cfg.contracts == ContractFields()
     assert cfg.funds == FundsConfig()
     assert cfg.stream == StreamConfig()
@@ -64,6 +64,7 @@ def test_load_real_p1_toml() -> None:
     assert cfg.base_url == "http://127.0.0.1:8080"
     assert "place_stock" in cfg.endpoints
     assert "stream_connect" not in cfg.endpoints  # left to the stream section
+    assert cfg.interlock == InterlockConfig(endpoint_op="mode", pointer="/simulation")
 
 
 def test_missing_key_names_full_path(write_config: WriteConfig) -> None:
@@ -147,10 +148,75 @@ def test_secret_env_value_must_look_like_env_var_name(write_config: WriteConfig)
 
 
 def test_section_present_but_not_table_raises(write_config: WriteConfig) -> None:
-    lines = ["interlock = 5", *MINIMAL_CONFIG_LINES]
+    # MINIMAL_CONFIG_LINES already has a [interlock] table; drop it so the
+    # top-level `interlock = 5` below is the only definition, since TOML
+    # rejects a key defined twice.
+    interlock_section_lines = {"[interlock]", 'endpoint_op = "mode"', 'pointer = "/simulation"'}
+    without_interlock_table = [line for line in MINIMAL_CONFIG_LINES if line not in interlock_section_lines]
+    lines = ["interlock = 5", *without_interlock_table]
     config_path = write_config(lines)
 
     with pytest.raises(ConfigError, match=r"interlock"):
+        load_config(config_path)
+
+
+def test_interlock_endpoint_op_defaults_to_mode(write_config: WriteConfig) -> None:
+    lines = [line for line in MINIMAL_CONFIG_LINES if line != 'endpoint_op = "mode"']
+    config_path = write_config(lines)
+
+    cfg = load_config(config_path)
+
+    assert cfg.interlock.endpoint_op == "mode"
+
+
+def test_interlock_missing_pointer_names_full_path(write_config: WriteConfig) -> None:
+    lines = [line for line in MINIMAL_CONFIG_LINES if line != 'pointer = "/simulation"']
+    config_path = write_config(lines)
+
+    with pytest.raises(ConfigError, match=r"interlock\.pointer"):
+        load_config(config_path)
+
+
+def test_interlock_unknown_endpoint_op_rejected(write_config: WriteConfig) -> None:
+    lines = [
+        'endpoint_op = "no_such_op"' if line == 'endpoint_op = "mode"' else line for line in MINIMAL_CONFIG_LINES
+    ]
+    config_path = write_config(lines)
+
+    with pytest.raises(ConfigError, match=r"interlock\.endpoint_op"):
+        load_config(config_path)
+
+
+def test_interlock_endpoint_op_must_be_get(write_config: WriteConfig) -> None:
+    # place_stock exists in [endpoints] but is a POST; the interlock must
+    # never itself be backed by a mutating endpoint.
+    lines = [
+        'endpoint_op = "place_stock"' if line == 'endpoint_op = "mode"' else line for line in MINIMAL_CONFIG_LINES
+    ]
+    config_path = write_config(lines)
+
+    with pytest.raises(ConfigError, match=r"interlock\.endpoint_op"):
+        load_config(config_path)
+
+
+def test_interlock_pointer_must_start_with_slash(write_config: WriteConfig) -> None:
+    lines = [
+        'pointer = "simulation"' if line == 'pointer = "/simulation"' else line for line in MINIMAL_CONFIG_LINES
+    ]
+    config_path = write_config(lines)
+
+    with pytest.raises(ConfigError, match=r"interlock\.pointer"):
+        load_config(config_path)
+
+
+def test_interlock_pointer_rejects_empty_string(write_config: WriteConfig) -> None:
+    # The empty pointer resolves to the whole response body, so any
+    # endpoint whose body happened to be the bare JSON value true would
+    # pass, regardless of what that body actually means.
+    lines = ['pointer = ""' if line == 'pointer = "/simulation"' else line for line in MINIMAL_CONFIG_LINES]
+    config_path = write_config(lines)
+
+    with pytest.raises(ConfigError, match=r"interlock\.pointer"):
         load_config(config_path)
 
 
