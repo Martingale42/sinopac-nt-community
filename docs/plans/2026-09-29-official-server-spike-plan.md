@@ -979,6 +979,8 @@ git commit -m "Rehearse the full recorder pipeline against a stub server"
 **Behaviour:**
 
 - 排程：選證交所行事曆上週四至下週二皆為營業日（週末除外）的第一週；10/8 那週不行（10/9 補假，依設計 §9.2 推論，排程時查證）。
+- 離線演練（Task 11）沒有涵蓋、只能在本日驗證的路徑，逐項觀察並記入契約文件：委託在下單回應之後才結算（等待成交、`PendingSubmit` 時刪單、`step_wait_s` 等時間的實際值）、部分成交與多筆成交、成交事件的 `deal_key` 與 `deal_qty`、IOC／FOK 到期的事件形狀、以事件回報的改單或刪單拒絕、不帶帳戶的 `trades` 是否列出所有帳戶的委託、斷線後訂閱是否需要重送、串流流量是否計入每日額度、夜盤與跨日。
+- 改動 `p1.toml` 的指標、範本或 `[events]` 時，同步改 `tests/data/p1.toml`，否則離線測試的設定比對會失敗。
 - 前一個交易日：依當日合約清單校準 `p1.toml` 的近月期貨代號（TXFJ6、MXFJ6、TMFJ6 於 2026-10-21 到期，soak 跨過該日就改用下一個月份）與近月價平 TXO 買權、賣權各一檔，同步更新 `[stream]` 商品、`[history]` 的 snapshots 查詢與 `scenarios.toml`。
 - 07:30 前：校時狀態（`timedatectl` 與 `chronyc tracking` 或等效指令）存入 `results/p1/<日期>-ntp.txt`；填入 `futures_margin_twd`；啟動官方 server 並依 Task 1 記下的方式把 log 導向 `results/p1/<日期>-server/server.log`（放在自己的 run 目錄內，Task 15 才能以 `fixtures.toml` 挑選）；`p1rec self-test-interlock` 回 0；`p1rec preflight` 回 0，回 2 即停止並交由使用者取得模擬資金。
 - 08:00 前：`p1rec stream --clients a,b --until <下週二 09:30 +08:00>` 於 tmux 啟動，即為 soak 起點（關閉期間最長 `SSE_READ_TIMEOUT_S + retry_s`，這段時間再按 Ctrl-C 不會生效，必要時以 SIGKILL 強制結束）；預先排入週五 10:30 取消 2330 tick 訂閱的動作（§6 D2：訂閱為全域，看兩個 client 是否同時停止收到 2330）。
