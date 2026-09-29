@@ -252,7 +252,7 @@ def test_self_test_returns_3_when_abort_case_raises_unexpectedly(monkeypatch: py
     assert result == EXIT_INTERLOCK_ABORT
 
 
-def test_cli_exit_code_3(write_config: WriteConfig, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cli_exit_code_3(write_config: WriteConfig, monkeypatch: pytest.MonkeyPatch, stub_subcommand: str) -> None:
     config_path = write_config()
     for var in SECRET_ENV_VARS:
         monkeypatch.setenv(var, "fake-value-0123456789")
@@ -260,15 +260,17 @@ def test_cli_exit_code_3(write_config: WriteConfig, monkeypatch: pytest.MonkeyPa
     def _raising_handler(_args: object, _cfg: object, _run_dir: Path) -> int:
         raise InterlockError("official server did not report simulation mode")
 
-    original = cli._SUBCOMMANDS["stream"]
-    monkeypatch.setitem(cli._SUBCOMMANDS, "stream", dataclasses.replace(original, handler=_raising_handler))
+    original = cli._SUBCOMMANDS[stub_subcommand]
+    monkeypatch.setitem(cli._SUBCOMMANDS, stub_subcommand, dataclasses.replace(original, handler=_raising_handler))
 
-    exit_code = main(["stream", "--config", str(config_path)])
+    exit_code = main([stub_subcommand, "--config", str(config_path)])
 
     assert exit_code == EXIT_INTERLOCK_ABORT
 
 
-def test_cli_exit_code_3_on_transport_error(write_config: WriteConfig, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cli_exit_code_3_on_transport_error(
+    write_config: WriteConfig, monkeypatch: pytest.MonkeyPatch, stub_subcommand: str
+) -> None:
     config_path = write_config()
     for var in SECRET_ENV_VARS:
         monkeypatch.setenv(var, "fake-value-0123456789")
@@ -287,9 +289,9 @@ def test_cli_exit_code_3_on_transport_error(write_config: WriteConfig, monkeypat
         assert_simulation(client, cfg)
         return 0
 
-    original = cli._SUBCOMMANDS["stream"]
-    monkeypatch.setitem(cli._SUBCOMMANDS, "stream", dataclasses.replace(original, handler=_handler))
+    original = cli._SUBCOMMANDS[stub_subcommand]
+    monkeypatch.setitem(cli._SUBCOMMANDS, stub_subcommand, dataclasses.replace(original, handler=_handler))
 
-    exit_code = main(["stream", "--config", str(config_path)])
+    exit_code = main([stub_subcommand, "--config", str(config_path)])
 
     assert exit_code == EXIT_INTERLOCK_ABORT

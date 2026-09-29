@@ -25,6 +25,7 @@ from p1rec.config import ConfigError, P1Config, load_config, read_secrets
 from p1rec.interlock import EXIT_INTERLOCK_ABORT, InterlockError, self_test
 from p1rec.redact import redaction_values, setup_logging
 from p1rec.rundir import new_run
+from p1rec.stream import check_client_names, run_stream
 
 Handler = Callable[[argparse.Namespace, P1Config, Path], int]
 ArgumentHook = Callable[[argparse.ArgumentParser], None]
@@ -67,6 +68,46 @@ def _add_scenarios_argument(sub: argparse.ArgumentParser) -> None:
     )
 
 
+def _parse_clients(value: str) -> list[str]:
+    names = value.split(",")
+    try:
+        check_client_names(names)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"invalid --clients {value!r}: {exc}") from exc
+    return names
+
+
+def _parse_until(value: str) -> datetime:
+    try:
+        until = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"invalid --until {value!r}: not an ISO 8601 date and time") from exc
+
+    # A naive time would be read in whatever zone the host happens to use
+    if until.utcoffset() is None:
+        raise argparse.ArgumentTypeError(f"invalid --until {value!r}: must include a UTC offset, such as +08:00")
+    return until
+
+
+def _add_stream_arguments(sub: argparse.ArgumentParser) -> None:
+    sub.add_argument(
+        "--clients",
+        required=True,
+        type=_parse_clients,
+        help="comma-separated SSE client names, such as a,b; the first client's first stream is the leader",
+    )
+    sub.add_argument(
+        "--until",
+        required=True,
+        type=_parse_until,
+        help="ISO 8601 time with a UTC offset at which to stop, such as 2026-10-06T09:30:00+08:00",
+    )
+
+
+def _stream(args: argparse.Namespace, cfg: P1Config, run_dir: Path) -> int:
+    return run_stream(cfg, args.clients, args.until, run_dir)
+
+
 def _not_implemented(args: argparse.Namespace, _cfg: P1Config, _run_dir: Path) -> int:
     logging.getLogger("p1rec.cli").error("%s: not implemented yet", args.command)
     return 1
@@ -93,7 +134,7 @@ _SUBCOMMANDS: dict[str, Subcommand] = {
         needs_secrets=False,
     ),
     "preflight": Subcommand(add_arguments=_add_scenarios_argument, handler=_not_implemented),
-    "stream": Subcommand(add_arguments=_no_extra_arguments, handler=_not_implemented),
+    "stream": Subcommand(add_arguments=_add_stream_arguments, handler=_stream),
     "orders": Subcommand(add_arguments=_add_scenarios_argument, handler=_not_implemented),
     "reconcile": Subcommand(add_arguments=_no_extra_arguments, handler=_not_implemented),
     "stats": Subcommand(add_arguments=_no_extra_arguments, handler=_not_implemented),

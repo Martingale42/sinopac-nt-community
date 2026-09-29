@@ -123,3 +123,118 @@ path = "/api/v1/agent/harness"
 [interlock]
 endpoint_op = "mode"
 pointer = "/simulation"
+
+# Multi-client SSE recording (docs/official-server-contract.md sections 1
+# and 2). Stream subscriptions are server-global, so p1rec stream sends
+# them once for all clients, and again only when the leader stream, the
+# first client's first stream below, connects again.
+[stream]
+
+# The server is local, so a retry costs little and a recording gap
+# outlasts the outage by about one retry interval.
+retry_s = 1.0
+
+# BaseSubscriptionRequest bodies. A string value that is exactly "{name}"
+# is replaced by that field of the subscription, keeping its JSON type.
+subscribe_body = '{"security_type": "{security_type}", "exchange": "{exchange}", "code": "{code}", "quote_type": "{quote_type}", "intraday_odd": "{intraday_odd}"}'
+unsubscribe_body = '{"security_type": "{security_type}", "exchange": "{exchange}", "code": "{code}", "quote_type": "{quote_type}", "intraday_odd": "{intraday_odd}"}'
+
+# Sent in order before the subscriptions. "@account:<type>" stands for the
+# AccountRequest of the account of that type listed by accounts, so no
+# account identifier is written into this public file.
+startup_requests = [
+  ["subscribe_trade", "@account:S"],
+  ["subscribe_trade", "@account:F"],
+]
+
+# Recorded SSE endpoints, in order: the first is the leader stream.
+[stream.streams.data]
+method = "GET"
+path = "/api/v1/stream/data"
+
+[stream.streams.order_event]
+method = "GET"
+path = "/api/v1/stream/data/order_event"
+
+[stream.streams.contract_event]
+method = "GET"
+path = "/api/v1/stream/data/contract_event"
+
+# Recorded instruments; each quote type of each entry is one subscription.
+[[stream.instrument]]
+code = "2330"
+exchange = "TSE"
+security_type = "STK"
+quote_types = ["Tick", "BidAsk"]
+intraday_odd = false
+
+[[stream.instrument]]
+code = "0050"
+exchange = "TSE"
+security_type = "STK"
+quote_types = ["Tick", "BidAsk"]
+intraday_odd = false
+
+[[stream.instrument]]
+code = "2890"
+exchange = "TSE"
+security_type = "STK"
+quote_types = ["Tick", "BidAsk"]
+intraday_odd = false
+
+[[stream.instrument]]
+code = "00981A"
+exchange = "TSE"
+security_type = "STK"
+quote_types = ["Tick", "BidAsk"]
+intraday_odd = false
+
+[[stream.instrument]]
+code = "00631L"
+exchange = "TSE"
+security_type = "STK"
+quote_types = ["Tick", "BidAsk"]
+intraday_odd = false
+
+# Intraday odd lots, recorded in simulation mode as well.
+[[stream.instrument]]
+code = "00981A"
+exchange = "TSE"
+security_type = "STK"
+quote_types = ["Tick", "BidAsk"]
+intraday_odd = true
+
+[[stream.instrument]]
+code = "00631L"
+exchange = "TSE"
+security_type = "STK"
+quote_types = ["Tick", "BidAsk"]
+intraday_odd = true
+
+# calibrate: on the run date, set the near-month TXF, MXF and TMF codes
+# from the server's contract list, and add the near-month at-the-money
+# TXO call and put.
+[[stream.instrument]]
+code = "TXFJ6"
+exchange = "TAIFEX"
+security_type = "FUT"
+quote_types = ["Tick", "BidAsk"]
+intraday_odd = false
+
+[[stream.instrument]]
+code = "MXFJ6"
+exchange = "TAIFEX"
+security_type = "FUT"
+quote_types = ["Tick", "BidAsk"]
+intraday_odd = false
+
+[[stream.instrument]]
+code = "TMFJ6"
+exchange = "TAIFEX"
+security_type = "FUT"
+quote_types = ["Tick", "BidAsk"]
+intraday_odd = false
+
+# Scheduled subscription changes go in [[stream.action]] tables: at (a time
+# with a UTC offset), op (subscribe or unsubscribe), code and quote_type. An
+# action applies to every instrument entry with that code.

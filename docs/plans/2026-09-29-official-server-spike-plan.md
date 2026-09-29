@@ -454,13 +454,15 @@ class StreamConfig:
     unsubscribe: Endpoint
     subscribe_body: str                 # JSON 範本
     unsubscribe_body: str
-    startup_requests: tuple[tuple[str, str], ...]  # (邏輯操作, JSON 本體)
+    startup_requests: tuple[tuple[str, str], ...]  # (邏輯操作, JSON 本體或 "@account:<帳戶類型>")
     retry_s: float
     instruments: tuple[Instrument, ...]
     actions: tuple[StreamAction, ...]
 
 def run_stream(cfg: P1Config, clients: list[str], until: datetime, run_dir: Path) -> int: ...
 ```
+
+`startup_requests` 的本體寫成 `"@account:S"`（`F`、`H` 同理）時，代表以 `accounts` 查到的該類型帳戶組成的 `AccountRequest`（`account_type`、`broker_id`、`account_id`、`person_id`）；repo 是公開的，帳號因此不寫進 `p1.toml`，直接寫帳號欄位的本體在載入時拒絕。帳戶清單查到後沿用，查詢失敗則由下一次重送再查。
 
 **Tests:**
 

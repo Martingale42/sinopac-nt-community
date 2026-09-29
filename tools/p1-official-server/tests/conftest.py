@@ -15,6 +15,8 @@ from pathlib import Path
 import pytest
 from helpers import MINIMAL_CONFIG_LINES, WriteConfig
 
+from p1rec import cli
+
 
 @pytest.fixture
 def write_config(tmp_path: Path) -> WriteConfig:
@@ -59,3 +61,16 @@ def _reset_logging() -> Iterator[None]:
     root.propagate = original_propagate
     sys.excepthook = original_sys_excepthook
     threading.excepthook = original_thread_excepthook
+
+
+@pytest.fixture
+def stub_subcommand(monkeypatch: pytest.MonkeyPatch) -> str:
+    """Register a flagless subcommand named "stub" whose handler returns 0, and return its name.
+
+    Tests of the shared CLI setup use it instead of a real subcommand,
+    whose flags and handler change as that subcommand is implemented.
+    """
+    monkeypatch.setitem(
+        cli._SUBCOMMANDS, "stub", cli.Subcommand(add_arguments=lambda _sub: None, handler=lambda *_args: 0)
+    )
+    return "stub"
