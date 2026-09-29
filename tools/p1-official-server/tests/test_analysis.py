@@ -6,7 +6,7 @@ import base64
 import dataclasses
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -36,6 +36,7 @@ T0_NS = int(datetime(2026, 10, 1, 1, 0, tzinfo=timezone.utc).timestamp()) * NS_P
 # 2026-10-01 09:00 Taipei in epoch seconds, the exchange and order time of the fixtures
 T0_S = float(T0_NS // NS_PER_S)
 SECONDS_PER_DAY = 86_400
+SECONDS_PER_HOUR = 3_600
 SSE_RUN = "20261001T010000Z-stream"
 REST_RUN = "20261001T011000Z-orders"
 
@@ -414,6 +415,61 @@ def test_two_day_sse_against_one_day_rest_snapshot(
     assert report["missing_events_by_client"] == {"a": [], "b": []}
 
 
+def test_explicit_trading_day_windows_both_sides(
+    write_config: WriteConfig, monkeypatch: pytest.MonkeyPatch, results_root: Path
+) -> None:
+    wednesday = T0_S - SECONDS_PER_DAY
+    thu = [_order("thu", event_id="e0", exchange_ts=wednesday), _deal("thu", 2, event_id="d0", ts=wednesday)]
+    for client in ("a", "b"):
+        _write_sse(results_root / SSE_RUN, client, "order_event", _order_frames(client, [*thu, *_EVENTS]))
+    trades = [*_MATCHING_TRADES, _trade("thu", "Filled", 2, order_ts=wednesday)]
+    _write_jsonl(results_root / REST_RUN / "rest.jsonl", [_trades_record(trades)])
+
+    exit_code, report = _run_cli_reconcile(write_config, monkeypatch, results_root, "--trading-day", "2026-10-01")
+
+    assert exit_code == 0
+    assert report["rest_excluded_other_days"] == 1
+    assert report["excluded_other_days"] == {"a": 1, "b": 1}
+    assert report["only_in_rest"] == []
+    assert report["only_in_sse"] == []
+
+
+def test_undated_rest_order_kept_with_warning(fields: EventFields, caplog: pytest.LogCaptureFixture) -> None:
+    trades = [_trade("t1", "Submitted", 0, order_ts=None), _trade("t2", "Submitted", 0, order_ts=0.0)]
+
+    with caplog.at_level(logging.WARNING, logger="p1rec.reconcile"):
+        rest = orders_from_rest(trades, fields, date(2026, 10, 1))
+
+    assert set(rest.orders) == {"t1", "t2"}
+    assert rest.excluded_other_days == 0
+    assert "trades order t1 has no order time" in caplog.text
+    assert "trades order t2 has no order time" in caplog.text
+
+
+def test_night_session_orders_warn_on_both_sides(
+    tmp_path: Path, fields: EventFields, caplog: pytest.LogCaptureFixture
+) -> None:
+    # 20:00 Taipei on 2026-09-30, in the night session that belongs to TAIFEX's 2026-10-01
+    night = T0_S - 13 * SECONDS_PER_HOUR
+    events = [_order("n1", event_id="e1", exchange_ts=night)]
+    path = _write_sse(tmp_path, "a", "order_event", _order_frames("a", events))
+
+    with caplog.at_level(logging.WARNING, logger="p1rec.reconcile"):
+        views = orders_from_sse({"a": [path]}, fields, date(2026, 9, 30))
+        rest = orders_from_rest([_trade("n1", "Submitted", 0, order_ts=night)], fields, date(2026, 9, 30))
+
+    assert set(views["a"].orders) == {"n1"}
+    assert set(rest.orders) == {"n1"}
+    assert "client a order n1 is timed in the night session" in caplog.text
+    assert "trades order n1 is timed in the night session" in caplog.text
+
+
+def test_default_day_ignores_non_positive_order_times(fields: EventFields) -> None:
+    trades = [_trade("t1", "Submitted", 0), _trade("t0", "Submitted", 0, order_ts=0.0)]
+
+    assert reconciliation.trading_day_of(trades, fields) == date(2026, 10, 1)
+
+
 def test_trading_day_required_without_rest_order_times(
     write_config: WriteConfig, monkeypatch: pytest.MonkeyPatch, results_root: Path
 ) -> None:
@@ -610,7 +666,8 @@ def test_trades_item_without_deal_quantity_counts_zero(fields: EventFields) -> N
     assert isinstance(status, dict)
     del status["deal_quantity"]
 
-    assert orders_from_rest([item], fields) == {"t1": OrderView(key="t1", status="Submitted", filled_qty=Decimal(0))}
+    expected = {"t1": OrderView(key="t1", status="Submitted", filled_qty=Decimal(0))}
+    assert orders_from_rest([item], fields).orders == expected
 
 
 def test_truncated_last_line_skipped_with_warning(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
@@ -646,7 +703,7 @@ def test_rest_run_uses_last_trades_response(tmp_path: Path, fields: EventFields)
 
     payload = reconciliation.last_trades_payload(rest_log)
 
-    assert set(orders_from_rest(payload, fields)) == {"new"}
+    assert set(orders_from_rest(payload, fields).orders) == {"new"}
 
 
 def _live_transport(simulation: bool, trades: object, seen: list[httpx.Request]) -> httpx.MockTransport:
@@ -683,7 +740,7 @@ def test_last_trades_payload_decodes_base64_body(tmp_path: Path, fields: EventFi
 
     payload = reconciliation.last_trades_payload(rest_log)
 
-    assert set(orders_from_rest(payload, fields)) == {"t1"}
+    assert set(orders_from_rest(payload, fields).orders) == {"t1"}
 
 
 def test_live_reconcile_checks_interlock_then_records_trades(tmp_path: Path, write_config: WriteConfig) -> None:

@@ -14,7 +14,7 @@ import json
 import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime, time
 from decimal import Decimal
 from pathlib import Path
 
@@ -28,9 +28,11 @@ from p1rec.records import (
     EXIT_ANALYSIS_ERROR,
     EXIT_CHECK_FAILED,
     EXIT_OK,
+    NS_PER_S,
     AnalysisError,
     discover_sse_files,
     epoch_s_to_ns,
+    exchange_tz,
     iter_frames,
     read_jsonl,
     resolve_run_dir,
@@ -65,6 +67,12 @@ STATUS_UNKNOWN = "Unknown"
 _TRADES_OP = "trades"
 _TRADES_BODY: dict[str, object] = {"refresh": True}
 
+# TAIFEX's night session runs from 15:00 to 05:00 the next day, Taipei
+# time, and its orders belong to the next TAIFEX trading day rather than
+# to their calendar date.
+_NIGHT_SESSION_START = time(15, 0)
+_NIGHT_SESSION_END = time(5, 0)
+
 
 @dataclass(frozen=True)
 class OrderView:
@@ -94,7 +102,17 @@ class ClientOrders:
     # the data text for a report without one.
     event_ids: frozenset[str]
 
-    # Orders left out because they belong to another trading day
+    # Orders left out because they fall on another calendar date
+    excluded_other_days: int = 0
+
+
+@dataclass(frozen=True)
+class RestOrders:
+    """The orders a trades response lists."""
+
+    orders: dict[str, OrderView]
+
+    # Orders whose order time falls on another calendar date
     excluded_other_days: int = 0
 
 
@@ -116,8 +134,10 @@ class ReconcileReport:
     # Report identities some client saw and this one did not
     missing_events_by_client: dict[str, list[str]]
 
-    # Orders each client saw on other trading days, left out of the comparison
+    # Orders each client, and REST, listed on other calendar dates, left
+    # out of the comparison.
     excluded_other_days: dict[str, int]
+    rest_excluded_other_days: int
 
     @property
     def clean(self) -> bool:
@@ -143,6 +163,7 @@ class ReconcileReport:
             "missing_events_by_client": self.missing_events_by_client,
             "per_client_keys": self.per_client_keys,
             "excluded_other_days": self.excluded_other_days,
+            "rest_excluded_other_days": self.rest_excluded_other_days,
         }
 
 
@@ -416,10 +437,12 @@ def orders_from_sse(
     paths maps a client to all of its SSE files. Reports are read from
     frames named fields.order_event_name, deduplicated per client, and
     folded in arrival order; see derive_status for how the status follows.
-    With trading_day, only orders whose first report's exchange time falls
-    on that Asia/Taipei date take part, and the rest are counted in
-    excluded_other_days; an order none of whose reports carries an
-    exchange time is dated by its first receive time, with a WARNING.
+    With trading_day, an Asia/Taipei calendar date rather than a TAIFEX
+    trading day, only orders whose first report's exchange time falls on
+    it take part, and the rest are counted in excluded_other_days; an
+    order none of whose reports carries an exchange time is dated by its
+    first receive time, and one timed in the night session is noted, each
+    with a WARNING.
     """
     result: dict[str, ClientOrders] = {}
     for client, client_paths in paths.items():
@@ -431,6 +454,8 @@ def orders_from_sse(
         for key, progress in orders.items():
             if trading_day is not None and not progress.first_time_is_exchange:
                 logger.warning("client %s order %s has no exchange time; dating it by receive time", client, key)
+            elif trading_day is not None and progress.first_time_ns is not None:
+                _warn_if_night_session(f"client {client} order {key}", progress.first_time_ns)
             if trading_day is None or (
                 progress.first_time_ns is not None and taipei_date(progress.first_time_ns) == trading_day
             ):
@@ -443,25 +468,61 @@ def orders_from_sse(
     return result
 
 
-def orders_from_rest(payload: object, fields: EventFields) -> dict[str, OrderView]:
-    """Return the orders in a trades response keyed by order key.
+def _in_night_session(ts_ns: int) -> bool:
+    """Return whether an instant falls in TAIFEX's night session, 15:00 to 05:00 Taipei time."""
+    local = datetime.fromtimestamp(ts_ns // NS_PER_S, tz=exchange_tz()).time()
+    return local >= _NIGHT_SESSION_START or local < _NIGHT_SESSION_END
 
-    A missing or null filled quantity counts as zero, since the schema
-    makes it optional and nullable for an order without deals. Raises
-    AnalysisError if the list or any item's key or status cannot be read,
-    or its filled quantity is not a number, since the comparison is only
-    meaningful against the whole list; a repeated key keeps its last item,
-    with a WARNING.
-    """
+
+def _warn_if_night_session(what: str, ts_ns: int) -> None:
+    if _in_night_session(ts_ns):
+        logger.warning(
+            "%s is timed in the night session, which belongs to the next TAIFEX trading day, "
+            "while --trading-day selects by calendar date",
+            what,
+        )
+
+
+def _rest_items(payload: object, fields: EventFields) -> list[object]:
     try:
         items = resolve_pointer(payload, fields.rest_list)
     except JsonPointerError as exc:
         raise AnalysisError(f"trades response has no list at {fields.rest_list!r}: {exc}") from exc
     if not isinstance(items, list):
         raise AnalysisError(f"trades response at {fields.rest_list!r} is {type(items).__name__}, expected a list")
+    return items
 
+
+def _rest_order_ns(item: object, fields: EventFields) -> int | None:
+    """Return a trades item's order time in epoch nanoseconds, or None if it has no usable one.
+
+    A missing, null, non-numeric or non-positive order time is treated as
+    absent, as an order report's exchange time is.
+    """
+    try:
+        order_ns = epoch_s_to_ns(resolve_pointer(item, fields.rest_order_ts))
+    except (JsonPointerError, ValueError):
+        return None
+    return order_ns if order_ns > 0 else None
+
+
+def orders_from_rest(payload: object, fields: EventFields, trading_day: date | None = None) -> RestOrders:
+    """Return the orders in a trades response keyed by order key.
+
+    A missing or null filled quantity counts as zero, since the schema
+    makes it optional and nullable for an order without deals. With
+    trading_day, an Asia/Taipei calendar date rather than a TAIFEX trading
+    day, an order whose order time falls on another date is counted in
+    excluded_other_days instead, an order without an order time is kept,
+    and one timed in the night session is noted, each with a WARNING.
+    Raises AnalysisError if the list or any item's key or status cannot
+    be read, or its filled quantity is not a number, since the comparison
+    is only meaningful against the whole list; a repeated key keeps its
+    last item, with a WARNING.
+    """
     orders: dict[str, OrderView] = {}
-    for index, item in enumerate(items):
+    excluded = 0
+    for index, item in enumerate(_rest_items(payload, fields)):
         try:
             key = _pointer_str(item, fields.rest_key)
             status = normalize_status(_pointer_str(item, fields.rest_status))
@@ -469,36 +530,43 @@ def orders_from_rest(payload: object, fields: EventFields) -> dict[str, OrderVie
             filled = reported if reported is not None else Decimal(0)
         except (JsonPointerError, ValueError) as exc:
             raise AnalysisError(f"trades item {index}: {exc}") from exc
+
+        if trading_day is not None:
+            order_ns = _rest_order_ns(item, fields)
+            if order_ns is None:
+                logger.warning("trades order %s has no order time; keeping it on %s", key, trading_day)
+            else:
+                _warn_if_night_session(f"trades order {key}", order_ns)
+                if taipei_date(order_ns) != trading_day:
+                    excluded += 1
+                    continue
+
         if key in orders:
             logger.warning("trades lists order %s more than once; keeping item %d", key, index)
         orders[key] = OrderView(key=key, status=status, filled_qty=filled)
-    return orders
+    return RestOrders(orders=orders, excluded_other_days=excluded)
 
 
 def trading_day_of(payload: object, fields: EventFields) -> date:
-    """Return the Asia/Taipei date every order time in a trades response falls on.
+    """Return the Asia/Taipei calendar date every order time in a trades response falls on.
 
-    Items without an order time are passed over. Raises AnalysisError
-    when no item has one, or when they span more than one date, since the
-    snapshot then names no single trading day and one must be given.
+    This is a calendar date, not a TAIFEX trading day. Items without a
+    usable order time are passed over. Raises AnalysisError when no item
+    has one, or when they span more than one date, since the snapshot
+    then names no single date and one must be given.
     """
-    try:
-        items = resolve_pointer(payload, fields.rest_list)
-    except JsonPointerError:
-        items = []
-    days: set[date] = set()
-    for item in items if isinstance(items, list) else []:
-        try:
-            days.add(taipei_date(epoch_s_to_ns(resolve_pointer(item, fields.rest_order_ts))))
-        except (JsonPointerError, ValueError):
-            continue
+    days = {
+        taipei_date(order_ns)
+        for item in _rest_items(payload, fields)
+        if (order_ns := _rest_order_ns(item, fields)) is not None
+    }
     if len(days) != 1:
         found = ", ".join(sorted(day.isoformat() for day in days)) or "none"
-        raise AnalysisError(f"trades order times give no single trading day (found: {found}); pass --trading-day")
+        raise AnalysisError(f"trades order times give no single date (found: {found}); pass --trading-day")
     return days.pop()
 
 
-def reconcile(sse: Mapping[str, ClientOrders], rest: dict[str, OrderView]) -> ReconcileReport:
+def reconcile(sse: Mapping[str, ClientOrders], rest_orders: RestOrders) -> ReconcileReport:
     """Compare every client's orders and reports with REST and with each other.
 
     Every client must see every REST order and every report, since each
@@ -511,6 +579,7 @@ def reconcile(sse: Mapping[str, ClientOrders], rest: dict[str, OrderView]) -> Re
     order REST also lists must agree on both status and filled quantity,
     and every client that does not adds a Mismatch.
     """
+    rest = rest_orders.orders
     clients = sorted(sse)
     seen = {key for client in clients for key in sse[client].orders}
     all_events = frozenset().union(*(sse[client].event_ids for client in clients))
@@ -534,6 +603,7 @@ def reconcile(sse: Mapping[str, ClientOrders], rest: dict[str, OrderView]) -> Re
         per_client_keys={client: sorted(sse[client].orders) for client in clients},
         missing_events_by_client={client: sorted(all_events - sse[client].event_ids) for client in clients},
         excluded_other_days={client: sse[client].excluded_other_days for client in clients},
+        rest_excluded_other_days=rest_orders.excluded_other_days,
     )
 
 
@@ -596,10 +666,12 @@ def run_reconcile(
     simulation-mode check, and recorded in run_dir; with it, the last
     trades response in that run's rest.jsonl is used. REST is read
     before the SSE files, so an order placed meanwhile shows up as only
-    in SSE rather than silently widening the comparison. Only SSE orders
-    of trading_day take part, which defaults to the date of the
-    snapshot's order times. InterlockError propagates; any other failure
-    to analyse is logged and returns 1.
+    in SSE rather than silently widening the comparison. On both sides
+    only the orders of trading_day take part: an Asia/Taipei calendar
+    date, not a TAIFEX trading day, so a night-session order counts on the
+    date it was placed. It defaults to the date of the snapshot's order
+    times. InterlockError propagates; any other failure to analyse is
+    logged and returns 1.
     """
     try:
         sse_dir = resolve_run_dir(cfg.results_root, sse_run)
@@ -607,8 +679,8 @@ def run_reconcile(
             payload = _query_trades(cfg, run_dir, transport)
         else:
             payload = last_trades_payload(resolve_run_dir(cfg.results_root, rest_run) / "rest.jsonl")
-        rest = orders_from_rest(payload, cfg.events)
         day = trading_day if trading_day is not None else trading_day_of(payload, cfg.events)
+        rest = orders_from_rest(payload, cfg.events, day)
         sse_files = discover_sse_files(sse_dir)
         report = reconcile(orders_from_sse(sse_files, cfg.events, day), rest)
     except (AnalysisError, OSError) as exc:

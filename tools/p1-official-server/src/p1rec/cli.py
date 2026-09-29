@@ -110,7 +110,10 @@ def _add_reconcile_arguments(sub: argparse.ArgumentParser) -> None:
         "--trading-day",
         default=None,
         type=_parse_trading_day,
-        help="Asia/Taipei date (YYYY-MM-DD) whose SSE orders are reconciled (default: the trades snapshot's date)",
+        help=(
+            "Asia/Taipei calendar date (YYYY-MM-DD), not the TAIFEX trading day, whose orders are reconciled "
+            "on both sides (default: the date of the trades snapshot's order times)"
+        ),
     )
 
 

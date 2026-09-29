@@ -81,7 +81,7 @@ class EventFields:
     op_code_success: str
 
     # Pointers to the exchange time, in epoch seconds, of an order report
-    # and of a deal report, which date an order for the trading-day window.
+    # and of a deal report, which date an order for the calendar-date window.
     order_exchange_ts: str
     deal_exchange_ts: str
 
@@ -93,7 +93,8 @@ class EventFields:
     rest_filled_qty: str
 
     # Pointer into each trades item to its order time in epoch seconds,
-    # which dates the snapshot when no trading day is given.
+    # which dates the snapshot when no --trading-day is given and windows
+    # the REST side by calendar date.
     rest_order_ts: str
 
     # Pointers into a frame's data giving the exchange time, empty to skip

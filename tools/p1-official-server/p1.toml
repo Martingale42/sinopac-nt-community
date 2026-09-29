@@ -149,7 +149,7 @@ deal_key = "/trade_id"
 deal_qty = "/quantity"
 deal_exchange_ts = "/ts"
 
-# Epoch seconds, which date an order for the trading-day window
+# Epoch seconds, which date an order for the calendar-date window
 order_exchange_ts = "/status/exchange_ts"
 
 # trades answers with a bare array of Trade objects
@@ -158,9 +158,8 @@ rest_key = "/order/id"
 rest_status = "/status/status"
 rest_filled_qty = "/status/deal_quantity"
 
-# calibrate: assumed to be epoch seconds like the events' exchange_ts,
-# following the OpenAPI OrderStatusInfo schema until a trades response
-# with orders is recorded.
+# Epoch seconds: the trades response recorded after a cancel in the
+# futures API test carries 1790677936.694802.
 rest_order_ts = "/status/order_ts"
 
 # Tick frames carry the exchange time as Taipei-local date and time
