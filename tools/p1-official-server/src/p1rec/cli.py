@@ -2,64 +2,68 @@
 
 Wires the argparse skeleton and the shared setup every subcommand needs:
 config loading, secret reading, a run directory and redacted logging. Each
-subcommand's real behaviour is implemented separately, as a handler taking
-(args, cfg, run_dir) and returning its exit code; until implemented, a
-handler logs that it is not implemented yet and returns 1.
+subcommand is registered once, in _SUBCOMMANDS, with its own argument
+hook and handler, so adding a subcommand-specific flag never touches this
+module's dispatch logic. A handler takes (args, cfg, run_dir) and returns
+its exit code; until implemented, a handler logs that it is not
+implemented yet and returns 1.
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import re
 import sys
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import NoReturn
 
 from p1rec.config import ConfigError, P1Config, load_config, read_secrets
 from p1rec.redact import redaction_values, setup_logging
 from p1rec.rundir import new_run
 
-_SUBCOMMANDS = (
-    "self-test-interlock",
-    "preflight",
-    "stream",
-    "orders",
-    "reconcile",
-    "stats",
-    "history",
-    "scrub",
-)
-
-# These subcommands additionally take --scenarios
-_SCENARIOS_SUBCOMMANDS = frozenset({"preflight", "orders"})
-
-# self-test-interlock is the check every other subcommand relies on having
-# already passed, so it must be runnable before any secret is available
-_NO_SECRETS_SUBCOMMANDS = frozenset({"self-test-interlock"})
-
 Handler = Callable[[argparse.Namespace, P1Config, Path], int]
+ArgumentHook = Callable[[argparse.ArgumentParser], None]
+
+_TAG_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
-def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="p1rec",
-        description="Black-box recorder for the official shioaji server 1.7.6.",
+def _validate_tag(value: str) -> str:
+    """Reject a --tag value that could corrupt the run directory name."""
+    if not _TAG_RE.fullmatch(value) or ".." in value:
+        raise argparse.ArgumentTypeError(
+            f"invalid --tag {value!r}: must match {_TAG_RE.pattern!r} and not contain '..'"
+        )
+    return value
+
+
+class _ArgumentParser(argparse.ArgumentParser):
+    """An ArgumentParser whose usage errors exit 1.
+
+    Exit code 2 is reserved for p1rec's own "check failed" outcome, so a
+    malformed command line must not collide with it. add_subparsers()
+    passes parser_class=type(self) by default, so every subparser
+    inherits this too.
+    """
+
+    def error(self, message: str) -> NoReturn:
+        self.print_usage(sys.stderr)
+        self.exit(1, f"{self.prog}: error: {message}\n")
+
+
+def _no_extra_arguments(_sub: argparse.ArgumentParser) -> None:
+    pass
+
+
+def _add_scenarios_argument(sub: argparse.ArgumentParser) -> None:
+    sub.add_argument(
+        "--scenarios",
+        default="scenarios.toml",
+        help="path to scenarios.toml (default: scenarios.toml)",
     )
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
-    for name in _SUBCOMMANDS:
-        sub = subparsers.add_parser(name)
-        sub.add_argument("--config", default="p1.toml", help="path to p1.toml (default: p1.toml)")
-        sub.add_argument("--tag", default=None, help="optional run tag appended to the run directory name")
-        if name in _SCENARIOS_SUBCOMMANDS:
-            sub.add_argument(
-                "--scenarios",
-                default="scenarios.toml",
-                help="path to scenarios.toml (default: scenarios.toml)",
-            )
-
-    return parser
 
 
 def _not_implemented(args: argparse.Namespace, _cfg: P1Config, _run_dir: Path) -> int:
@@ -67,25 +71,84 @@ def _not_implemented(args: argparse.Namespace, _cfg: P1Config, _run_dir: Path) -
     return 1
 
 
-_HANDLERS: dict[str, Handler] = dict.fromkeys(_SUBCOMMANDS, _not_implemented)
+@dataclass(frozen=True)
+class Subcommand:
+    add_arguments: ArgumentHook
+    handler: Handler
+    needs_secrets: bool = True
+
+
+_SUBCOMMANDS: dict[str, Subcommand] = {
+    "self-test-interlock": Subcommand(
+        add_arguments=_no_extra_arguments,
+        handler=_not_implemented,
+        # self-test-interlock never touches the network and is run
+        # without the env file loaded, so it must work with no secrets
+        # available.
+        needs_secrets=False,
+    ),
+    "preflight": Subcommand(add_arguments=_add_scenarios_argument, handler=_not_implemented),
+    "stream": Subcommand(add_arguments=_no_extra_arguments, handler=_not_implemented),
+    "orders": Subcommand(add_arguments=_add_scenarios_argument, handler=_not_implemented),
+    "reconcile": Subcommand(add_arguments=_no_extra_arguments, handler=_not_implemented),
+    "stats": Subcommand(add_arguments=_no_extra_arguments, handler=_not_implemented),
+    "history": Subcommand(add_arguments=_no_extra_arguments, handler=_not_implemented),
+    "scrub": Subcommand(add_arguments=_no_extra_arguments, handler=_not_implemented),
+}
+
+
+def _add_common_arguments(sub: argparse.ArgumentParser) -> None:
+    sub.add_argument("--config", default="p1.toml", help="path to p1.toml (default: p1.toml)")
+    sub.add_argument(
+        "--tag",
+        default=None,
+        type=_validate_tag,
+        help="optional run tag appended to the run directory name",
+    )
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = _ArgumentParser(
+        prog="p1rec",
+        description="Black-box recorder for the official shioaji server 1.7.6.",
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    for name, spec in _SUBCOMMANDS.items():
+        sub = subparsers.add_parser(name)
+        _add_common_arguments(sub)
+        spec.add_arguments(sub)
+
+    return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
+    spec = _SUBCOMMANDS[args.command]
 
     try:
         cfg = load_config(Path(args.config))
-        secrets = {} if args.command in _NO_SECRETS_SUBCOMMANDS else read_secrets(cfg)
+        secrets = read_secrets(cfg) if spec.needs_secrets else {}
     except ConfigError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    run_dir = new_run(cfg.results_root, args.command, datetime.now(timezone.utc), args.tag)
-    setup_logging(run_dir, redaction_values(secrets), "INFO")
-
-    handler = _HANDLERS[args.command]
-    return handler(args, cfg, run_dir)
+    logging_ready = False
+    try:
+        run_dir = new_run(cfg.results_root, args.command, datetime.now(timezone.utc), args.tag)
+        setup_logging(run_dir, redaction_values(secrets), "INFO")
+        logging_ready = True
+        return spec.handler(args, cfg, run_dir)
+    except Exception as exc:
+        # A future subcommand-specific error, such as an interlock abort,
+        # will get its own except clause here ahead of this catch-all, so
+        # this stays the one place that decides how a failure is reported.
+        if logging_ready:
+            logging.getLogger("p1rec.cli").exception("%s failed", args.command)
+        else:
+            print(f"error: failed to start {args.command}: {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

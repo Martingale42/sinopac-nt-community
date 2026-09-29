@@ -6,7 +6,11 @@
 # directory that holds this file.
 
 base_url = "http://127.0.0.1:8080"
+
+# Longer than the server's default SJ_HTTP_TIMEOUT (30s), so the client
+# sees the server's own timeout response instead of timing out first.
 http_timeout_s = 35
+
 results_root = "../../results/p1"
 fixtures_root = "../../test_data/official/1.7.6"
 

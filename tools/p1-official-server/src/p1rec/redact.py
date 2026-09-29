@@ -1,11 +1,12 @@
 """Secret-redacting logging setup for p1rec.
 
-setup_logging attaches a RedactingFormatter to every handler so that no
-secret value or fragment (including the api_key prefix used in the
-clientname) ever reaches recorder.log or stderr. Because it redacts the
-fully rendered line rather than just the message, it also covers text
-logging appends after the message, such as exception tracebacks and
-stack_info.
+setup_logging attaches a RedactingFormatter to the root logger's handlers,
+so every logger in the process, including third-party ones such as httpx
+and httpcore, has its records redacted before they reach recorder.log or
+stderr. No secret value or fragment (including the api_key prefix used in
+the clientname) should ever reach either. Because it redacts the fully
+rendered line rather than just the message, it also covers text logging
+appends after the message, such as exception tracebacks and stack_info.
 """
 
 from __future__ import annotations
@@ -57,20 +58,25 @@ class RedactingFormatter(logging.Formatter):
 
 
 def setup_logging(run_dir: Path, secrets: Iterable[str], level: str) -> None:
-    """Configure the p1rec logger to write redacted records to recorder.log and stderr."""
-    logger = logging.getLogger("p1rec")
-    logger.setLevel(level)
-    logger.propagate = False
-    for handler in list(logger.handlers):
-        logger.removeHandler(handler)
+    """Configure the root logger to write redacted records to recorder.log and stderr."""
+    # A %-format mismatch makes Handler.emit() fall back to handleError,
+    # which by default prints the traceback and the record's raw,
+    # unredacted args straight to stderr; disabling it drops that one
+    # record instead of leaking through a path the formatter never sees.
+    logging.raiseExceptions = False
+
+    root = logging.getLogger()
+    root.setLevel(level)
+    for handler in list(root.handlers):
+        root.removeHandler(handler)
         handler.close()
 
     formatter = RedactingFormatter(secrets, _LOG_FORMAT)
 
     file_handler = logging.FileHandler(run_dir / "recorder.log", encoding="utf-8")
     file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
+    root.addHandler(file_handler)
 
     stream_handler = logging.StreamHandler(sys.stderr)
     stream_handler.setFormatter(formatter)
-    logger.addHandler(stream_handler)
+    root.addHandler(stream_handler)

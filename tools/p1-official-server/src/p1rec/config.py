@@ -1,10 +1,11 @@
 """Load and validate p1.toml into a P1Config.
 
-Every later task's section (interlock, contracts, funds, stream, orders,
-events, history, scrub) has its own `_parse_<section>` function below. Each
-takes that section's raw TOML table (an empty dict if the section is
-absent) and returns its dataclass, so a later task can add required keys
-and validation to its own function without touching load_config itself.
+Each of InterlockConfig, ContractFields, FundsConfig, StreamConfig,
+OrdersConfig, EventFields, HistoryConfig and ScrubConfig is filled in by
+its own `_parse_<section>` function below, which receives the whole
+parsed document plus the config file's directory, so a full dotted key
+(for validation errors) or a relative path can be resolved without
+touching load_config itself.
 """
 
 from __future__ import annotations
@@ -99,9 +100,12 @@ _SECRET_ROLES = ("api_key", "sec_key", "ca_passwd", "person_id", "egress_ip")
 # secret values, which is why that table is exempt in _reject_inline_secrets.
 _INLINE_SECRET_KEYS = frozenset({"api_key", "sec_key", "ca_passwd"})
 
-# Shape every [secrets] value must have, since it names an environment
-# variable rather than carrying a secret itself.
-_ENV_VAR_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+# Shape every [secrets] value must have, restricted to the SJ_/P1_ prefixes
+# this project actually uses rather than any uppercase identifier, so a
+# value shaped like a real secret (a Taiwanese national ID, for example) is
+# rejected here instead of being accepted and later echoed by read_secrets'
+# missing-variable error message.
+_ENV_VAR_NAME_RE = re.compile(r"^(SJ|P1)_[A-Z0-9_]+$")
 
 
 def load_config(path: Path) -> P1Config:
@@ -131,23 +135,28 @@ def load_config(path: Path) -> P1Config:
         fixtures_root=_get_fs_path(data, "fixtures_root", config_dir),
         secret_env=_get_secret_env(data),
         endpoints=_get_endpoints(data),
-        interlock=_parse_interlock(data.get("interlock", {})),
-        contracts=_parse_contracts(data.get("contracts", {})),
-        funds=_parse_funds(data.get("funds", {})),
-        stream=_parse_stream(data.get("stream", {})),
-        orders=_parse_orders(data.get("orders", {})),
-        events=_parse_events(data.get("events", {})),
-        history=_parse_history(data.get("history", {})),
-        scrub=_parse_scrub(data.get("scrub", {})),
+        interlock=_parse_interlock(data, config_dir),
+        contracts=_parse_contracts(data, config_dir),
+        funds=_parse_funds(data, config_dir),
+        stream=_parse_stream(data, config_dir),
+        orders=_parse_orders(data, config_dir),
+        events=_parse_events(data, config_dir),
+        history=_parse_history(data, config_dir),
+        scrub=_parse_scrub(data, config_dir),
     )
 
 
 def read_secrets(cfg: P1Config) -> dict[str, str]:
-    """Read secret values from the environment variables named in cfg.secret_env."""
+    """Read secret values from the environment variables named in cfg.secret_env.
+
+    An empty value is treated the same as a missing one, so an accidentally
+    blank environment variable can never silently disable redaction or
+    scrubbing downstream.
+    """
     secrets: dict[str, str] = {}
     for role, env_var in cfg.secret_env.items():
         value = os.environ.get(env_var)
-        if value is None:
+        if not value:
             raise ConfigError(f"missing environment variable {env_var} for secrets.{role}")
         secrets[role] = value
     return secrets
@@ -164,8 +173,16 @@ def _reject_inline_secrets(data: Mapping[str, Any], path: str = "") -> None:
                 f"inline secret value not allowed at {current}; "
                 "map it in [secrets] to an environment variable name instead"
             )
-        if isinstance(value, Mapping):
-            _reject_inline_secrets(value, current)
+        _reject_inline_secrets_in_value(value, current)
+
+
+def _reject_inline_secrets_in_value(value: Any, path: str) -> None:
+    """Recurse into nested tables and arrays of tables looking for inline secrets."""
+    if isinstance(value, Mapping):
+        _reject_inline_secrets(value, path)
+    elif isinstance(value, list):
+        for item in value:
+            _reject_inline_secrets_in_value(item, path)
 
 
 def _lookup(data: Mapping[str, Any], dotted_key: str) -> Any:
@@ -226,33 +243,51 @@ def _get_endpoints(data: Mapping[str, Any]) -> dict[str, Endpoint]:
     }
 
 
-def _parse_interlock(_raw: Mapping[str, Any]) -> InterlockConfig:
+def _optional_table(data: Mapping[str, Any], key: str) -> Mapping[str, Any]:
+    """Return data[key] validated as a table, or {} if the optional section is absent."""
+    if key not in data:
+        return {}
+    value = data[key]
+    if not isinstance(value, Mapping):
+        raise ConfigError(f"config key {key} must be a table")
+    return value
+
+
+def _parse_interlock(data: Mapping[str, Any], config_dir: Path) -> InterlockConfig:
+    _optional_table(data, "interlock")
     return InterlockConfig()
 
 
-def _parse_contracts(_raw: Mapping[str, Any]) -> ContractFields:
+def _parse_contracts(data: Mapping[str, Any], config_dir: Path) -> ContractFields:
+    _optional_table(data, "contracts")
     return ContractFields()
 
 
-def _parse_funds(_raw: Mapping[str, Any]) -> FundsConfig:
+def _parse_funds(data: Mapping[str, Any], config_dir: Path) -> FundsConfig:
+    _optional_table(data, "funds")
     return FundsConfig()
 
 
-def _parse_stream(_raw: Mapping[str, Any]) -> StreamConfig:
+def _parse_stream(data: Mapping[str, Any], config_dir: Path) -> StreamConfig:
+    _optional_table(data, "stream")
     return StreamConfig()
 
 
-def _parse_orders(_raw: Mapping[str, Any]) -> OrdersConfig:
+def _parse_orders(data: Mapping[str, Any], config_dir: Path) -> OrdersConfig:
+    _optional_table(data, "orders")
     return OrdersConfig()
 
 
-def _parse_events(_raw: Mapping[str, Any]) -> EventFields:
+def _parse_events(data: Mapping[str, Any], config_dir: Path) -> EventFields:
+    _optional_table(data, "events")
     return EventFields()
 
 
-def _parse_history(_raw: Mapping[str, Any]) -> HistoryConfig:
+def _parse_history(data: Mapping[str, Any], config_dir: Path) -> HistoryConfig:
+    _optional_table(data, "history")
     return HistoryConfig()
 
 
-def _parse_scrub(_raw: Mapping[str, Any]) -> ScrubConfig:
+def _parse_scrub(data: Mapping[str, Any], config_dir: Path) -> ScrubConfig:
+    _optional_table(data, "scrub")
     return ScrubConfig()

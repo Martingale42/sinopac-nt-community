@@ -22,14 +22,6 @@ def _make_record(msg: str, args: tuple[object, ...] = ()) -> logging.LogRecord:
     )
 
 
-def _reset_p1rec_logger() -> None:
-    logger = logging.getLogger("p1rec")
-    for handler in list(logger.handlers):
-        logger.removeHandler(handler)
-        handler.close()
-    logger.filters.clear()
-
-
 def test_redacting_formatter_replaces_longest_match_first() -> None:
     full = "abcdefghij1234"
     prefix = full[:10]
@@ -73,62 +65,92 @@ def test_log_redacts_secret_and_prefix(tmp_path: Path, capsys: pytest.CaptureFix
     full_key = secrets["api_key"]
     prefix = full_key[:API_KEY_PREFIX_LEN]
 
-    try:
-        setup_logging(tmp_path, secrets=redaction_values(secrets), level="INFO")
-        logger = logging.getLogger("p1rec.orders")
-        logger.info("clientname=PYAPI/%s/node1 full=%s", prefix, full_key)
+    setup_logging(tmp_path, secrets=redaction_values(secrets), level="INFO")
+    logger = logging.getLogger("p1rec.orders")
+    logger.info("clientname=PYAPI/%s/node1 full=%s", prefix, full_key)
 
-        for handler in logging.getLogger("p1rec").handlers:
-            handler.flush()
+    for handler in logging.getLogger().handlers:
+        handler.flush()
 
-        log_text = (tmp_path / "recorder.log").read_text(encoding="utf-8")
-        stderr_text = capsys.readouterr().err
+    log_text = (tmp_path / "recorder.log").read_text(encoding="utf-8")
+    stderr_text = capsys.readouterr().err
 
-        for output in (log_text, stderr_text):
-            assert full_key not in output
-            assert prefix not in output
-            assert "***" in output
-    finally:
-        _reset_p1rec_logger()
+    for output in (log_text, stderr_text):
+        assert full_key not in output
+        assert prefix not in output
+        assert "***" in output
 
 
 def test_log_exception_redacts_secret_in_traceback(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     full_key = "abcdefghijklmnopqrstuvwx"
     prefix = full_key[:API_KEY_PREFIX_LEN]
 
+    setup_logging(tmp_path, secrets=[full_key, prefix], level="INFO")
+    logger = logging.getLogger("p1rec.orders")
     try:
-        setup_logging(tmp_path, secrets=[full_key, prefix], level="INFO")
-        logger = logging.getLogger("p1rec.orders")
-        try:
-            raise ValueError(f"rejected api_key={full_key} prefix={prefix}")
-        except ValueError:
-            logger.exception("order placement failed")
+        raise ValueError(f"rejected api_key={full_key} prefix={prefix}")
+    except ValueError:
+        logger.exception("order placement failed")
 
-        for handler in logging.getLogger("p1rec").handlers:
-            handler.flush()
+    for handler in logging.getLogger().handlers:
+        handler.flush()
 
-        log_text = (tmp_path / "recorder.log").read_text(encoding="utf-8")
-        stderr_text = capsys.readouterr().err
+    log_text = (tmp_path / "recorder.log").read_text(encoding="utf-8")
+    stderr_text = capsys.readouterr().err
 
-        for output in (log_text, stderr_text):
-            assert full_key not in output
-            assert prefix not in output
-            assert "***" in output
-            # The traceback itself must survive, just with the secret gone
-            assert "ValueError" in output
-    finally:
-        _reset_p1rec_logger()
+    for output in (log_text, stderr_text):
+        assert full_key not in output
+        assert prefix not in output
+        assert "***" in output
+        # The traceback itself must survive, just with the secret gone
+        assert "ValueError" in output
+
+
+def test_format_mismatch_does_not_leak_raw_args(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    secret_value = "abcdefghijklmnopqrstuvwx"
+
+    setup_logging(tmp_path, secrets=[secret_value], level="INFO")
+    logger = logging.getLogger("p1rec.orders")
+    # Too few %-placeholders for the args, so record.getMessage() raises
+    # inside Handler.emit(), which normally falls back to handleError and
+    # prints the traceback plus the record's raw, unredacted args to stderr.
+    logger.error("only one placeholder: %s", secret_value, secret_value)
+
+    for handler in logging.getLogger().handlers:
+        handler.flush()
+
+    log_text = (tmp_path / "recorder.log").read_text(encoding="utf-8")
+    stderr_text = capsys.readouterr().err
+
+    assert secret_value not in log_text
+    assert secret_value not in stderr_text
 
 
 def test_setup_logging_creates_recorder_log(tmp_path: Path) -> None:
-    try:
-        setup_logging(tmp_path, secrets=[], level="DEBUG")
-        logging.getLogger("p1rec.preflight").debug("starting preflight")
+    setup_logging(tmp_path, secrets=[], level="DEBUG")
+    logging.getLogger("p1rec.preflight").debug("starting preflight")
 
-        for handler in logging.getLogger("p1rec").handlers:
-            handler.flush()
+    for handler in logging.getLogger().handlers:
+        handler.flush()
 
-        assert (tmp_path / "recorder.log").exists()
-        assert "starting preflight" in (tmp_path / "recorder.log").read_text(encoding="utf-8")
-    finally:
-        _reset_p1rec_logger()
+    assert (tmp_path / "recorder.log").exists()
+    assert "starting preflight" in (tmp_path / "recorder.log").read_text(encoding="utf-8")
+
+
+def test_setup_logging_redacts_third_party_logger(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    secret_value = "abcdefghijklmnopqrstuvwx"
+
+    setup_logging(tmp_path, secrets=[secret_value], level="INFO")
+    # httpx/httpcore log under their own names, not under "p1rec", so the
+    # handlers must live on the root logger to catch them too.
+    logging.getLogger("httpx").info("request sent with token %s", secret_value)
+
+    for handler in logging.getLogger().handlers:
+        handler.flush()
+
+    log_text = (tmp_path / "recorder.log").read_text(encoding="utf-8")
+    stderr_text = capsys.readouterr().err
+
+    assert secret_value not in log_text
+    assert secret_value not in stderr_text
+    assert "***" in log_text
