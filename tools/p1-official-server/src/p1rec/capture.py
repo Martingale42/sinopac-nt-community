@@ -18,6 +18,8 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from types import TracebackType
+from typing import Self
 from urllib.parse import quote
 
 import httpx
@@ -52,11 +54,23 @@ def append_jsonl(path: Path, record: Mapping[str, object]) -> None:
 
 
 def make_http_client(base_url: str, timeout: httpx.Timeout) -> httpx.Client:
-    """Build the httpx client used for every request to the official server."""
+    """Build the httpx client used for every request to the official server.
 
-    # The official server is always reached directly, and a proxy picked up
-    # from the environment would sit in the middle and distort timings.
-    return httpx.Client(base_url=base_url, timeout=timeout, trust_env=False)
+    trust_env is off because the official server is always reached
+    directly, and a proxy picked up from the environment would sit in the
+    middle and distort timings. Accept-Encoding is identity so a recorded
+    body is the entity exactly as sent, matching the recorded headers
+    instead of being a decompressed copy of a compressed transfer.
+    """
+    return httpx.Client(
+        base_url=base_url, timeout=timeout, trust_env=False, headers={"Accept-Encoding": "identity"}
+    )
+
+
+def describe_exception(exc: BaseException) -> str:
+    """Return the exception's type name, followed by its message if it has one."""
+    message = str(exc)
+    return f"{type(exc).__name__}: {message}" if message else type(exc).__name__
 
 
 def _expand_path(template: str, path_vars: Mapping[str, str]) -> str:
@@ -95,10 +109,13 @@ class CapturedResponse:
 class CapturingClient:
     """An HTTP client that records every exchange in rest.jsonl.
 
-    An error status is recorded and returned, never raised. A transport
-    failure, such as a refused connection or a timeout, is recorded as a
-    line with an "error" field and no "status", then re-raised. Several
-    instances, on any threads, may share one rest_log.
+    An error status is recorded and returned, never raised. Anything that
+    stops a request from completing, such as a refused connection, a
+    timeout or a KeyboardInterrupt while waiting for the reply, is
+    recorded as a line with an "error" field and no "status", then
+    re-raised. Several instances, on any threads, may share one rest_log.
+    Use it as a context manager, or call close(), to release its
+    connections.
     """
 
     def __init__(self, base_url: str, client_name: str, rest_log: Path, timeout_s: float) -> None:
@@ -136,9 +153,12 @@ class CapturingClient:
         record["sent_ts_ns"] = time.time_ns()
         try:
             response = self._http.send(request)
-        except httpx.HTTPError as exc:
+        except BaseException as exc:
+            # BaseException, not just httpx errors, because an order
+            # interrupted after it was sent may still have reached the
+            # server, and that attempt must stay on record.
             record["error_ts_ns"] = time.time_ns()
-            record["error"] = f"{type(exc).__name__}: {exc}"
+            record["error"] = describe_exception(exc)
             append_jsonl(self._rest_log, record)
             raise
         recv_ts_ns = time.time_ns()
@@ -154,3 +174,14 @@ class CapturingClient:
     def close(self) -> None:
         """Close the underlying connection pool."""
         self._http.close()
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.close()
