@@ -174,3 +174,30 @@ def test_parse_step() -> None:
     )
     assert parse_step("update_qty:1") == Step(verb="update_qty", reduce_by=1)
     assert parse_step("cancel") == Step(verb="cancel")
+
+
+def test_unknown_top_level_table_rejected(tmp_path: Path) -> None:
+    misspelt = ["[[csae]]" if line == "[[case]]" else line for line in _EXCEED_FUNDS_CASE]
+
+    with pytest.raises(ConfigError, match=r"unknown top-level keys: csae"):
+        load_scenarios(_write(tmp_path, _LIFECYCLE_CASE, misspelt))
+
+
+def test_update_qty_reductions_may_not_exceed_quantity(tmp_path: Path) -> None:
+    case = _replace(_LIFECYCLE_CASE, "steps", 'steps = ["place", "update_qty:1", "update_qty:2", "cancel"]')
+
+    with pytest.raises(ConfigError, match=r"steps\[2\]: update_qty reductions total 3"):
+        load_scenarios(_write(tmp_path, case))
+
+
+def test_update_qty_reductions_up_to_quantity_accepted(tmp_path: Path) -> None:
+    case = _replace(_LIFECYCLE_CASE, "steps", 'steps = ["place", "update_qty:1", "update_qty:1"]')
+
+    assert load_scenarios(_write(tmp_path, case))[0].steps == ("place", "update_qty:1", "update_qty:1")
+
+
+def test_step_after_cancel_rejected(tmp_path: Path) -> None:
+    case = _replace(_LIFECYCLE_CASE, "steps", 'steps = ["place", "cancel", "update_qty:1"]')
+
+    with pytest.raises(ConfigError, match=r"steps\[2\]: no step may follow 'cancel'"):
+        load_scenarios(_write(tmp_path, case))

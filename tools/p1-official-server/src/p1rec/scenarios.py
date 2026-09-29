@@ -114,9 +114,11 @@ def load_scenarios(path: Path) -> list[Case]:
     Raises ConfigError naming the offending case and key for a missing or
     unknown key, a value of the wrong type or outside its allowed set, a
     duplicate case id, an unknown step, a steps list that does not begin
-    with its only "place", or an expect_fill case whose quantity is
-    exceed_funds (such an order is priced at limit_down precisely so it
-    never fills).
+    with its only "place", a step after "cancel", update_qty reductions
+    that add up to more than the case's quantity, or an expect_fill case
+    whose quantity is exceed_funds (such an order is priced at limit_down
+    precisely so it never fills). Any top-level key other than [[case]]
+    is rejected too, so a misspelt table name cannot silently drop cases.
     """
     try:
         text = path.read_text(encoding="utf-8")
@@ -126,6 +128,10 @@ def load_scenarios(path: Path) -> list[Case]:
         data = tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"invalid TOML in {path}: {exc}") from exc
+
+    unknown = sorted(set(data) - {"case"})
+    if unknown:
+        raise ConfigError(f"{path}: unknown top-level keys: {', '.join(unknown)}")
 
     raw_cases = data.get("case")
     if not isinstance(raw_cases, list) or not raw_cases:
@@ -174,7 +180,7 @@ def _parse_case(raw: object, where: str) -> Case:
         quantity=quantity,
         custom_field=custom_field,
         expect_fill=expect_fill,
-        steps=_steps(raw, where),
+        steps=_steps(raw, where, quantity),
     )
 
 
@@ -217,15 +223,28 @@ def _quantity(raw: Mapping[str, Any], where: str) -> int | Literal["exceed_funds
     return value
 
 
-def _steps(raw: Mapping[str, Any], where: str) -> tuple[str, ...]:
+def _steps(raw: Mapping[str, Any], where: str, quantity: int | Literal["exceed_funds"]) -> tuple[str, ...]:
     value = _required(raw, "steps", where)
     if not isinstance(value, list) or not value or not all(isinstance(step, str) for step in value):
         raise ConfigError(f"{where}.steps must be a non-empty array of strings")
+
+    reduced = 0
     for step_index, step in enumerate(value):
         try:
-            parse_step(step)
+            parsed = parse_step(step)
         except ValueError as exc:
             raise ConfigError(f"{where}.steps[{step_index}]: {exc}") from None
+        if step_index > 0 and value[step_index - 1] == "cancel":
+            raise ConfigError(f"{where}.steps[{step_index}]: no step may follow 'cancel'")
+        if parsed.reduce_by is not None:
+            reduced += parsed.reduce_by
+
+            # An exceed_funds quantity is only known once the live balance is
+            if isinstance(quantity, int) and reduced > quantity:
+                raise ConfigError(
+                    f"{where}.steps[{step_index}]: update_qty reductions total {reduced}, "
+                    f"more than the case quantity {quantity}"
+                )
 
     # Every later step acts on the order the place step created, so
     # without exactly one leading place there is nothing for them to act on.
