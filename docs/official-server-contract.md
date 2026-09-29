@@ -1,0 +1,116 @@
+# 官方 server 1.7.6 契約與量測紀錄
+
+P1 spike 的產出文件（設計：`docs/plans/2026-09-29-official-server-spike-design.md`）。規格原文：`test_data/official/1.7.6/openapi.json`（OpenAPI 3.1.0，100 條路徑、209 個 schema）。
+
+## 1. 端點對照
+
+| 邏輯操作 | method | path | 請求 | 回應 | 備註 |
+|---|---|---|---|---|---|
+| `mode` | GET | `/api/v1/info` | — | `ApiInfoResponse` | `/simulation` 為布林；連鎖檢查用 |
+| `accounts` | GET | `/api/v1/auth/accounts` | — | `Account[]` | 含 `account_type`（S／F／H）與 `signed` |
+| `contracts_stock` | GET | `/api/v1/data/contracts/{code}/info` | — | `ContractInfoRecord` | 單檔查詢；`/api/v1/data/contracts` 可列全部 |
+| `contracts_futures` | GET | `/api/v1/data/contracts/futures` | query `root`、`underlying_code`、`delivery_month` | `ContractInfoRecord[]` | 回應直接含 `limit_up`、`limit_down`、`reference` |
+| `contracts_options` | GET | `/api/v1/data/contracts/options` | query `root` 等 | `ContractInfoRecord[]` | |
+| `snapshots` | POST | `/api/v1/data/snapshots` | `SnapshotRequest` | `Snapshot[]` | JSON 本體，不是 query |
+| `ticks` | POST | `/api/v1/data/ticks` | `TicksRequest` | `Ticks` | JSON 本體 |
+| `kbars` | POST | `/api/v1/data/kbars` | `KBarsRequest` | `KBars` | JSON 本體 |
+| `stream_connect` | GET | `/api/v1/stream/data` 與 `/api/v1/stream/data/<類型>` | query `region`、`security_type`（僅綜合串流） | SSE | 每種資料一條端點；見 §2 |
+| `stream_subscribe` | POST | `/api/v1/stream/subscribe` | `BaseSubscriptionRequest` | `SubscriptionResponse` | 無 session／connection 識別，訂閱為 server 全域 |
+| `stream_unsubscribe` | POST | `/api/v1/stream/unsubscribe` | 同上 | 同上 | |
+| `subscribe_trade` | POST | `/api/v1/auth/subscribe_trade` | `AccountRequest` | `SubscribeTradeOut` | 啟用該帳戶的委託與成交回報 |
+| `place_stock` | POST | `/api/v1/order/place_order` | `PlaceOrderRequest`（`contract` + `stock_order`） | `Trade` | 股票與期貨共用路徑 |
+| `place_futures` | POST | `/api/v1/order/place_order` | `PlaceOrderRequest`（`contract` + `futures_order`） | `Trade` | |
+| `update_price` | POST | `/api/v1/order/update_price` | `trade_id`、`price` | `Trade` | |
+| `update_qty` | POST | `/api/v1/order/update_qty` | `trade_id`、`quantity` | `Trade` | |
+| `cancel` | POST | `/api/v1/order/cancel_order` | `trade_id` | `Trade` | |
+| `trades` | POST | `/api/v1/order/trades` | `AccountRequest` + `refresh` | `Trade[]` | `refresh` 省略時為 `true`（先向上游更新狀態） |
+| `positions` | POST | `/api/v1/portfolio/position_unit` | `AccountRequest` + `unit` | `Position[]` | |
+| `balance` | POST | `/api/v1/portfolio/account_balance` | `AccountRequest` | `AccountBalance` | |
+| `margin` | POST | `/api/v1/portfolio/margin` | `AccountRequest` | `Margin` | |
+| `usage` | GET | `/api/v1/auth/usage` | — | `UsageOut` | `connections`、`bytes`、`limit_bytes`、`remaining_bytes` |
+| `ca_status` | GET | `/api/v1/auth/ca_expiretime` | — | `CaExpireResponse` | 含 `person_id`，需去識別化 |
+| `harness_info` | GET | `/api/v1/agent/harness` | — | `AgentHarnessInfo` | `info` 與 `health` 也帶同樣欄位 |
+
+規格中另有而 adapter 可能用到的：`/api/v1/order/order_deal_records`、`/api/v1/order/trade_cache_health`、`/api/v1/stream/status`、`/api/v1/data/contracts/tick-bands/{rule}`、`/api/v1/stream/data/contract_event`。
+
+## 2. 執行環境與探勘觀察
+
+**環境**
+
+- 官方 CLI：`shioaji` 1.7.6，以 `uv tool` 安裝；wheel 為 PyPI 的 `cp37-abi3-manylinux_2_17_x86_64`，sha256 與 PyPI 公布值一致。
+- 設定：`~/.sinopac-p1/env`（0600），`SJ_HOME_PATH=~/.sinopac-p1/home`，綁 `127.0.0.1:8080`，另開 UDS `~/.sinopac-p1/home/server-8080.sock`。
+- 啟動：`shioaji server start --no-open` 於前景執行，log 寫到 stdout／stderr，由呼叫端導向 `results/p1/<run_id>/server-start.log`；`shioaji server status` 只追蹤 daemon 模式，前景執行時顯示 `running: false`。
+- 本機 `127.0.0.1:8081` 已被其他程序佔用，harness 實例改用 `18081`。
+
+**探勘觀察（2026-09-29，模擬模式；證據在本機 `results/p1/*-discovery/`，P1 結束時挑為 fixture）**
+
+- 登入要求對外 IP 在 API key 白名單內，否則回 400 `ip: <IP> not allow`；clientname 仍為 `PYAPI/{API key 前 10 字元}/…`。
+- 啟動時即以 `SJ_CA_PATH` 啟用 CA，並在 log 記錄到期日。
+- token 有效期約 24 小時（health 的 `token_expires_in_seconds` 起始值 86396），另有 `token_stale`、`session_recovering`、`session_recovery_attempts`。
+- 每日維護：在台北時間 08:12–08:30 的窗口內加隨機偏移執行一次，下一次時間見 health 的 `next_maintenance`。
+- 綁 localhost 時 HTTP 端不驗證 API key（log：`API key authentication disabled (localhost bind)`）。
+- `SJ_AGENT_HARNESS` 在模擬模式預設 `mode=off`；啟用時以請求標頭 `X-Shioaji-Agent-Capability` 攜帶 `compact_keyed_blake3` 摘要，TTL 上限 60 秒。
+- 帳戶：`S`（`signed: true`）、`F`（`signed: false`）、`H`（`signed: false`）。`signed` 的意義與對期貨下單的影響待 Task 12 確認。
+- usage：登入後 `connections` 為 2（舊 gateway 當時未登入），當日額度上限 2 GiB。
+- SSE：`text/event-stream`，frame 為 `event:<名稱>` + `data:<JSON>`，沒有 `id:` 欄位；心跳是 `event:heartbeat` 事件，內含每條連線不同的 `connection_id`。
+- 綜合串流 `/api/v1/stream/data` 與 `/api/v1/stream/data/tick_fop` 在訂閱 TMFJ6 tick 後收到相同數量的 frame；`order_event` 串流在未呼叫 `subscribe_trade` 前只有心跳。
+- tick（`event:tick_fop`）價格為十進位字串，`date` 與 `time` 為台北本地時間且無時區標記，帶 `simtrade` 布林欄位。
+- 訂閱與取消訂閱回 `{"success": true, "message": …, "subscription": …}`。
+
+**假設關卡**
+
+- A1 成立：`GET /api/v1/info` 的 `/simulation`。
+- A2 成立：SSE 走 GET，訂閱與取消訂閱是 POST。
+- A3 成立：下單、改單、刪單與查詢皆為 JSON over HTTP。
+- A4 成立（規格層級）：`/api/v1/stream/data/order_event` 回傳 `OrderEvent`，需先 `subscribe_trade`；實際事件待 Task 12。
+
+## 3. 量測清單答案
+
+對應設計 §6；每項附 fixture 名稱或 log 行。
+
+**A. 契約對應**
+
+- A1 OpenAPI 規格：未作答
+- A2 現行 adapter 契約 16 列的差距：未作答
+
+**B. 行情**
+
+- B1 SSE 訂閱流程、事件類型、frame 格式、心跳間隔：未作答
+- B2 `Last-Event-ID` 斷點接續：未作答
+- B3 五檔深度的檔數、時間戳格式與時區：未作答
+- B4 試撮標記：未作答
+- B5 盤中零股與期貨夜盤行情格式：未作答
+- B6 開盤尖峰每秒訊息量與延遲：未作答
+
+**C. 委託與成交**
+
+- C1 各操作的同步回應與事件順序：未作答
+- C2 委託條件組合（含拒單）：未作答
+- C3 `trade_id`、`ordno`、`seqno` 對應：未作答
+- C4 `custom_field` 長度、字元集與往返：未作答
+- C5 股票成交數量單位：未作答
+- C6 資金不足拒單與 IOC／FOK 未成交取消：未作答
+- C7 重啟後當日委託與成交的取回：未作答
+
+**D. 多 client**
+
+- D1 client 之間的委託回報分送：未作答
+- D2 一個 client 取消訂閱對其他 client 的影響：未作答
+
+**E. 韌性**
+
+- E1 重啟時 SSE client 的行為與訂閱是否需重做：未作答
+- E2 session 過期與自動重登：未作答
+- E3 合約更新事件：未作答
+
+**F. 限制與權限**
+
+- F1 速率上限與實際遇到的錯誤：未作答
+- F2 `SJ_AGENT_HARNESS` 預設與 `all` 模式下的回應：未作答
+- F3 連線數與每日額度：未作答
+- F4 模擬模式下 CA 是否真的簽章：未作答
+- F5 HTTP 端驗證與 CORS：未作答
+
+**G. 歷史資料**
+
+- G1 ticks、kbars、snapshots 的格式與額度消耗：未作答
