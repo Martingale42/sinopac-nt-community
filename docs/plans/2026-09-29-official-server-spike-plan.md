@@ -706,6 +706,7 @@ git commit -m "Measure history queries and their quota cost"
 - 替換對照的來源：`secret_env` 的全部密鑰（含 API key 前 10 字元與對外 IP）、以 `account_id_pointers` 從 `accounts` 回應找出的帳號、以 `ca_pointers` 從 `ca_status` 回應找出的憑證內容。
 - 佔位字串依「類別 + 首次出現順序」決定（例如 `ACCOUNT_1`）；同一原始值永遠得到同一佔位字串；對照表存 `results/p1/scrub-map.json`（不進版控），重跑時沿用。
 - 替換由長到短，嵌在較長字串中的值（例如 clientname 內的 key 前綴）也要替換。
+- 原始值的每種寫法都要處理：原文、JSON 跳脫後的形式（含 `\uXXXX`），以及 `*_b64` 欄位解碼後的內容；帳戶物件的 `username` 也屬於要替換的值。
 - `p1rec scrub` 依 `fixtures.toml` 從 `results/` 取出指定檔案與行，替換後寫入 `test_data/official/1.7.6/`，並產生 `MANIFEST.toml`（每筆：檔名、來源 run_id、來源檔、行號、錄製時間、商品、對應的 §6 項目）。
 - `p1rec scrub --scan-only` 掃描 `test_data/official/` 與 `docs/official-server-contract.md`：發現任何原始值時列出「檔案:行號:類別」（不印原始值）並回 2，否則回 0。
 
