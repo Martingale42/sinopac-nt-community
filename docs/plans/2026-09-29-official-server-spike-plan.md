@@ -53,7 +53,9 @@ tools/p1-official-server/
     preflight.py   # 第 0 步
     stream.py      # 多 client 串流與排程動作
     orders.py      # 劇本執行
-    analysis.py    # 對帳、client 覆蓋、串流統計
+    records.py     # 錄製檔（JSONL、SSE frame）讀取與時間換算，對帳與統計共用
+    reconcile.py   # 對帳、client 覆蓋
+    stats.py       # 串流統計
     history.py     # 歷史資料查詢與額度量測
     scrub.py       # 去識別化、語料匯出、掃描
   tests/  stub_server.py  data/  test_*.py
@@ -564,9 +566,9 @@ git commit -m "Run simulated order scenarios behind the interlock"
 ### Task 8：SSE 分析：對帳、client 覆蓋與串流統計
 
 **Files:**
-- Create: `src/p1rec/analysis.py`
+- Create: `src/p1rec/records.py`（JSONL 與 SSE 檔讀取、數值與時間換算、結束碼）、`src/p1rec/reconcile.py`、`src/p1rec/stats.py`
 - Modify: `src/p1rec/config.py`、`src/p1rec/cli.py`、`p1.toml`（`[events]`）
-- Test: `tests/test_analysis.py`
+- Test: `tests/test_analysis.py`（涵蓋三個模組）
 
 **Behaviour:**
 
@@ -607,6 +609,7 @@ class EventFields:  # 事件名稱與 JSON 指標，取自 2026-09-29 錄到的�
     heartbeat_event: str              # 官方 1.7.6 為 "heartbeat"
     gap_threshold_s: float
 
+# p1rec.reconcile
 @dataclass(frozen=True)
 class OrderView:
     key: str
@@ -637,16 +640,22 @@ class ReconcileReport:
 
 def derive_status(*, new_ok: bool | None, cancel_ok: bool, order_qty: Decimal | None,
                   cancel_qty: Decimal, filled_qty: Decimal) -> str: ...
-def discover_sse_files(run_dir: Path) -> dict[str, list[Path]]: ...  # client -> 該 client 的全部 SSE 檔
 def orders_from_sse(paths: Mapping[str, Sequence[Path]], fields: EventFields,
                     trading_day: date | None = None) -> dict[str, ClientOrders]: ...
 def trading_day_of(payload: object, fields: EventFields) -> date: ...  # REST 快照委託時間的台北日期
 def orders_from_rest(payload: object, fields: EventFields) -> dict[str, OrderView]: ...
 def reconcile(sse: Mapping[str, ClientOrders], rest: dict[str, OrderView]) -> ReconcileReport: ...
-def stream_stats(paths: Mapping[str, Sequence[Path]], fields: EventFields) -> dict[str, object]: ...
 def run_reconcile(cfg: P1Config, sse_run: str, rest_run: str | None, run_dir: Path, *,
                   trading_day: date | None = None, transport: httpx.BaseTransport | None = None) -> int: ...
+
+# p1rec.stats
+def stream_stats(paths: Mapping[str, Sequence[Path]], fields: EventFields) -> dict[str, object]: ...
 def run_stats(cfg: P1Config, sse_run: str, run_dir: Path) -> int: ...
+
+# p1rec.records
+class AnalysisError(ValueError): ...
+def read_jsonl(path: Path, contains: bytes | None = None) -> Iterator[tuple[int, dict[str, object]]]: ...
+def discover_sse_files(run_dir: Path) -> dict[str, list[Path]]: ...  # client -> 該 client 的全部 SSE 檔
 ```
 
 **Tests:**

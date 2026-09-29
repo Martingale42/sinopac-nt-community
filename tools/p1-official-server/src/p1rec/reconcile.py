@@ -1,30 +1,22 @@
-"""Reconcile recorded order events against REST trades, and summarise SSE streams.
+"""Reconcile the order reports every SSE client received against the REST trades list.
 
-Both analyses only read what stream and orders runs already wrote: the
-sse_<client>_<stream>.jsonl files of a stream run and, unless the trades
-list is queried live, the rest.jsonl of an earlier run. Official order
-events carry no status string, so each order's final status on the SSE
-side is derived from its operations and deals by derive_status.
+Official order events carry no status string, so each order's final
+status on the SSE side is derived from its operations and deals by
+derive_status. The trades list comes from an earlier run's rest.jsonl,
+or is queried live after the simulation-mode check.
 """
 
 from __future__ import annotations
 
 import base64
-import functools
 import hashlib
 import json
 import logging
-import math
-import statistics
-from array import array
-from collections import Counter
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
-from fractions import Fraction
+from datetime import date
+from decimal import Decimal
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -32,27 +24,23 @@ from p1rec.capture import CapturingClient
 from p1rec.config import EventFields, P1Config
 from p1rec.interlock import assert_simulation
 from p1rec.jsonpointer import JsonPointerError, resolve_pointer
-from p1rec.sse import SseFrame, parse_frame
+from p1rec.records import (
+    EXIT_ANALYSIS_ERROR,
+    EXIT_CHECK_FAILED,
+    EXIT_OK,
+    AnalysisError,
+    discover_sse_files,
+    epoch_s_to_ns,
+    iter_frames,
+    read_jsonl,
+    resolve_run_dir,
+    taipei_date,
+    to_decimal,
+    write_json,
+)
+from p1rec.sse import SseFrame
 
 logger = logging.getLogger(__name__)
-
-EXIT_OK = 0
-EXIT_ANALYSIS_ERROR = 1
-EXIT_CHECK_FAILED = 2
-
-NS_PER_S = 1_000_000_000
-NS_PER_US = 1_000
-
-# How many of the busiest seconds stats lists, enough to show the shape
-# of the opening spike without flooding the report.
-PEAK_SECONDS = 10
-
-# Nearest-rank percentiles reported for receive latency
-LATENCY_PERCENTILES = (50, 99)
-
-# Exchange time strings carry no zone and are Taipei local time
-# (docs/official-server-contract.md section 2).
-EXCHANGE_TZ_NAME = "Asia/Taipei"
 
 # The OpenAPI OpType values that change an order's derived status; the
 # update operations only refresh its quantities.
@@ -71,22 +59,11 @@ STATUS_PART_FILLED = "PartFilled"
 STATUS_SUBMITTED = "Submitted"
 STATUS_UNKNOWN = "Unknown"
 
-# SSE's default event type for a frame without an event field, and the
-# name counted for a frame made only of comment lines.
-_DEFAULT_EVENT_NAME = "message"
-_COMMENT_EVENT_NAME = ":comment"
-
 # The trades request names no account, since every AccountRequest field
 # is optional and the endpoint returns all trades, and spells out refresh
 # so REST is brought up to date before it is compared.
 _TRADES_OP = "trades"
 _TRADES_BODY: dict[str, object] = {"refresh": True}
-
-_UNIX_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
-
-
-class AnalysisError(ValueError):
-    """Raised when recorded input cannot be analysed as configured."""
 
 
 @dataclass(frozen=True)
@@ -169,111 +146,6 @@ class ReconcileReport:
         }
 
 
-def read_jsonl(path: Path, contains: bytes | None = None) -> Iterator[tuple[int, dict[str, object]]]:
-    """Yield (line number, record) for each JSON object line of path.
-
-    Blank lines are skipped. An unreadable last line is skipped with a
-    WARNING, since appends are not fsynced and a power loss mid-write
-    leaves a torn or NUL-padded tail; any earlier unreadable line raises
-    AnalysisError, since a crash explains only the tail. With contains,
-    lines without those bytes are skipped undecoded, which spares a large
-    file's JSON parsing when only a few lines matter, so only lines that
-    contain them are checked.
-    """
-    bad_line: tuple[int, str] | None = None
-    with path.open("rb") as fh:
-        for number, raw_line in enumerate(fh, start=1):
-            text = raw_line.strip()
-            if not text:
-                continue
-            if bad_line is not None:
-                raise AnalysisError(f"{path}:{bad_line[0]}: unreadable line before the end of the file: {bad_line[1]}")
-            if contains is not None and contains not in text:
-                continue
-            try:
-                record = json.loads(text)
-            except ValueError as exc:
-                bad_line = (number, str(exc))
-                continue
-            if not isinstance(record, dict):
-                bad_line = (number, f"expected a JSON object, got {type(record).__name__}")
-                continue
-            yield number, record
-    if bad_line is not None:
-        logger.warning("%s:%d: skipping unreadable last line (%s)", path, bad_line[0], bad_line[1])
-
-
-def discover_sse_files(run_dir: Path) -> dict[str, list[Path]]:
-    """Return a stream run's sse_*.jsonl files grouped by the client that recorded them.
-
-    The client comes from the first record's client field, since stream
-    names contain underscores and make the file name ambiguous; a file
-    whose first line is unreadable falls back to the name segment after
-    "sse_", with a WARNING. Raises AnalysisError if run_dir holds no such
-    file.
-    """
-    files = sorted(run_dir.glob("sse_*.jsonl"))
-    if not files:
-        raise AnalysisError(f"no sse_*.jsonl files in {run_dir}")
-    grouped: dict[str, list[Path]] = {}
-    for path in files:
-        client = _first_record_client(path)
-        if client is None:
-            client = path.name.removeprefix("sse_").split("_", 1)[0]
-            logger.warning("%s: no readable first record, assuming client %r from the file name", path, client)
-        grouped.setdefault(client, []).append(path)
-    return grouped
-
-
-def _first_record_client(path: Path) -> str | None:
-    with path.open("rb") as fh:
-        for raw_line in fh:
-            text = raw_line.strip()
-            if not text:
-                continue
-            try:
-                record = json.loads(text)
-            except ValueError:
-                return None
-            client = record.get("client") if isinstance(record, dict) else None
-            return client if isinstance(client, str) and client else None
-    return None
-
-
-def _recv_ts_ns(record: Mapping[str, object], path: Path, number: int) -> int:
-    value = record.get("recv_ts_ns")
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise AnalysisError(f"{path}:{number}: recv_ts_ns is missing or not an integer")
-    return value
-
-
-def _frame_of(record: Mapping[str, object], path: Path, number: int) -> SseFrame:
-    raw = record.get("raw")
-    if not isinstance(raw, str):
-        raise AnalysisError(f"{path}:{number}: frame line has no raw text")
-    return parse_frame(raw)
-
-
-def _frames(path: Path, contains: bytes | None = None) -> Iterator[tuple[int, int, SseFrame]]:
-    """Yield (line number, recv_ts_ns, parsed frame) for each frame line of an SSE file, as read_jsonl filters them."""
-    for number, record in read_jsonl(path, contains):
-        if record.get("kind") == "frame":
-            yield number, _recv_ts_ns(record, path, number), _frame_of(record, path, number)
-
-
-def _to_decimal(value: object) -> Decimal:
-    """Convert a JSON quantity to Decimal, raising ValueError for anything but a finite number or numeric string."""
-    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
-        raise ValueError(f"expected a number, got {type(value).__name__}")
-    try:
-        result = Decimal(str(value))
-    except InvalidOperation as exc:
-        raise ValueError(f"not a number: {value!r}") from exc
-    if not result.is_finite():
-        raise ValueError(f"not a finite number: {value!r}")
-    return result
-
-
 def _pointer_str(doc: object, pointer: str) -> str:
     value = resolve_pointer(doc, pointer)
     if not isinstance(value, str):
@@ -286,7 +158,7 @@ def _optional_quantity(doc: object, pointer: str) -> Decimal | None:
         value = resolve_pointer(doc, pointer)
     except JsonPointerError:
         return None
-    return None if value is None else _to_decimal(value)
+    return None if value is None else to_decimal(value)
 
 
 def normalize_status(status: str) -> str:
@@ -403,7 +275,7 @@ def _reports(paths: Sequence[Path], fields: EventFields) -> list[_Report]:
     by_identity: dict[str, _Report] = {}
     seq = 0
     for path in paths:
-        for number, recv_ts_ns, frame in _frames(path, needle):
+        for number, recv_ts_ns, frame in iter_frames(path, needle):
             if frame.event != fields.order_event_name:
                 continue
             where = f"{path}:{number}"
@@ -488,7 +360,7 @@ def _apply_report(orders: dict[str, _OrderProgress], report: _Report, fields: Ev
     try:
         if report.is_deal:
             key = _pointer_str(report.body, fields.deal_key)
-            quantity = _to_decimal(resolve_pointer(report.body, fields.deal_qty))
+            quantity = to_decimal(resolve_pointer(report.body, fields.deal_qty))
             deal_progress = orders.setdefault(key, _OrderProgress())
             deal_progress.filled_qty += quantity
             deal_progress.identities.add(report.identity)
@@ -534,36 +406,6 @@ def _note_time(progress: _OrderProgress, report: _Report, pointer: str) -> None:
         progress.first_time_is_exchange = True
     elif progress.first_time_ns is None:
         progress.first_time_ns = report.recv_ts_ns
-
-
-def epoch_s_to_ns(value: object) -> int:
-    """Return a JSON number of epoch seconds as integer epoch nanoseconds.
-
-    Definition: The same instant on the recorder's nanosecond scale.
-    Formula:    ns = round(Decimal(text of value) * 1e9), half to even.
-    Domain:     A JSON number (not a boolean) of seconds since
-                1970-01-01T00:00Z; going through its decimal text keeps it
-                exact, where float multiplication would blur it by
-                hundreds of nanoseconds at this magnitude. Raises
-                ValueError for anything else.
-    Returns:    Integer nanoseconds since the epoch.
-    """
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError(f"{value!r} is not a number of epoch seconds")
-    return int((_to_decimal(value) * NS_PER_S).to_integral_value())
-
-
-def taipei_date(ts_ns: int) -> date:
-    """Return the Asia/Taipei calendar date of an epoch-nanosecond instant.
-
-    Definition: The local calendar date in Taiwan at that instant.
-    Formula:    date(floor(ts_ns / 1e9) seconds after the epoch, in
-                Asia/Taipei).
-    Domain:     Integer nanoseconds since 1970-01-01T00:00Z; Asia/Taipei
-                is UTC+8 with no daylight saving time.
-    Returns:    A date; an instant after 16:00Z falls on the next UTC day's date.
-    """
-    return datetime.fromtimestamp(ts_ns // NS_PER_S, tz=_exchange_tz()).date()
 
 
 def orders_from_sse(
@@ -695,306 +537,6 @@ def reconcile(sse: Mapping[str, ClientOrders], rest: dict[str, OrderView]) -> Re
     )
 
 
-def percentile_nearest_rank(sorted_values: Sequence[float], p: float) -> float:
-    """Return the p-th percentile of sorted_values by the nearest-rank method.
-
-    Definition: The smallest recorded value such that at least p percent
-                of the values are less than or equal to it.
-    Formula:    P_p = x_(k), k = max(1, ceil(p / 100 * n)), 1-based over x
-                sorted ascending; computed with exact fractions of p's
-                decimal text, so 99.9 is 999/10 rather than its binary
-                approximation.
-    Domain:     sorted_values is sorted ascending and non-empty; 0 <= p <=
-                100. No interpolation, so small samples round up to an
-                observed value.
-    Returns:    An element of sorted_values, in its unit.
-    """
-    if not sorted_values:
-        raise ValueError("percentile of an empty sequence")
-    if not 0 <= p <= 100:
-        raise ValueError(f"percentile must be within [0, 100], got {p}")
-    rank = max(1, math.ceil(Fraction(str(p)) * len(sorted_values) / 100))
-    return sorted_values[rank - 1]
-
-
-def interval_summary(intervals: Sequence[float]) -> dict[str, object] | None:
-    """Summarise heartbeat intervals by their count, minimum, median and maximum.
-
-    Definition: The spread of the time between consecutive heartbeats.
-    Formula:    n = len(x); min(x); median(x) (statistics.median, the mean
-                of the two middle values when n is even); max(x).
-    Domain:     Intervals in seconds, each measured within one connection;
-                empty when a file had fewer than two heartbeats on one
-                connection.
-    Returns:    {"n", "min", "median", "max"} in seconds, or None when
-                there are no intervals.
-    """
-    if not intervals:
-        return None
-    return {"n": len(intervals), "min": min(intervals), "median": statistics.median(intervals), "max": max(intervals)}
-
-
-def latency_summary(latencies: Sequence[float], unparsable: int) -> dict[str, object]:
-    """Summarise receive latency by nearest-rank p50 and p99 and the maximum.
-
-    Definition: How long after the exchange time a frame was recorded.
-    Formula:    latency = recv_ts - exchange_ts per frame; p50 and p99 by
-                percentile_nearest_rank; max(latency).
-    Domain:     Seconds; negative when the local and exchange clocks
-                disagree, so the local NTP state belongs next to it.
-                unparsable counts frames whose exchange time fields exist
-                but do not parse.
-    Returns:    {"n", "p50", "p99", "max", "unparsable"} in seconds; the
-                statistics are None when n is 0.
-    """
-    ordered = sorted(latencies)
-    summary: dict[str, object] = {"n": len(ordered)}
-    for p in LATENCY_PERCENTILES:
-        summary[f"p{p}"] = percentile_nearest_rank(ordered, p) if ordered else None
-    summary["max"] = ordered[-1] if ordered else None
-    summary["unparsable"] = unparsable
-    return summary
-
-
-def exchange_ts_ns(doc: object, fields: EventFields) -> int | None:
-    """Return the exchange time in a frame's data as epoch nanoseconds.
-
-    Definition: The instant the exchange stamped on a frame, on the same
-                scale as recv_ts_ns.
-    Formula:    Without exchange_ts_format: ns = epoch_s_to_ns(v), v the
-                single pointer's value in epoch seconds. With it: t = strptime(" ".join(values),
-                exchange_ts_format) as Asia/Taipei local time, ns =
-                (t - 1970-01-01T00:00Z) in whole microseconds * NS_PER_US.
-    Domain:     doc is a frame's parsed data. Frames where a pointer does
-                not resolve, such as heartbeats, have no exchange time.
-                The format must not parse a zone. Raises ValueError when
-                the values resolve but are not a number or do not parse.
-    Returns:    Epoch nanoseconds (UTC), microsecond resolution for parsed
-                strings, or None when a pointer does not resolve.
-    """
-    try:
-        values = [resolve_pointer(doc, pointer) for pointer in fields.exchange_ts_pointers]
-    except JsonPointerError:
-        return None
-
-    if fields.exchange_ts_format is None:
-        (value,) = values
-        return epoch_s_to_ns(value)
-
-    texts = [value for value in values if isinstance(value, str)]
-    if len(texts) != len(values):
-        raise ValueError("exchange time fields are not all strings")
-    parsed = datetime.strptime(" ".join(texts), fields.exchange_ts_format)
-    if parsed.tzinfo is not None:
-        raise ValueError("exchange_ts_format must not parse a zone, since exchange time is Taipei local")
-    return (parsed.replace(tzinfo=_exchange_tz()) - _UNIX_EPOCH) // timedelta(microseconds=1) * NS_PER_US
-
-
-@functools.cache
-def _exchange_tz() -> ZoneInfo:
-    """Return the exchange's zone, loaded on first use so a host without tzdata fails only here."""
-    return ZoneInfo(EXCHANGE_TZ_NAME)
-
-
-def _iso_utc(ts_ns: int, timespec: str = "microseconds") -> str:
-    """Return epoch nanoseconds as an ISO 8601 UTC string.
-
-    Definition: The wall-clock time an epoch-nanosecond stamp names.
-    Formula:    s, r = divmod(ts_ns, 1e9); UTC datetime of s with
-                microsecond = r // NS_PER_US, formatted with timespec.
-    Domain:     Integer nanoseconds since 1970-01-01T00:00Z; sub-microsecond
-                digits are truncated, not rounded.
-    Returns:    For example "2026-10-01T01:00:00.000000Z".
-    """
-    seconds, remainder = divmod(ts_ns, NS_PER_S)
-    moment = datetime.fromtimestamp(seconds, tz=timezone.utc).replace(microsecond=remainder // NS_PER_US)
-    return moment.isoformat(timespec=timespec).replace("+00:00", "Z")
-
-
-def _event_name(frame: SseFrame) -> str:
-    if frame.event:
-        return frame.event
-    return _COMMENT_EVENT_NAME if frame.is_comment else _DEFAULT_EVENT_NAME
-
-
-@dataclass
-class _Outage:
-    """A run of failed connection attempts, ended by the next 200 connect or by the file's end."""
-
-    start_ns: int
-    first_error: object
-    attempts: int = 1
-    end_ns: int | None = None
-
-    def to_json(self) -> dict[str, object]:
-        return {
-            "disconnected_at": _iso_utc(self.start_ns),
-            "reconnected_at": _iso_utc(self.end_ns) if self.end_ns is not None else None,
-            "outage_s": (self.end_ns - self.start_ns) / NS_PER_S if self.end_ns is not None else None,
-            "attempts": self.attempts,
-            "first_error": self.first_error,
-        }
-
-
-class _FileStats:
-    """One SSE file's statistics, accumulated while its lines are read once."""
-
-    def __init__(self, path: Path, fields: EventFields) -> None:
-        self._path = path
-        self._fields = fields
-        self.stream: str | None = None
-        self.frames = 0
-        self.event_counts: Counter[str] = Counter()
-        self._per_second: Counter[int] = Counter()
-        self._prev_frame_ns: int | None = None
-        self._gaps: list[dict[str, object]] = []
-        self._prev_heartbeat_ns: int | None = None
-        self._heartbeat_intervals: list[float] = []
-        self._outages: list[_Outage] = []
-        self._outage: _Outage | None = None
-        self._latencies: array[float] = array("d")
-        self._unparsable = 0
-
-    def read(self) -> None:
-        for number, record in read_jsonl(self._path):
-            if self.stream is None and isinstance(record.get("stream"), str):
-                self.stream = str(record["stream"])
-            recv_ts_ns = _recv_ts_ns(record, self._path, number)
-            kind = record.get("kind")
-            if kind == "frame":
-                self._frame(recv_ts_ns, _frame_of(record, self._path, number))
-            elif kind == "connected":
-                self._prev_heartbeat_ns = None
-                if record.get("status") == httpx.codes.OK:
-                    self._end_outage(recv_ts_ns)
-            elif kind == "disconnected":
-                self._prev_heartbeat_ns = None
-                self._start_or_extend_outage(recv_ts_ns, record.get("error"))
-            elif kind == "stopped":
-                self._prev_heartbeat_ns = None
-                self._end_outage(None)
-        self._end_outage(None)
-
-    def _frame(self, recv_ts_ns: int, frame: SseFrame) -> None:
-        self.frames += 1
-        self.event_counts[_event_name(frame)] += 1
-        self._per_second[recv_ts_ns // NS_PER_S] += 1
-
-        if self._prev_frame_ns is not None:
-            gap_s = (recv_ts_ns - self._prev_frame_ns) / NS_PER_S
-            if gap_s > self._fields.gap_threshold_s:
-                self._gaps.append({"from": _iso_utc(self._prev_frame_ns), "to": _iso_utc(recv_ts_ns), "gap_s": gap_s})
-        self._prev_frame_ns = recv_ts_ns
-
-        if frame.event == self._fields.heartbeat_event:
-            if self._prev_heartbeat_ns is not None:
-                self._heartbeat_intervals.append((recv_ts_ns - self._prev_heartbeat_ns) / NS_PER_S)
-            self._prev_heartbeat_ns = recv_ts_ns
-
-        if self._fields.exchange_ts_pointers and frame.data is not None:
-            self._latency(recv_ts_ns, frame.data)
-
-    def _latency(self, recv_ts_ns: int, data: str) -> None:
-        try:
-            doc = json.loads(data)
-        except ValueError:
-            return
-        try:
-            exchange_ns = exchange_ts_ns(doc, self._fields)
-        except ValueError:
-            self._unparsable += 1
-            return
-        if exchange_ns is not None:
-            self._latencies.append((recv_ts_ns - exchange_ns) / NS_PER_S)
-
-    def _start_or_extend_outage(self, recv_ts_ns: int, error: object) -> None:
-        if self._outage is None:
-            self._outage = _Outage(start_ns=recv_ts_ns, first_error=error)
-        else:
-            self._outage.attempts += 1
-
-    def _end_outage(self, recv_ts_ns: int | None) -> None:
-        if self._outage is None:
-            return
-        self._outage.end_ns = recv_ts_ns
-        self._outages.append(self._outage)
-        self._outage = None
-
-    def to_json(self, client: str) -> dict[str, object]:
-        busiest = sorted(self._per_second.items(), key=lambda item: (-item[1], item[0]))[:PEAK_SECONDS]
-        return {
-            "client": client,
-            "stream": self.stream,
-            "frames": self.frames,
-            "event_counts": dict(sorted(self.event_counts.items())),
-            "peak_seconds": [
-                {"second": _iso_utc(second * NS_PER_S, "seconds"), "frames": count} for second, count in busiest
-            ],
-            "heartbeat_interval_s": interval_summary(self._heartbeat_intervals),
-            "gaps": self._gaps,
-            "outages": [outage.to_json() for outage in self._outages],
-            "latency_s": self._latency_json(),
-        }
-
-    def _latency_json(self) -> dict[str, object] | None:
-        if not self._fields.exchange_ts_pointers:
-            return None
-        return latency_summary(self._latencies, self._unparsable)
-
-
-def stream_stats(paths: Mapping[str, Sequence[Path]], fields: EventFields) -> dict[str, object]:
-    """Return the stats.json document for a stream run's SSE files.
-
-    Definition: Per-client event counts, and per-file frame rate peaks,
-                heartbeat spacing, silences, outages and receive latency.
-    Formula:    event_counts[name] = frames with that event name;
-                peak_seconds = the PEAK_SECONDS one-second buckets
-                floor(recv_ts_ns / 1e9) with the most frames, ties broken
-                by the earlier second; a gap is recv_ts[i] - recv_ts[i-1]
-                > gap_threshold_s between consecutive frames of a file; a
-                heartbeat interval is the same difference between
-                consecutive heartbeat_event frames on one connection; an
-                outage runs from a disconnect to the next 200 connect;
-                latency as in latency_summary.
-    Domain:     paths maps a client to all of its files; each file is one
-                recorder, so intervals and gaps never span two files.
-                Client event_counts sum that client's files, so an event
-                recorded on both the combined and the order_event stream
-                counts twice there; per-file counts are exact.
-                recv_ts is the recorder's wall clock, which trails socket
-                arrival whenever the recorder falls behind.
-    Returns:    {"gap_threshold_s", "heartbeat_event", "clients": {client:
-                {"event_counts"}}, "files": {file name: {"client",
-                "stream", "frames", "event_counts", "peak_seconds",
-                "heartbeat_interval_s", "gaps", "outages", "latency_s"}}},
-                times as ISO 8601 UTC and durations in seconds.
-    """
-    clients: dict[str, dict[str, object]] = {}
-    files: dict[str, dict[str, object]] = {}
-    for client in sorted(paths):
-        client_counts: Counter[str] = Counter()
-        for path in paths[client]:
-            stats = _FileStats(path, fields)
-            stats.read()
-            client_counts.update(stats.event_counts)
-            files[path.name] = stats.to_json(client)
-        clients[client] = {"event_counts": dict(sorted(client_counts.items()))}
-    return {
-        "gap_threshold_s": fields.gap_threshold_s,
-        "heartbeat_event": fields.heartbeat_event,
-        "clients": clients,
-        "files": files,
-    }
-
-
-def resolve_run_dir(results_root: Path, run_id: str) -> Path:
-    """Return results_root/run_id, raising AnalysisError unless it is an existing run directory."""
-    run_dir = results_root / run_id
-    if not run_dir.is_dir():
-        raise AnalysisError(f"run {run_id!r} not found under {results_root}")
-    return run_dir
-
-
 def last_trades_payload(rest_log: Path) -> object:
     """Return the parsed body of the last trades response recorded in rest_log.
 
@@ -1039,10 +581,6 @@ def _query_trades(cfg: P1Config, run_dir: Path, transport: httpx.BaseTransport |
         raise AnalysisError(f"{_TRADES_OP} response is not JSON: {exc}") from exc
 
 
-def _write_json(path: Path, document: Mapping[str, object]) -> None:
-    path.write_text(json.dumps(document, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-
-
 def run_reconcile(
     cfg: P1Config,
     sse_run: str,
@@ -1083,7 +621,7 @@ def run_reconcile(
         "trading_day": day.isoformat(),
         **report.to_json(),
     }
-    _write_json(run_dir / "reconcile.json", document)
+    write_json(run_dir / "reconcile.json", document)
     logger.info(
         "reconcile: %d only in REST, %d only in SSE, %d mismatched, missing orders %s, missing reports %s",
         len(report.only_in_rest),
@@ -1093,17 +631,3 @@ def run_reconcile(
         ", ".join(f"{client}={len(ids)}" for client, ids in report.missing_events_by_client.items()),
     )
     return EXIT_OK if report.clean else EXIT_CHECK_FAILED
-
-
-def run_stats(cfg: P1Config, sse_run: str, run_dir: Path) -> int:
-    """Write run_dir/stats.json for a stream run and return 0, or log the failure and return 1."""
-    try:
-        sse_files = discover_sse_files(resolve_run_dir(cfg.results_root, sse_run))
-        document = {"sse_run": sse_run, **stream_stats(sse_files, cfg.events)}
-    except (AnalysisError, OSError) as exc:
-        logger.error("stats failed: %s", exc)
-        return EXIT_ANALYSIS_ERROR
-    _write_json(run_dir / "stats.json", document)
-    file_count = sum(len(client_paths) for client_paths in sse_files.values())
-    logger.info("stats: %d file(s) from %d client(s)", file_count, len(sse_files))
-    return EXIT_OK

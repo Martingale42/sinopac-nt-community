@@ -21,11 +21,12 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import NoReturn
 
-from p1rec.analysis import run_reconcile, run_stats
 from p1rec.config import ConfigError, P1Config, load_config, read_secrets
 from p1rec.interlock import EXIT_INTERLOCK_ABORT, InterlockError, self_test
+from p1rec.reconcile import run_reconcile
 from p1rec.redact import redaction_values, setup_logging
 from p1rec.rundir import new_run
+from p1rec.stats import run_stats
 
 Handler = Callable[[argparse.Namespace, P1Config, Path], int]
 ArgumentHook = Callable[[argparse.ArgumentParser], None]

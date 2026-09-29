@@ -1,4 +1,4 @@
-"""Tests for p1rec.analysis: order reconciliation and SSE stream statistics."""
+"""Tests for p1rec.records, p1rec.reconcile and p1rec.stats: order reconciliation and SSE stream statistics."""
 
 from __future__ import annotations
 
@@ -14,23 +14,22 @@ import httpx
 import pytest
 from helpers import MINIMAL_CONFIG_LINES, SECRET_ENV_VARS, WriteConfig
 
-from p1rec import analysis
-from p1rec.analysis import (
-    NS_PER_S,
-    AnalysisError,
+from p1rec import reconcile as reconciliation
+from p1rec import stats
+from p1rec.cli import main
+from p1rec.config import ConfigError, EventFields, load_config
+from p1rec.interlock import InterlockError
+from p1rec.reconcile import (
     Mismatch,
     OrderView,
     derive_status,
     orders_from_rest,
     orders_from_sse,
-    percentile_nearest_rank,
-    read_jsonl,
     reconcile,
     run_reconcile,
 )
-from p1rec.cli import main
-from p1rec.config import ConfigError, EventFields, load_config
-from p1rec.interlock import InterlockError
+from p1rec.records import NS_PER_S, AnalysisError, read_jsonl
+from p1rec.stats import percentile_nearest_rank
 
 T0_NS = int(datetime(2026, 10, 1, 1, 0, tzinfo=timezone.utc).timestamp()) * NS_PER_S
 
@@ -435,7 +434,7 @@ def test_rest_snapshot_spanning_two_days_needs_trading_day(fields: EventFields) 
     trades = [_trade("t1", "Submitted", 0), _trade("t0", "Filled", 2, order_ts=T0_S - SECONDS_PER_DAY)]
 
     with pytest.raises(AnalysisError, match=r"2026-09-30, 2026-10-01"):
-        analysis.trading_day_of(trades, fields)
+        reconciliation.trading_day_of(trades, fields)
 
 
 @pytest.mark.parametrize("value", ["2026-1-01", "20261001", "2026-02-30"])
@@ -547,7 +546,7 @@ def test_duplicate_across_streams_keeps_earliest_arrival(tmp_path: Path, fields:
     data_stream = [_frame("a", "data", T0_NS + NS_PER_S, "order_event", update)]
     paths = [_write_sse(tmp_path, "a", "order_event", order_stream), _write_sse(tmp_path, "a", "data", data_stream)]
 
-    reports = analysis._reports(paths, fields)
+    reports = reconciliation._reports(paths, fields)
 
     assert [(report.identity, report.recv_ts_ns) for report in reports] == [
         ("e1", T0_NS),
@@ -562,7 +561,7 @@ def test_repeated_event_id_with_other_content_warns(
     events = [_order("t1", event_id="e1", quantity=2), _order("t1", event_id="e1", quantity=3)]
     path = _write_sse(tmp_path, "a", "order_event", _order_frames("a", events))
 
-    with caplog.at_level(logging.WARNING, logger="p1rec.analysis"):
+    with caplog.at_level(logging.WARNING, logger="p1rec.reconcile"):
         views = orders_from_sse({"a": [path]}, fields)
 
     assert "event_id e1 repeats" in caplog.text
@@ -576,7 +575,7 @@ def test_update_price_keeps_status_and_size(
     events = [_order("t1", event_id="e1", quantity=2), _order("t1", "UpdatePrice", event_id="e2", quantity=2)]
     path = _write_sse(tmp_path, "a", "order_event", _order_frames("a", events))
 
-    with caplog.at_level(logging.WARNING, logger="p1rec.analysis"):
+    with caplog.at_level(logging.WARNING, logger="p1rec.reconcile"):
         views = orders_from_sse({"a": [path]}, fields)
 
     assert views["a"].orders["t1"] == OrderView(key="t1", status="Submitted", filled_qty=Decimal(0))
@@ -619,7 +618,7 @@ def test_truncated_last_line_skipped_with_warning(tmp_path: Path, caplog: pytest
     with path.open("ab") as fh:
         fh.write(b'{"n": 3, "raw": "ev' + b"\0" * 8)
 
-    with caplog.at_level(logging.WARNING, logger="p1rec.analysis"):
+    with caplog.at_level(logging.WARNING, logger="p1rec.records"):
         records = [record for _, record in read_jsonl(path)]
 
     assert records == [{"n": 1}, {"n": 2}]
@@ -645,7 +644,7 @@ def test_rest_run_uses_last_trades_response(tmp_path: Path, fields: EventFields)
         ],
     )
 
-    payload = analysis.last_trades_payload(rest_log)
+    payload = reconciliation.last_trades_payload(rest_log)
 
     assert set(orders_from_rest(payload, fields)) == {"new"}
 
@@ -673,7 +672,7 @@ def test_last_trades_payload_rejects_non_2xx(tmp_path: Path) -> None:
     )
 
     with pytest.raises(AnalysisError, match=r"HTTP 503"):
-        analysis.last_trades_payload(rest_log)
+        reconciliation.last_trades_payload(rest_log)
 
 
 def test_last_trades_payload_decodes_base64_body(tmp_path: Path, fields: EventFields) -> None:
@@ -682,7 +681,7 @@ def test_last_trades_payload_decodes_base64_body(tmp_path: Path, fields: EventFi
     record["resp_body_b64"] = base64.b64encode(json.dumps([_trade("t1", "Submitted", 0)]).encode()).decode()
     rest_log = _write_jsonl(tmp_path / "rest.jsonl", [record])
 
-    payload = analysis.last_trades_payload(rest_log)
+    payload = reconciliation.last_trades_payload(rest_log)
 
     assert set(orders_from_rest(payload, fields)) == {"t1"}
 
@@ -721,7 +720,7 @@ def test_live_reconcile_aborts_before_trades_when_not_simulation(tmp_path: Path,
 
 def _file_stats(path: Path, fields: EventFields) -> dict[str, object]:
     """Return the stats of the single file path, recorded by client a."""
-    files = analysis.stream_stats({"a": [path]}, fields)["files"]
+    files = stats.stream_stats({"a": [path]}, fields)["files"]
     assert isinstance(files, dict)
     file_stats = files[path.name]
     assert isinstance(file_stats, dict)
@@ -812,8 +811,8 @@ def test_latency_from_taipei_date_and_time(tmp_path: Path, fields: EventFields) 
 def test_exchange_ts_numeric_epoch_seconds(fields: EventFields) -> None:
     numeric = dataclasses.replace(fields, exchange_ts_pointers=("/status/exchange_ts",), exchange_ts_format=None)
 
-    assert analysis.exchange_ts_ns({"status": {"exchange_ts": 1790000000.25}}, numeric) == 1790000000250000000
-    assert analysis.exchange_ts_ns({"status": {}}, numeric) is None
+    assert stats.exchange_ts_ns({"status": {"exchange_ts": 1790000000.25}}, numeric) == 1790000000250000000
+    assert stats.exchange_ts_ns({"status": {}}, numeric) is None
 
 
 def test_percentile_nearest_rank() -> None:
