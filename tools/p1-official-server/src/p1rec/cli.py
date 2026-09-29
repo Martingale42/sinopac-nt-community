@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import NoReturn
 
 from p1rec.config import ConfigError, P1Config, load_config, read_secrets
-from p1rec.interlock import InterlockError, self_test
+from p1rec.interlock import EXIT_INTERLOCK_ABORT, InterlockError, self_test
 from p1rec.redact import redaction_values, setup_logging
 from p1rec.rundir import new_run
 
@@ -72,8 +72,8 @@ def _not_implemented(args: argparse.Namespace, _cfg: P1Config, _run_dir: Path) -
     return 1
 
 
-def _self_test_interlock(_args: argparse.Namespace, _cfg: P1Config, _run_dir: Path) -> int:
-    return self_test()
+def _self_test_interlock(_args: argparse.Namespace, cfg: P1Config, _run_dir: Path) -> int:
+    return self_test(cfg.interlock)
 
 
 @dataclass(frozen=True)
@@ -145,11 +145,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         setup_logging(run_dir, redaction_values(secrets), "INFO")
         logging_ready = True
         return spec.handler(args, cfg, run_dir)
-    except InterlockError as exc:
+    except InterlockError:
         # assert_simulation already logged the reason at ERROR before
-        # raising, so this only records which subcommand aborted.
-        logging.getLogger("p1rec.cli").error("%s: aborted by interlock: %s", args.command, exc)
-        return 3
+        # raising; logging again here would print the same abort twice.
+        return EXIT_INTERLOCK_ABORT
     except Exception as exc:
         # A future subcommand-specific error will get its own except
         # clause here ahead of this catch-all, so this stays the one place

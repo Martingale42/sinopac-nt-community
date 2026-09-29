@@ -45,7 +45,28 @@ def test_out_of_range_array_index_rejected() -> None:
         resolve_pointer([1, 2], "/5")
 
 
+def test_descending_into_scalar_raises() -> None:
+    with pytest.raises(JsonPointerError):
+        resolve_pointer({"a": 5}, "/a/b")
+
+
+def test_tilde_escape_decoding_order() -> None:
+    # "~01" must decode to "~1" (a literal tilde then "1"), not "/" (a
+    # path separator). That only holds if "~1" is unescaped before "~0",
+    # per RFC 6901's specified order: the wrong order would turn "~01"
+    # into "/" and this pointer would resolve into a completely
+    # different, nonexistent path instead of the "a~1" key.
+    doc = {"a~1": "literal-tilde-one"}
+    assert resolve_pointer(doc, "/a~01") == "literal-tilde-one"
+
+
 def test_is_valid_pointer_syntax() -> None:
     assert is_valid_pointer_syntax("")
     assert is_valid_pointer_syntax("/simulation")
+    assert is_valid_pointer_syntax("/a~0b/c~1d")
     assert not is_valid_pointer_syntax("simulation")
+
+
+def test_is_valid_pointer_syntax_rejects_bad_escapes() -> None:
+    assert not is_valid_pointer_syntax("/a~2b")
+    assert not is_valid_pointer_syntax("/a~")

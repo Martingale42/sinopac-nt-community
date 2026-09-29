@@ -222,6 +222,23 @@ def _get_fs_path(data: Mapping[str, Any], dotted_key: str, base_dir: Path) -> Pa
     return (base_dir / raw).resolve()
 
 
+def _get_pointer(data: Mapping[str, Any], dotted_key: str, *, allow_root: bool = False) -> str:
+    """Read dotted_key as a string and validate it is a syntactically valid JSON pointer.
+
+    Rejects the empty (whole-document) pointer unless allow_root is set:
+    that pointer resolves to the whole response body, so any endpoint
+    whose body happened to be the bare JSON value true would satisfy a
+    caller checking "is this value true", regardless of what the body
+    actually means.
+    """
+    pointer = _get_str(data, dotted_key)
+    if not is_valid_pointer_syntax(pointer):
+        raise ConfigError(f"config key {dotted_key} is not a valid JSON pointer: {pointer!r}")
+    if pointer == "" and not allow_root:
+        raise ConfigError(f"config key {dotted_key} must not be the empty pointer")
+    return pointer
+
+
 def _get_secret_env(data: Mapping[str, Any]) -> dict[str, str]:
     result: dict[str, str] = {}
     for role in _SECRET_ROLES:
@@ -266,18 +283,21 @@ def _parse_interlock(data: Mapping[str, Any], config_dir: Path) -> InterlockConf
         endpoint_op = _get_str(data, "interlock.endpoint_op")
     else:
         endpoint_op = _DEFAULT_INTERLOCK_ENDPOINT_OP
-    pointer = _get_str(data, "interlock.pointer")
-    if not is_valid_pointer_syntax(pointer):
-        raise ConfigError(f"config key interlock.pointer is not a valid JSON pointer: {pointer!r}")
-    if pointer == "":
-        raise ConfigError(
-            "config key interlock.pointer must not be the empty pointer "
-            "(it would compare the whole document, not one field)"
-        )
+    pointer = _get_pointer(data, "interlock.pointer")
 
     known_endpoints = _lookup(data, "endpoints")
     if not isinstance(known_endpoints, Mapping) or endpoint_op not in known_endpoints:
         raise ConfigError(f"config key interlock.endpoint_op names unknown endpoint: {endpoint_op!r}")
+
+    # A POST that reports simulation mode as a side effect would still be
+    # a mutation the interlock must not itself trigger, so only a GET may
+    # back the check.
+    endpoint_table = known_endpoints[endpoint_op]
+    endpoint_method = endpoint_table.get("method") if isinstance(endpoint_table, Mapping) else None
+    if endpoint_method != "GET":
+        raise ConfigError(
+            f"config key interlock.endpoint_op must name a GET endpoint, but {endpoint_op!r} is {endpoint_method!r}"
+        )
 
     return InterlockConfig(endpoint_op=endpoint_op, pointer=pointer)
 

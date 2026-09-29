@@ -187,6 +187,18 @@ def test_interlock_unknown_endpoint_op_rejected(write_config: WriteConfig) -> No
         load_config(config_path)
 
 
+def test_interlock_endpoint_op_must_be_get(write_config: WriteConfig) -> None:
+    # place_stock exists in [endpoints] but is a POST; the interlock must
+    # never itself be backed by a mutating endpoint.
+    lines = [
+        'endpoint_op = "place_stock"' if line == 'endpoint_op = "mode"' else line for line in MINIMAL_CONFIG_LINES
+    ]
+    config_path = write_config(lines)
+
+    with pytest.raises(ConfigError, match=r"interlock\.endpoint_op"):
+        load_config(config_path)
+
+
 def test_interlock_pointer_must_start_with_slash(write_config: WriteConfig) -> None:
     lines = [
         'pointer = "simulation"' if line == 'pointer = "/simulation"' else line for line in MINIMAL_CONFIG_LINES
@@ -198,9 +210,9 @@ def test_interlock_pointer_must_start_with_slash(write_config: WriteConfig) -> N
 
 
 def test_interlock_pointer_rejects_empty_string(write_config: WriteConfig) -> None:
-    # The empty pointer resolves to the whole response document, which
-    # would never compare equal to JSON true, so it is rejected up front
-    # rather than left to fail confusingly at check time.
+    # The empty pointer resolves to the whole response body, so any
+    # endpoint whose body happened to be the bare JSON value true would
+    # pass, regardless of what that body actually means.
     lines = ['pointer = ""' if line == 'pointer = "/simulation"' else line for line in MINIMAL_CONFIG_LINES]
     config_path = write_config(lines)
 

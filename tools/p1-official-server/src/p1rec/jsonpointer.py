@@ -1,9 +1,9 @@
 """Resolve RFC 6901 JSON pointers against an already-parsed JSON document.
 
-Several p1rec subcommands read one value out of a JSON response by pointer
-(the simulation-mode interlock today; contract, funds and event field
-pointers reuse this module later), so the walk lives in one place instead
-of being reimplemented per caller.
+Several p1rec subcommands read one value out of a JSON response by
+pointer: the simulation-mode interlock, and contract, funds and event
+field pointers, so the walk lives in one place instead of being
+reimplemented per caller.
 """
 
 from __future__ import annotations
@@ -17,19 +17,25 @@ from collections.abc import Mapping, Sequence
 # reaches int() at all.
 _ARRAY_INDEX_RE = re.compile(r"^(0|[1-9][0-9]*)$")
 
+# RFC 6901 pointer shape: zero or more "/"-prefixed segments, each made of
+# any character except "~" and "/", or a "~" escape ("~0" or "~1"). This
+# also rejects a malformed escape such as "~2" or a trailing "~", which a
+# bare startswith("/") check would let through.
+_POINTER_SYNTAX_RE = re.compile(r"^(/([^~/]|~[01])*)*$")
+
 
 class JsonPointerError(LookupError):
     """Raised when a JSON pointer does not resolve against a document."""
 
 
 def is_valid_pointer_syntax(pointer: str) -> bool:
-    """Return whether pointer has the shape of a JSON pointer: "" or starting with "/".
+    """Return whether pointer has the shape of a JSON pointer per RFC 6901.
 
     This checks shape only, not whether pointer resolves against any
     particular document; callers that need a stronger guarantee, such as
     rejecting the empty (whole-document) pointer, apply that themselves.
     """
-    return pointer == "" or pointer.startswith("/")
+    return _POINTER_SYNTAX_RE.fullmatch(pointer) is not None
 
 
 def resolve_pointer(doc: object, pointer: str) -> object:
