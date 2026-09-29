@@ -10,6 +10,7 @@ and validation to its own function without touching load_config itself.
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -97,6 +98,10 @@ _SECRET_ROLES = ("api_key", "sec_key", "ca_passwd", "person_id", "egress_ip")
 # [secrets] these same names are role -> env-var-name mappings instead, not
 # secret values, which is why that table is exempt in _reject_inline_secrets.
 _INLINE_SECRET_KEYS = frozenset({"api_key", "sec_key", "ca_passwd"})
+
+# Shape every [secrets] value must have, since it names an environment
+# variable rather than carrying a secret itself.
+_ENV_VAR_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 
 
 def load_config(path: Path) -> P1Config:
@@ -197,7 +202,15 @@ def _get_fs_path(data: Mapping[str, Any], dotted_key: str, base_dir: Path) -> Pa
 
 
 def _get_secret_env(data: Mapping[str, Any]) -> dict[str, str]:
-    return {role: _get_str(data, f"secrets.{role}") for role in _SECRET_ROLES}
+    result: dict[str, str] = {}
+    for role in _SECRET_ROLES:
+        dotted_key = f"secrets.{role}"
+        value = _get_str(data, dotted_key)
+        if not _ENV_VAR_NAME_RE.fullmatch(value):
+            # Never echo value: it may itself be a stray secret typed in by mistake
+            raise ConfigError(f"config key {dotted_key} must be an environment variable name")
+        result[role] = value
+    return result
 
 
 def _get_endpoints(data: Mapping[str, Any]) -> dict[str, Endpoint]:

@@ -124,6 +124,20 @@ def test_secrets_table_itself_is_not_rejected(tmp_path: Path) -> None:
     load_config(config_path)  # must not raise
 
 
+def test_secret_env_value_must_look_like_env_var_name(tmp_path: Path) -> None:
+    bogus_value = "sj-not-an-env-var"
+    lines = [f'api_key = "{bogus_value}"' if line == 'api_key = "SJ_API_KEY"' else line for line in _VALID_LINES]
+    config_path = _write_config(tmp_path, lines)
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_config(config_path)
+
+    message = str(exc_info.value)
+    assert "secrets.api_key" in message
+    # The bogus value may itself be a stray secret, so it must never be echoed
+    assert bogus_value not in message
+
+
 def test_missing_secret_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     config_path = _write_config(tmp_path, _VALID_LINES)
     cfg = load_config(config_path)

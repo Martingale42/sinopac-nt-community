@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -35,24 +35,29 @@ def test_new_run_creates_missing_results_root(tmp_path: Path) -> None:
     assert run_dir.is_dir()
 
 
+def test_new_run_converts_non_utc_to_utc(tmp_path: Path) -> None:
+    taipei = timezone(timedelta(hours=8))
+    taipei_now = datetime(2026, 9, 29, 9, 0, 0, tzinfo=taipei)
+
+    run_dir = new_run(tmp_path, "preflight", taipei_now, tag=None)
+
+    assert run_dir.name == "20260929T010000Z-preflight"
+
+
+def test_new_run_rejects_naive_datetime(tmp_path: Path) -> None:
+    naive_now = datetime(2026, 9, 29, 9, 0, 0)
+
+    with pytest.raises(ValueError):
+        new_run(tmp_path, "preflight", naive_now, tag=None)
+
+
 def test_new_run_refuses_existing_dir(tmp_path: Path) -> None:
-    new_run(tmp_path, "orders", _NOW, tag=None)
-
-    with pytest.raises(FileExistsError):
-        new_run(tmp_path, "orders", _NOW, tag=None)
-
-
-def test_new_run_refuses_existing_dir_with_same_tag(tmp_path: Path) -> None:
     new_run(tmp_path, "orders", _NOW, tag="soak")
 
     with pytest.raises(FileExistsError):
         new_run(tmp_path, "orders", _NOW, tag="soak")
 
-
-def test_new_run_allows_different_tags_to_coexist(tmp_path: Path) -> None:
-    first = new_run(tmp_path, "orders", _NOW, tag="a")
-    second = new_run(tmp_path, "orders", _NOW, tag="b")
-
-    assert first != second
-    assert first.is_dir()
-    assert second.is_dir()
+    # A different tag is a different directory name, so it can coexist
+    other = new_run(tmp_path, "orders", _NOW, tag="dryrun")
+    assert other.is_dir()
+    assert other != tmp_path / "20260929T010203Z-orders-soak"

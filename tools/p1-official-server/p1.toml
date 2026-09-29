@@ -1,5 +1,6 @@
 # p1rec live configuration, holding no secrets, only the environment
-# variable names that hold them, mapped in [secrets] and read by redact.py.
+# variable names that hold them, mapped in [secrets] and read by
+# config.read_secrets.
 #
 # Relative paths (results_root, fixtures_root) resolve against the
 # directory that holds this file.

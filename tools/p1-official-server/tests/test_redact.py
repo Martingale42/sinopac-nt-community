@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from p1rec.redact import RedactingFilter, setup_logging
+from p1rec.redact import API_KEY_PREFIX_LEN, RedactingFormatter, redaction_values, setup_logging
 
 
 def _make_record(msg: str, args: tuple[object, ...] = ()) -> logging.LogRecord:
@@ -30,31 +30,51 @@ def _reset_p1rec_logger() -> None:
     logger.filters.clear()
 
 
-def test_redacting_filter_replaces_longest_match_first() -> None:
+def test_redacting_formatter_replaces_longest_match_first() -> None:
     full = "abcdefghij1234"
     prefix = full[:10]
     record = _make_record("key=%s prefix=%s", (full, prefix))
 
-    result = RedactingFilter([full, prefix]).filter(record)
+    result = RedactingFormatter([full, prefix], "%(message)s").format(record)
 
-    assert result is True
-    assert record.getMessage() == "key=*** prefix=***"
+    assert result == "key=*** prefix=***"
 
 
-def test_redacting_filter_ignores_empty_secret() -> None:
+def test_redacting_formatter_ignores_empty_secret() -> None:
     record = _make_record("hello world")
 
-    RedactingFilter(["", "world"]).filter(record)
+    result = RedactingFormatter(["", "world"], "%(message)s").format(record)
 
-    assert record.getMessage() == "hello ***"
+    assert result == "hello ***"
+
+
+def test_redaction_values_includes_api_key_prefix() -> None:
+    secrets = {
+        "api_key": "abcdefghijklmnopqrstuvwx",
+        "sec_key": "othersecretvalue",
+        "ca_passwd": "",  # empty values must never be redaction targets
+    }
+
+    values = redaction_values(secrets)
+
+    assert secrets["api_key"] in values
+    assert secrets["api_key"][:API_KEY_PREFIX_LEN] in values
+    assert secrets["sec_key"] in values
+    assert "" not in values
+
+
+def test_redaction_values_without_api_key() -> None:
+    # self-test-interlock runs with no secrets at all
+    assert redaction_values({}) == []
 
 
 def test_log_redacts_secret_and_prefix(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    full_key = "abcdefghijklmnopqrstuvwx"
-    prefix = full_key[:10]
+    secrets = {"api_key": "abcdefghijklmnopqrstuvwx", "sec_key": "othersecretvalue"}
+    full_key = secrets["api_key"]
+    prefix = full_key[:API_KEY_PREFIX_LEN]
 
     try:
-        setup_logging(tmp_path, secrets=[full_key, prefix], level="INFO")
+        setup_logging(tmp_path, secrets=redaction_values(secrets), level="INFO")
         logger = logging.getLogger("p1rec.orders")
         logger.info("clientname=PYAPI/%s/node1 full=%s", prefix, full_key)
 
@@ -68,6 +88,34 @@ def test_log_redacts_secret_and_prefix(tmp_path: Path, capsys: pytest.CaptureFix
             assert full_key not in output
             assert prefix not in output
             assert "***" in output
+    finally:
+        _reset_p1rec_logger()
+
+
+def test_log_exception_redacts_secret_in_traceback(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    full_key = "abcdefghijklmnopqrstuvwx"
+    prefix = full_key[:API_KEY_PREFIX_LEN]
+
+    try:
+        setup_logging(tmp_path, secrets=[full_key, prefix], level="INFO")
+        logger = logging.getLogger("p1rec.orders")
+        try:
+            raise ValueError(f"rejected api_key={full_key} prefix={prefix}")
+        except ValueError:
+            logger.exception("order placement failed")
+
+        for handler in logging.getLogger("p1rec").handlers:
+            handler.flush()
+
+        log_text = (tmp_path / "recorder.log").read_text(encoding="utf-8")
+        stderr_text = capsys.readouterr().err
+
+        for output in (log_text, stderr_text):
+            assert full_key not in output
+            assert prefix not in output
+            assert "***" in output
+            # The traceback itself must survive, just with the secret gone
+            assert "ValueError" in output
     finally:
         _reset_p1rec_logger()
 
