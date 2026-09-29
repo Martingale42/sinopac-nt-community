@@ -5,11 +5,13 @@ from __future__ import annotations
 import logging
 import sys
 import threading
+from collections.abc import Iterable
 from pathlib import Path
 
 import httpx
 import pytest
 
+from p1rec import redact
 from p1rec.redact import (
     API_KEY_PREFIX_LEN,
     RedactingFormatter,
@@ -319,17 +321,27 @@ def test_added_value_keeps_longest_first_order() -> None:
     assert formatter.format(_make_record("key=%s", ("abcdefgh",))) == "key=***"
 
 
-def test_add_redaction_values_is_thread_safe() -> None:
+def test_concurrent_add_secrets_keeps_every_value(monkeypatch: pytest.MonkeyPatch) -> None:
     formatter = RedactingFormatter([], "%(message)s")
-    values = [f"value-{index:04d}" for index in range(400)]
+    original = redact._longest_first
+    inside: list[None] = []
+    second_inside = threading.Event()
 
-    threads = [
-        threading.Thread(target=formatter.add_secrets, args=(values[start::4],)) for start in range(4)
-    ]
+    def _slow_longest_first(values: Iterable[str]) -> tuple[str, ...]:
+        # Hold the first caller until a second one arrives (or a short
+        # timeout passes), so without the lock both would read the same
+        # old tuple and the later write would drop the earlier value.
+        inside.append(None)
+        if len(inside) >= 2:
+            second_inside.set()
+        second_inside.wait(timeout=0.3)
+        return original(values)
+
+    monkeypatch.setattr(redact, "_longest_first", _slow_longest_first)
+    threads = [threading.Thread(target=formatter.add_secrets, args=([value],)) for value in ("alpha-1", "beta-22")]
     for thread in threads:
         thread.start()
     for thread in threads:
         thread.join()
 
-    rendered = formatter.format(_make_record(" ".join(values)))
-    assert rendered == " ".join(["***"] * len(values))
+    assert formatter.format(_make_record("alpha-1 beta-22")) == "*** ***"
