@@ -4,9 +4,12 @@ run_preflight queries the accounts, the stock balance, the futures
 margin, usage, CA status and every contract the scenarios trade, all
 through one CapturingClient so each raw response lands in rest.jsonl as
 fixture material. It then checks that each account can fund the largest
-single position the scenarios open. A failed query is logged and the
-remaining queries still run, so one run records as much as it can;
-preflight.json is written whatever the outcome.
+single position the scenarios open. Once simulation mode is confirmed, a
+failed query, including one that never gets a response, is logged at
+ERROR and the remaining queries still run, so one run records as much as
+it can; preflight.json is written whatever the outcome. Account
+identifiers from the live accounts response are added to log redaction
+as soon as they are known.
 
 fetch_limits, fetch_accounts, account_for_market, account_request and
 fetch_available_twd are also what the order runner uses, so an order is
@@ -24,11 +27,12 @@ from pathlib import Path
 
 import httpx
 
-from p1rec.capture import CapturedResponse, CapturingClient
+from p1rec.capture import CapturedResponse, CapturingClient, describe_exception
 from p1rec.config import ConfigError, P1Config
 from p1rec.interlock import assert_simulation
 from p1rec.jsonpointer import JsonPointerError, resolve_pointer
 from p1rec.prices import ContractLimits, FundsRequirement, required_funds
+from p1rec.redact import add_redaction_values
 from p1rec.scenarios import Case, Market, load_scenarios
 
 logger = logging.getLogger(__name__)
@@ -45,6 +49,9 @@ ACCOUNT_TYPE_FOR_MARKET: Mapping[Market, str] = {Market.STOCK: "S", Market.ODD: 
 # AccountRequest's fields (openapi.json), copied from the live account
 # object so no account identifier ever has to live in p1.toml.
 _ACCOUNT_REQUEST_KEYS = ("account_type", "broker_id", "account_id", "person_id")
+
+# Account fields that identify the holder (openapi.json Account)
+_ACCOUNT_IDENTIFIER_KEYS = ("account_id", "person_id", "username")
 
 # UsageOut.connections (openapi.json)
 _USAGE_CONNECTIONS_POINTER = "/connections"
@@ -203,33 +210,43 @@ class _Report:
     signed: dict[str, bool | None] = field(default_factory=dict)  # Account type -> signed
     limits: dict[str, ContractLimits] = field(default_factory=dict)
 
+    # Set when a query got no response, which fails preflight even if
+    # every funds value it needed arrived.
+    unanswered_query: bool = False
+
 
 def _inventory(client: CapturingClient, cfg: P1Config, cases: Sequence[Case], report: _Report) -> bool:
     """Run every preflight query, fill report, and return whether funds suffice."""
-    accounts = _attempt(lambda: fetch_accounts(client, cfg))
+    accounts = _attempt(report, lambda: fetch_accounts(client, cfg))
     stock_account = futures_account = None
     if accounts is not None:
+        add_redaction_values(_account_identifiers(accounts))
         report.signed = _signed_by_type(accounts)
         _warn_unsigned(report.signed, cases)
-        stock_account = _attempt(lambda: account_for_market(accounts, Market.STOCK))
-        futures_account = _attempt(lambda: account_for_market(accounts, Market.FUTURES))
+        stock_account = _attempt(report, lambda: account_for_market(accounts, Market.STOCK))
+        futures_account = _attempt(report, lambda: account_for_market(accounts, Market.FUTURES))
 
     if stock_account is not None:
-        report.available_stock_twd = _attempt(lambda: fetch_available_twd(client, cfg, Market.STOCK, stock_account))
+        report.available_stock_twd = _attempt(
+            report, lambda: fetch_available_twd(client, cfg, Market.STOCK, stock_account)
+        )
     if futures_account is not None:
         report.available_futures_margin_twd = _attempt(
-            lambda: fetch_available_twd(client, cfg, Market.FUTURES, futures_account)
+            report, lambda: fetch_available_twd(client, cfg, Market.FUTURES, futures_account)
         )
 
-    report.connections = _fetch_connections(client, cfg)
-    _record_ca_status(client, cfg, accounts or [])
+    report.connections = _attempt(report, lambda: _fetch_connections(client, cfg))
+    _attempt(report, lambda: _record_ca_status(client, cfg, accounts or []))
 
-    limits = _attempt(lambda: fetch_limits(client, cfg, cases))
+    limits = _attempt(report, lambda: fetch_limits(client, cfg, cases))
     if limits is not None:
         report.limits = limits
-        report.required = _attempt(lambda: required_funds(cases, limits, cfg.funds.futures_margin_twd))
+        report.required = _attempt(
+            report,
+            lambda: required_funds(cases, limits, cfg.funds.futures_margin_twd, etf_codes=cfg.contracts.etf_codes),
+        )
 
-    funds_ok = _funds_suffice(report)
+    funds_ok = _funds_suffice(report) and not report.unanswered_query
     logger.info(
         "preflight: stock required %s TWD, available %s TWD; futures margin required %s TWD, "
         "available %s TWD; connections %s; funds_ok %s",
@@ -243,13 +260,21 @@ def _inventory(client: CapturingClient, cfg: P1Config, cases: Sequence[Case], re
     return funds_ok
 
 
-def _attempt[T](query: Callable[[], T]) -> T | None:
-    """Run query, logging a PreflightError or ConfigError at ERROR and returning None."""
+def _attempt[T](report: _Report, query: Callable[[], T]) -> T | None:
+    """Run query, returning None after logging a failed check or an unanswered request at ERROR.
+
+    A request that got no response, such as a refused connection or a
+    timeout, also marks report so preflight fails even if the value it
+    was after is not a funds figure.
+    """
     try:
         return query()
     except (PreflightError, ConfigError) as exc:
         logger.error("preflight check failed: %s", exc)
-        return None
+    except httpx.RequestError as exc:
+        logger.error("preflight query got no response: %s", describe_exception(exc))
+        report.unanswered_query = True
+    return None
 
 
 def _funds_suffice(report: _Report) -> bool:
@@ -274,6 +299,16 @@ def _funds_suffice(report: _Report) -> bool:
         )
         ok = False
     return ok
+
+
+def _account_identifiers(accounts: Sequence[Mapping[str, object]]) -> list[str]:
+    """Return every non-empty identifying string across all accounts."""
+    return [
+        value
+        for account in accounts
+        for key in _ACCOUNT_IDENTIFIER_KEYS
+        if isinstance(value := account.get(key), str) and value
+    ]
 
 
 def _signed_by_type(accounts: Sequence[Mapping[str, object]]) -> dict[str, bool | None]:

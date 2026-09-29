@@ -312,8 +312,8 @@ git commit -m "Abort unless the official server reports simulation mode"
 
 **Files:**
 - Create: `src/p1rec/scenarios.py`、`src/p1rec/prices.py`、`src/p1rec/preflight.py`
-- Modify: `src/p1rec/config.py`、`src/p1rec/cli.py`、`src/p1rec/interlock.py`（自我測試的設定）、`p1.toml`
-- Test: `tests/test_scenarios.py`、`tests/test_prices.py`、`tests/test_preflight.py`
+- Modify: `src/p1rec/config.py`、`src/p1rec/cli.py`、`src/p1rec/interlock.py`（自我測試的設定）、`src/p1rec/redact.py`（執行期遮蔽值）、`p1.toml`
+- Test: `tests/test_scenarios.py`、`tests/test_prices.py`、`tests/test_preflight.py`、`tests/test_redact.py`
 
 **Behaviour:**
 
@@ -321,7 +321,9 @@ git commit -m "Abort unless the official server reports simulation mode"
 - 價格參照 `limit_down`、`limit_up`、`reference` 取自合約回應；`limit_down_plus_tick` 為跌停價加一個升降單位；`far_below` 在股票與零股為跌停價，在期貨為「參考價 × 0.95 向下取到升降單位」；`far_below_plus_tick` 為 `far_below` 加一個升降單位；升降單位依市場、價格區間與 `etf_codes` 查表。
 - `preflight`：連鎖檢查；查 `accounts`、`balance`、`margin`、`usage`、`ca_status`；查劇本案例用到的全部商品的合約（股票與零股逐檔查 `contracts_stock`；期貨依商品根代號各查一次 `contracts_futures`，取 `code` 相符的唯一一筆）；計算資金需求並比對可用額度。
 - `balance`、`margin` 的請求本體取自 `accounts` 回應中第一個 `S`、`F` 帳戶的 `account_type`、`broker_id`、`account_id`、`person_id`；`ca_status` 的 `person_id` 同樣取自該回應，帳戶識別不進 `p1.toml`。
-- 資金需求以單一部位計（設計 §4）：股票為 `max(會成交股票案例的 張數 × 1000 × 漲停價，會成交零股案例的 股數 × 漲停價)`，期貨為 `max(會成交期貨案例的 口數 × 該契約代號的原始保證金)`；會成交的期貨案例在 `futures_margin_twd` 缺該代號時記 ERROR、以 2 結束。漲跌停價或參考價不是正數時同樣以 2 結束。
+- 取得 `accounts` 後，每個帳戶的 `account_id`、`person_id`、`username` 立即以 `add_redaction_values` 加入 log 遮蔽；`setup_logging` 把 `httpx`、`httpcore` 降為 WARNING，請求 URL（含 `ca_status` 的 `person_id`）只留在 `rest.jsonl`。
+- 資金需求以單一部位計（設計 §4；案例逐筆執行，掛著的單在下一筆開始前已刪單）：計入除 `exceed_funds` 以外的每個買進案例、會成交的案例與期貨賣出案例（期貨委託不分買賣都要保證金；股票賣出圈存的是股票而非現金）。股票為 `max(案例的 張數 × 1000 或零股股數 × 圈存價)`，圈存價在會成交或市價類（MKT、MKP）案例為漲停價，其餘為下單與各 `update_price` 步驟價格參照的最高價；期貨為 `max(案例口數 × 該契約代號的原始保證金)`。計入的期貨案例在 `futures_margin_twd` 缺該代號時記 ERROR、以 2 結束；漲跌停價或參考價不是正數時同樣以 2 結束。
+- 連鎖檢查通過後，任一查詢拿不到回應（連線被拒、逾時）時記 ERROR、該值記為未知、其餘查詢照跑，最後以 2 結束。
 - 不足、或找不到可用額度欄位時記 ERROR、以 2 結束；不論成敗（含連鎖檢查中止）都寫 `preflight.json`，金額以十進位字串表示，鍵為 `funds_ok`、`required`、`available`、`connections`、`accounts`（帳戶類型 → `signed`）、`limits`（商品 → 漲停、跌停、參考價）。
 - 劇本含某市場的案例、而對應帳戶（股票與零股為 `S`，期貨為 `F`）的 `signed` 不是 `true` 時記 WARN，不中止；該市場的拒單照樣錄製。
 - 所有查詢的原始回應經 `CapturingClient` 落地，供 Task 15 挑選 fixture。
@@ -383,7 +385,8 @@ def parse_step(raw: str) -> Step: ...
 def tick_size(market: Market, price: Decimal, *, is_etf: bool) -> Decimal: ...
 def resolve_price(ref: PriceRef, limits: ContractLimits, market: Market, *, is_etf: bool) -> Decimal: ...
 def required_funds(cases: Sequence[Case], limits: Mapping[str, ContractLimits],
-                   margins_twd: Mapping[str, Decimal]) -> FundsRequirement: ...
+                   margins_twd: Mapping[str, Decimal], *, etf_codes: Collection[str]) -> FundsRequirement: ...
+def add_redaction_values(values: Iterable[str]) -> None: ...  # redact.py
 def run_preflight(cfg: P1Config, scenarios: Path, run_dir: Path, *,
                   transport: httpx.BaseTransport | None = None) -> int: ...
 
@@ -405,14 +408,18 @@ def fetch_limits(client: CapturingClient, cfg: P1Config, cases: Sequence[Case]) 
 - `test_limit_down_plus_tick` — 跌停 9.95 的一般股回 9.96。
 - `test_far_below_futures` — TMF 參考價 47781 時回 45391（47781 × 0.95 = 45391.95 向下取到 1 點）；一般股回跌停價。
 - `test_required_funds_single_position` — 兩筆會成交的股票案例取較大者，不加總。
+- `test_required_funds_resting_order_dominates_fill` — 2 張遠價掛單的圈存（2 × 1000 × 跌停價）大於 1 張成交單時取前者。
 - `test_insufficient_exits_2_and_writes_json` — 回 2，`preflight.json` 存在且 `funds_ok` 為 `false`。
 - `test_missing_available_field_exits_2` — 找不到可用額度欄位時回 2。
 - `test_missing_futures_margin_exits_2` — 會成交的期貨案例缺原始保證金時回 2，ERROR 含該代號。
 - `test_unsigned_futures_account_warns` — `F` 帳戶 `signed: false` 且劇本含期貨案例時記 WARN、結束碼仍為 0。
+- `test_refused_connection_mid_preflight_exits_2` — `margin` 連線被拒時記 ERROR、其餘查詢照跑、回 2。
+- `test_httpx_request_url_not_logged`、`test_added_redaction_value_is_redacted` — `recorder.log` 與 stderr 都看不到請求 URL 與執行期加入的值。
 
 **Numbers:**
 
-- 1000 股／張：證交所整股交易單位；零股案例的數量本身即為股數。
+- 1000 股／張：證交所整股交易單位。
+- 零股案例的數量即股數：證交所盤中零股交易以 1 股為交易單位。
 - 期貨根代號為契約代號去掉末兩碼交割月份代碼（月份字母加年份個位數，或近月、次月的 `R1`、`R2`）：2026-09-29 期貨 API 測試時 `contracts_futures?root=TMF` 回傳的 8 個代號皆為此形式（本機 `results/p1/*-api-test/contracts-tmf.json`）。
 - 股票升降單位（<10：0.01；10–<50：0.05；50–<100：0.1；100–<500：0.5；500–<1000：1；≥1000：5）與 ETF（<50：0.01；≥50：0.05）：證交所升降單位規定。
 - 期貨升降單位 1 點：期交所 TXF／MXF／TMF 契約規格。
@@ -421,7 +428,7 @@ def fetch_limits(client: CapturingClient, cfg: P1Config, cases: Sequence[Case]) 
 
 **Verification:**
 
-Run: `uv run pytest -q tests/test_scenarios.py tests/test_prices.py tests/test_preflight.py`
+Run: `uv run pytest -q tests/test_scenarios.py tests/test_prices.py tests/test_preflight.py tests/test_redact.py`
 Expected: 全部 passed。
 
 **Commit:**

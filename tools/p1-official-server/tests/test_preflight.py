@@ -17,6 +17,7 @@ from p1rec.cli import main
 from p1rec.config import P1Config, load_config
 from p1rec.interlock import InterlockError
 from p1rec.preflight import EXIT_CHECK_FAILED, run_preflight
+from p1rec.redact import setup_logging
 
 _ENDPOINT_LINES = [
     "",
@@ -158,10 +159,13 @@ class FakeServer:
             ]
         }
     )
+    refuse: set[str] = field(default_factory=set)  # Paths whose connection is refused
     requests: list[httpx.Request] = field(default_factory=list)
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
+        if request.url.path in self.refuse:
+            raise httpx.ConnectError("[Errno 111] Connection refused", request=request)
         route = (request.method, request.url.path)
         if route == ("GET", "/api/v1/info"):
             return httpx.Response(200, json={"simulation": self.simulation})
@@ -434,3 +438,53 @@ def test_cli_malformed_scenarios_exits_1(
 
     assert exit_code == 1
     assert any(r.levelno == logging.ERROR and "missing key" in r.getMessage() for r in caplog.records)
+
+
+def test_refused_connection_mid_preflight_exits_2(
+    tmp_path: Path, write_config: WriteConfig, caplog: pytest.LogCaptureFixture
+) -> None:
+    server = FakeServer(refuse={"/api/v1/portfolio/margin"})
+
+    exit_code, report = _run(tmp_path, _config(write_config), server)
+
+    assert exit_code == EXIT_CHECK_FAILED
+    assert report["funds_ok"] is False
+    assert report["available"] == {"stock_twd": "1000000.0", "futures_margin_twd": None}
+    # Every query after the refused one still ran
+    assert set(report["limits"]) == {"0050", "2890", "TMFJ6"}
+    assert report["connections"] == 2
+    assert any(r.levelno == logging.ERROR and "ConnectError" in r.getMessage() for r in caplog.records)
+
+
+def test_refused_usage_query_exits_2_with_funds_in_hand(tmp_path: Path, write_config: WriteConfig) -> None:
+    server = FakeServer(refuse={"/api/v1/auth/usage"})
+
+    exit_code, report = _run(tmp_path, _config(write_config), server)
+
+    assert exit_code == EXIT_CHECK_FAILED
+    assert report["funds_ok"] is False
+    assert report["connections"] is None
+    assert report["available"]["stock_twd"] == "1000000.0"
+
+
+def test_account_identifiers_redacted_from_log(tmp_path: Path, write_config: WriteConfig) -> None:
+    cfg = _config(write_config)
+    log_dir = tmp_path / "log"
+    log_dir.mkdir()
+    setup_logging(log_dir, secrets=[], level="INFO")
+
+    _run(tmp_path, cfg, FakeServer())
+    logging.getLogger("p1rec.test").error(
+        "saw %s %s %s %s",
+        _STOCK_ACCOUNT["account_id"],
+        _FUTURES_ACCOUNT["account_id"],
+        _STOCK_ACCOUNT["person_id"],
+        _STOCK_ACCOUNT["username"],
+    )
+    for handler in logging.getLogger().handlers:
+        handler.flush()
+
+    log_text = (log_dir / "recorder.log").read_text(encoding="utf-8")
+    assert "saw *** *** *** ***" in log_text
+    for value in ("0000001", "0000002", "FAKEPID001", "fake-user"):
+        assert value not in log_text

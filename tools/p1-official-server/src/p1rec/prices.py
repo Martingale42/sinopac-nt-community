@@ -7,13 +7,13 @@ meant to rest into one the exchange rejects.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import ROUND_FLOOR, Decimal
 from typing import assert_never
 
 from p1rec.config import ConfigError
-from p1rec.scenarios import Case, Market, PriceRef
+from p1rec.scenarios import Case, Market, PriceRef, parse_step
 
 # TWSE board lot
 SHARES_PER_BOARD_LOT = 1000
@@ -124,27 +124,37 @@ def _far_below(limits: ContractLimits, market: Market, *, is_etf: bool) -> Decim
 
 
 def required_funds(
-    cases: Sequence[Case], limits: Mapping[str, ContractLimits], margins_twd: Mapping[str, Decimal]
+    cases: Sequence[Case],
+    limits: Mapping[str, ContractLimits],
+    margins_twd: Mapping[str, Decimal],
+    *,
+    etf_codes: Collection[str],
 ) -> FundsRequirement:
-    """Return the worst-case funds a single open position from cases can tie up.
+    """Return the most funds any single case can tie up while it runs.
 
-    Definition: The largest cash outlay (stock) and initial margin (futures)
-                any one expect_fill case needs, since positions are opened
-                and closed one at a time and never held together.
-    Formula:    stock_twd = max over expect_fill stock and odd-lot cases of
-                quantity * shares_per_unit * limit_up (shares_per_unit is
-                1000 for stock, 1 for odd lots);
-                futures_margin_twd = max over expect_fill futures cases of
-                quantity * margins_twd[code]; 0 when a market has no such case.
-    Domain:     limits holds every expect_fill stock and odd-lot code;
-                margins_twd holds the per-contract initial margin in TWD for
-                every expect_fill futures code. limit_up bounds what a market
-                buy can pay; fees and taxes are not included. Cases that do not
-                expect a fill, including exceed_funds ones, are ignored.
-                Raises ConfigError naming the code if a margin is missing,
-                LookupError if a stock or odd-lot code has no limits, and
-                ValueError for an expect_fill case sized exceed_funds, which
-                load_scenarios already rejects.
+    Definition: The largest cash (stock) and initial margin (futures) any one
+                case reserves while its order rests or holds once it fills,
+                since cases run one at a time and each ends cancelled or
+                closed before the next starts.
+    Formula:    stock_twd = max over counted stock and odd-lot cases of
+                quantity * shares_per_unit * price, where shares_per_unit is
+                1000 for stock and 1 for odd lots, and price is limit_up for an
+                expect_fill or market (MKT, MKP) case, else the highest
+                resolve_price among its price_ref and its update_price steps;
+                futures_margin_twd = max over counted futures cases of
+                quantity * margins_twd[code]; 0 when a market has no counted case.
+    Domain:     A case is counted unless its quantity is exceed_funds (sized to
+                be refused, never to be funded) or it is a stock or odd-lot Sell
+                that does not expect a fill, which reserves shares rather than
+                cash; a futures order reserves margin on either side. A resting
+                buy reserves its limit price and a market order up to limit_up;
+                an update_qty step only lowers the reservation. limits holds
+                every counted stock and odd-lot code, margins_twd the
+                per-contract initial margin in TWD of every counted futures
+                code, and etf_codes selects the ETF tick table for prices one
+                tick off a limit. Fees and taxes are not included. Raises
+                ConfigError naming the code if a margin is missing, and
+                LookupError if a stock or odd-lot code has no limits.
     Returns:    FundsRequirement in TWD, to compare against the stock
                 account's available balance and the futures account's
                 available margin respectively.
@@ -152,23 +162,29 @@ def required_funds(
     stock_twd = Decimal(0)
     futures_margin_twd = Decimal(0)
     for case in cases:
-        if not case.expect_fill:
-            continue
+        # An exceed_funds case is sized to be refused, never to be funded
         if not isinstance(case.quantity, int):
-            raise ValueError(f"expect_fill case {case.id!r} has no fixed quantity: {case.quantity!r}")
-
+            continue
         if case.market is Market.FUTURES:
             margin = margins_twd.get(case.code)
             if margin is None:
                 raise ConfigError(
-                    f"funds.futures_margin_twd has no per-contract margin for {case.code!r}, "
-                    f"needed by expect_fill case {case.id!r}"
+                    f"funds.futures_margin_twd has no per-contract margin for {case.code!r}, needed by case {case.id!r}"
                 )
             futures_margin_twd = max(futures_margin_twd, case.quantity * margin)
-        else:
+        elif case.action == "Buy" or case.expect_fill:
             contract = limits.get(case.code)
             if contract is None:
                 raise LookupError(f"no contract limits for {case.code!r}, needed by case {case.id!r}")
-            shares = case.quantity * _SHARES_PER_UNIT[case.market]
-            stock_twd = max(stock_twd, shares * contract.limit_up)
+            price = _reserved_price(case, contract, is_etf=case.code in etf_codes)
+            stock_twd = max(stock_twd, case.quantity * _SHARES_PER_UNIT[case.market] * price)
     return FundsRequirement(stock_twd=stock_twd, futures_margin_twd=futures_margin_twd)
+
+
+def _reserved_price(case: Case, limits: ContractLimits, *, is_etf: bool) -> Decimal:
+    """Return the highest per-share price case's order can hold while it rests or fills."""
+    if case.expect_fill or case.price_type != "LMT":
+        return limits.limit_up
+    refs = [case.price_ref]
+    refs += [step.price_ref for step in map(parse_step, case.steps) if step.price_ref is not None]
+    return max(resolve_price(ref, limits, case.market, is_etf=is_etf) for ref in refs)

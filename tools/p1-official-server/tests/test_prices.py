@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from typing import Literal
 
 import pytest
 
@@ -14,14 +15,7 @@ _TMF = ContractLimits(code="TMFJ6", limit_up=Decimal("52559"), limit_down=Decima
 _STOCK = ContractLimits(code="9999", limit_up=Decimal("12.15"), limit_down=Decimal("9.95"), reference=Decimal("11.05"))
 
 
-def _case(
-    case_id: str,
-    market: Market,
-    code: str,
-    quantity: int,
-    *,
-    expect_fill: bool = True,
-) -> Case:
+def _fill(case_id: str, market: Market, code: str, quantity: int) -> Case:
     return Case(
         id=case_id,
         market=market,
@@ -32,9 +26,43 @@ def _case(
         order_type="IOC",
         quantity=quantity,
         custom_field=None,
-        expect_fill=expect_fill,
+        expect_fill=True,
         steps=("place",),
     )
+
+
+def _resting(
+    case_id: str,
+    market: Market,
+    code: str,
+    quantity: int | Literal["exceed_funds"],
+    *,
+    action: Literal["Buy", "Sell"] = "Buy",
+    price_ref: PriceRef = PriceRef.FAR_BELOW,
+    price_type: Literal["LMT", "MKT", "MKP"] = "LMT",
+    steps: tuple[str, ...] = ("place", "cancel"),
+) -> Case:
+    return Case(
+        id=case_id,
+        market=market,
+        code=code,
+        action=action,
+        price_ref=price_ref,
+        price_type=price_type,
+        order_type="ROD",
+        quantity=quantity,
+        custom_field=None,
+        expect_fill=False,
+        steps=steps,
+    )
+
+
+_LIMITS = {
+    "1111": ContractLimits(code="1111", limit_up=Decimal("25.3"), limit_down=Decimal("20.7"), reference=Decimal("23")),
+    "2222": ContractLimits(code="2222", limit_up=Decimal("11"), limit_down=Decimal("9"), reference=Decimal("10")),
+    "0050": ContractLimits(code="0050", limit_up=Decimal("60.5"), limit_down=Decimal("49.5"), reference=Decimal("55")),
+}
+_NO_ETFS: frozenset[str] = frozenset()
 
 
 @pytest.mark.parametrize(
@@ -114,46 +142,75 @@ def test_limit_down_plus_tick_uses_etf_table() -> None:
 
 
 def test_required_funds_single_position() -> None:
-    limits = {
-        "1111": ContractLimits(
-            code="1111", limit_up=Decimal("25.3"), limit_down=Decimal("20.7"), reference=Decimal("23")
-        ),
-        "2222": ContractLimits(code="2222", limit_up=Decimal("11"), limit_down=Decimal("9"), reference=Decimal("10")),
-    }
-    cases = [_case("a", Market.STOCK, "1111", 1), _case("b", Market.STOCK, "2222", 2)]
+    cases = [_fill("a", Market.STOCK, "1111", 1), _fill("b", Market.STOCK, "2222", 2)]
 
-    requirement = required_funds(cases, limits, {})
+    requirement = required_funds(cases, _LIMITS, {}, etf_codes=_NO_ETFS)
 
     # 1 * 1000 * 25.3 = 25300 beats 2 * 1000 * 11 = 22000; the two are never held together
     assert requirement == FundsRequirement(stock_twd=Decimal("25300"), futures_margin_twd=Decimal("0"))
 
 
-def test_required_funds_odd_lot_counts_shares() -> None:
-    limits = {
-        "0050": ContractLimits(
-            code="0050", limit_up=Decimal("60.5"), limit_down=Decimal("49.5"), reference=Decimal("55")
-        )
-    }
+def test_required_funds_resting_order_dominates_fill() -> None:
+    cases = [_fill("fill", Market.STOCK, "1111", 1), _resting("far", Market.STOCK, "1111", 2)]
 
-    requirement = required_funds([_case("odd", Market.ODD, "0050", 3)], limits, {})
+    requirement = required_funds(cases, _LIMITS, {}, etf_codes=_NO_ETFS)
+
+    # The resting 2 lots reserve 2 * 1000 * 20.7 = 41400 at placement, more than the 25300 fill
+    assert requirement.stock_twd == Decimal("41400")
+
+
+def test_required_funds_update_price_raises_reservation() -> None:
+    case = _resting("lifecycle", Market.STOCK, "1111", 2, steps=("place", "update_price:far_below_plus_tick", "cancel"))
+
+    requirement = required_funds([case], _LIMITS, {}, etf_codes=_NO_ETFS)
+
+    # far_below 20.7 plus one 0.05 tick, held on 2 * 1000 shares
+    assert requirement.stock_twd == Decimal("41500")
+
+
+def test_required_funds_resting_market_order_reserves_limit_up() -> None:
+    case = _resting("odd_mkt", Market.ODD, "2222", 10, price_type="MKT")
+
+    assert required_funds([case], _LIMITS, {}, etf_codes=_NO_ETFS).stock_twd == Decimal("110")
+
+
+def test_required_funds_uses_etf_ticks() -> None:
+    case = _resting("etf", Market.ODD, "0050", 100, price_ref=PriceRef.LIMIT_DOWN_PLUS_TICK)
+
+    assert required_funds([case], _LIMITS, {}, etf_codes={"0050"}).stock_twd == Decimal("4951")
+    assert required_funds([case], _LIMITS, {}, etf_codes=_NO_ETFS).stock_twd == Decimal("4955")
+
+
+def test_required_funds_odd_lot_counts_shares() -> None:
+    requirement = required_funds([_fill("odd", Market.ODD, "0050", 3)], _LIMITS, {}, etf_codes=_NO_ETFS)
 
     assert requirement.stock_twd == Decimal("181.5")
 
 
+def test_required_funds_ignores_exceed_funds_and_resting_stock_sell() -> None:
+    cases = [
+        _resting("exceed", Market.STOCK, "1111", "exceed_funds", price_ref=PriceRef.LIMIT_DOWN),
+        _resting("sell", Market.STOCK, "1111", 5, action="Sell"),
+    ]
+
+    assert required_funds(cases, _LIMITS, {}, etf_codes=_NO_ETFS) == FundsRequirement(
+        stock_twd=Decimal("0"), futures_margin_twd=Decimal("0")
+    )
+
+
 def test_required_funds_futures_uses_largest_margin() -> None:
-    cases = [_case("f1", Market.FUTURES, "TMFJ6", 1), _case("f2", Market.FUTURES, "TMFJ6", 2)]
+    cases = [
+        _fill("f1", Market.FUTURES, "TMFJ6", 1),
+        _resting("buy", Market.FUTURES, "TMFJ6", 2),
+        _resting("sell", Market.FUTURES, "TMFJ6", 3, action="Sell"),
+    ]
 
-    requirement = required_funds(cases, {}, {"TMFJ6": Decimal("12000")})
+    requirement = required_funds(cases, {}, {"TMFJ6": Decimal("12000")}, etf_codes=_NO_ETFS)
 
-    assert requirement == FundsRequirement(stock_twd=Decimal("0"), futures_margin_twd=Decimal("24000"))
-
-
-def test_required_funds_ignores_cases_without_fill() -> None:
-    cases = [_case("rest", Market.FUTURES, "TMFJ6", 5, expect_fill=False)]
-
-    assert required_funds(cases, {}, {}) == FundsRequirement(stock_twd=Decimal("0"), futures_margin_twd=Decimal("0"))
+    # A resting futures order reserves margin whichever side it is on
+    assert requirement == FundsRequirement(stock_twd=Decimal("0"), futures_margin_twd=Decimal("36000"))
 
 
 def test_required_funds_missing_margin_names_code() -> None:
     with pytest.raises(ConfigError, match=r"'TMFJ6'"):
-        required_funds([_case("f1", Market.FUTURES, "TMFJ6", 1)], {}, {})
+        required_funds([_resting("far", Market.FUTURES, "TMFJ6", 1)], {}, {}, etf_codes=_NO_ETFS)
