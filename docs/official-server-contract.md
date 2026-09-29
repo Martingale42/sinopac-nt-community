@@ -53,6 +53,7 @@ P1 spike 的產出文件（設計：`docs/plans/2026-09-29-official-server-spike
 - 帳戶：`S`（`signed: true`）、`F`（`signed: false`）、`H`（`signed: false`）。依永豐文件，`signed` 表示該帳戶已完成 API 簽署與模擬環境測試（登入 + 下單），證券與期貨分別簽署、分別測試；模擬模式下單本身即是測試手段，因此 `F` 未簽署預期不影響模擬單，正式環境期貨下單則需先完成。
 - usage：`connections` 計的是同一身分的全部 session。舊 gateway 與官方 server 同時登入時為 2，兩次量測（Task 1 與之後的複查）一致，官方 server 一個實例佔 1 條。當日額度上限 2 GiB。
 - SSE：`text/event-stream`，frame 為 `event:<名稱>` + `data:<JSON>`，沒有 `id:` 欄位；心跳是 `event:heartbeat` 事件，內含每條連線不同的 `connection_id`。
+- 心跳間隔：期貨 API 測試的 `order_event` 串流中 17 個心跳時間戳，相鄰間隔皆為 30.000 秒 ±1 ms；錄製器以此設定 SSE 讀取逾時。
 - 綜合串流 `/api/v1/stream/data` 與 `/api/v1/stream/data/tick_fop` 在訂閱 TMFJ6 tick 後收到相同數量的 frame；`order_event` 串流在未呼叫 `subscribe_trade` 前只有心跳。
 - tick（`event:tick_fop`）價格為十進位字串，`date` 與 `time` 為台北本地時間且無時區標記，帶 `simtrade` 布林欄位。
 - 訂閱與取消訂閱回 `{"success": true, "message": …, "subscription": …}`。

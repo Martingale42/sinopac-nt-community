@@ -5,15 +5,19 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import re
 import socket
 import threading
-from collections.abc import Callable, Iterator
+import time
+from collections.abc import Callable, Iterator, Mapping
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import cast
 
 import httpx
 import pytest
 
-from p1rec import capture
+from p1rec import capture, sse
 from p1rec.config import Endpoint
 from p1rec.sse import SseRecorder, parse_frame, split_frames
 
@@ -79,6 +83,58 @@ def _run(recorder: SseRecorder) -> None:
     assert not recorder.is_alive()
 
 
+class _SilentSseHandler(BaseHTTPRequestHandler):
+    """Answer an SSE request with headers, one heartbeat on the first connection only, then silence."""
+
+    def log_message(self, format: str, *args: object) -> None:
+        pass
+
+    def do_GET(self) -> None:
+        server = cast(_SilentSseServer, self.server)
+        server.accept_encodings.append(self.headers.get("Accept-Encoding"))
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        if len(server.accept_encodings) == 1:
+            self.wfile.write(HEARTBEAT.encode("utf-8"))
+        self.wfile.flush()
+        server.connections.release()
+        server.done.wait()
+
+
+class _SilentSseServer(ThreadingHTTPServer):
+    """A real HTTP server on a free loopback port whose SSE streams go silent."""
+
+    daemon_threads = True
+
+    def __init__(self) -> None:
+        super().__init__(("127.0.0.1", 0), _SilentSseHandler)
+        self.accept_encodings: list[str | None] = []
+        self.connections = threading.Semaphore(0)
+        self.done = threading.Event()
+
+    @property
+    def base_url(self) -> str:
+        host, port = self.server_address[:2]
+        return f"http://{host!s}:{port}"
+
+    def handle_error(self, request: object, client_address: object) -> None:
+        # The recorder hanging up on a silent stream is expected in these tests
+        pass
+
+
+@pytest.fixture
+def silent_sse_server() -> Iterator[_SilentSseServer]:
+    server = _SilentSseServer()
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield server
+    finally:
+        server.done.set()
+        server.shutdown()
+        server.server_close()
+
+
 def _serve_once(stop: threading.Event, response: httpx.Response) -> Handler:
     """Return a handler that serves response once, then sets stop and refuses the reconnect.
 
@@ -132,6 +188,40 @@ def test_split_frames_partial_tail() -> None:
     # A trailing CR may be half of a CRLF, so the frame waits for the next byte
     assert split_frames("data:1\r\n\r") == ([], "data:1\r\n\r")
     assert split_frames("data:1\r\n\r\n") == (["data:1\r\n\r\n"], "")
+
+
+def test_frame_splitter_matches_split_frames_in_any_pieces() -> None:
+    stream = "event:a\r\ndata:1\r\n\r\n: c\n\ndata:2\r\rdata:3\r\n\ndata:4"
+    expected = (["event:a\r\ndata:1\r\n\r\n", ": c\n\n", "data:2\r\r", "data:3\r\n\n"], "data:4")
+    assert split_frames(stream) == expected
+
+    for size in (1, 2, 3, 7):
+        splitter = sse._FrameSplitter()
+        frames: list[str] = []
+        for start in range(0, len(stream), size):
+            frames += splitter.feed(stream[start : start + size])
+        assert (frames, splitter.pending) == expected
+
+
+def test_frame_splitter_resumes_where_it_stopped(monkeypatch: pytest.MonkeyPatch) -> None:
+    scan_starts: list[int] = []
+    line_end_re = sse._LINE_END_RE
+
+    class _Spy:
+        def finditer(self, string: str, pos: int = 0) -> Iterator[re.Match[str]]:
+            scan_starts.append(pos)
+            return line_end_re.finditer(string, pos)
+
+    monkeypatch.setattr(sse, "_LINE_END_RE", _Spy())
+    splitter = sse._FrameSplitter()
+
+    assert splitter.feed("data:aaa") == []
+    assert splitter.feed("bbb\r") == []
+    assert splitter.feed("\n\n") == ["data:aaabbb\r\n\n"]
+
+    # Each feed starts where the last one stopped, except that a trailing CR
+    # is looked at again in case an LF follows it.
+    assert scan_starts == [0, 8, 11]
 
 
 def test_split_frames_bare_cr() -> None:
@@ -341,10 +431,123 @@ def test_stop_interrupts_silent_stream(monkeypatch: pytest.MonkeyPatch, tmp_path
         recorder.join(timeout=5)
         assert not recorder.is_alive()
     finally:
+        stop.set()
         server_end.close()
         client_end.close()
 
     assert [line["kind"] for line in _lines(out)] == ["connected", "frame", "stopped"]
+
+
+def test_real_socket_stop_ends_silent_stream(
+    silent_sse_server: _SilentSseServer,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    stop = threading.Event()
+    frame_written = threading.Event()
+    append_jsonl = capture.append_jsonl
+
+    def spy_append(path: Path, record: Mapping[str, object]) -> None:
+        append_jsonl(path, record)
+        if record["kind"] == "frame":
+            frame_written.set()
+
+    monkeypatch.setattr(capture, "append_jsonl", spy_append)
+    out = tmp_path / "sse_a_data.jsonl"
+    recorder = SseRecorder(silent_sse_server.base_url, "a", "data", STREAM, out, 0.001, stop, lambda: None)
+
+    with caplog.at_level(logging.WARNING, logger="p1rec.sse"):
+        recorder.start()
+        try:
+            assert frame_written.wait(timeout=5)
+
+            # Give the recorder time to block on the silent socket again, where
+            # only the shutdown watcher can reach it before the read timeout.
+            time.sleep(0.1)
+        finally:
+            stop.set()
+        recorder.join(timeout=5)
+
+    assert not recorder.is_alive()
+    assert [line["kind"] for line in _lines(out)] == ["connected", "frame", "stopped"]
+    assert silent_sse_server.accept_encodings == ["identity"]
+    assert not any("exposes no socket" in record.getMessage() for record in caplog.records)
+
+
+def test_silent_stream_times_out_then_reconnects(
+    silent_sse_server: _SilentSseServer, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(sse, "SSE_READ_TIMEOUT_S", 0.3)
+    stop = threading.Event()
+    out = tmp_path / "sse_a_data.jsonl"
+    recorder = SseRecorder(silent_sse_server.base_url, "a", "data", STREAM, out, 0.001, stop, lambda: None)
+
+    recorder.start()
+    try:
+        assert silent_sse_server.connections.acquire(timeout=5)
+        assert silent_sse_server.connections.acquire(timeout=5)
+    finally:
+        stop.set()
+    recorder.join(timeout=5)
+
+    assert not recorder.is_alive()
+    lines = _lines(out)
+    assert [line["kind"] for line in lines] == ["connected", "frame", "disconnected", "connected", "stopped"]
+    assert str(lines[2]["error"]).startswith("ReadTimeout")
+
+
+def test_no_on_connected_when_stop_set_before_headers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    stop = threading.Event()
+    connected_calls: list[None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        stop.set()
+        return httpx.Response(200, headers=SSE_HEADERS, stream=_Chunks([HEARTBEAT.encode("utf-8")]))
+
+    recorder, out = _recorder(
+        monkeypatch, tmp_path, handler, stop, on_connected=lambda: connected_calls.append(None)
+    )
+    _run(recorder)
+
+    assert connected_calls == []
+    assert [line["kind"] for line in _lines(out)] == ["connected", "stopped"]
+
+
+def test_outage_logs_warning_then_debug_then_recovery_info(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    stop = threading.Event()
+    attempts: list[httpx.Request] = []
+
+    def dropped() -> httpx.Response:
+        body = _Chunks([HEARTBEAT.encode("utf-8")], error=httpx.ReadError("connection reset by peer"))
+        return httpx.Response(200, headers=SSE_HEADERS, stream=body)
+
+    # Drop, two refusals, recovery that drops again, then a final recovery
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts.append(request)
+        if len(attempts) in (1, 4):
+            return dropped()
+        if len(attempts) in (2, 3):
+            raise httpx.ConnectError("[Errno 111] Connection refused")
+        return httpx.Response(200, headers=SSE_HEADERS, stream=_Chunks([], after=stop.set))
+
+    recorder, _ = _recorder(monkeypatch, tmp_path, handler, stop)
+    with caplog.at_level(logging.DEBUG, logger="p1rec.sse"):
+        _run(recorder)
+
+    messages = [(record.levelno, record.getMessage()) for record in caplog.records if record.name == "p1rec.sse"]
+    failures = [(level, text) for level, text in messages if "disconnected" in text or "failed:" in text]
+    assert [level for level, _ in failures] == [logging.WARNING, logging.DEBUG, logging.DEBUG, logging.WARNING]
+    assert "ReadError: connection reset by peer" in failures[0][1]
+    recoveries = [text for level, text in messages if level == logging.INFO and "reconnected" in text]
+    assert len(recoveries) == 2
+    assert re.search(r"after 3 failed attempt\(s\) over \d+\.\ds$", recoveries[0])
+    assert re.search(r"after 1 failed attempt\(s\) over \d+\.\ds$", recoveries[1])
+
+    # MockTransport responses carry no socket, which is flagged once per 200 connection
+    assert sum("exposes no socket" in text for _, text in messages) == 3
 
 
 def test_stop_during_retry_wait(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -359,8 +562,10 @@ def test_stop_during_retry_wait(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
     # interruptible wait lets the recorder finish in time.
     recorder, out = _recorder(monkeypatch, tmp_path, handler, stop, retry_s=3600.0)
     recorder.start()
-    assert attempted.wait(timeout=5)
-    stop.set()
+    try:
+        assert attempted.wait(timeout=5)
+    finally:
+        stop.set()
     recorder.join(timeout=5)
 
     assert not recorder.is_alive()
