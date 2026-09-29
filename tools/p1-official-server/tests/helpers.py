@@ -40,6 +40,15 @@ MINIMAL_CONFIG_LINES = [
     "[interlock]",
     'endpoint_op = "mode"',
     'pointer = "/simulation"',
+    "",
+    # [history] is required by every config since HistoryConfig has no
+    # defaults, the same as [interlock] above.
+    "[history]",
+    'usage_bytes_pointer = "/bytes"',
+    "",
+    "[[history.query]]",
+    'op = "ticks"',
+    'body = \'{"contract": {"security_type": "STK", "exchange": "TSE", "code": "2330"}, "date": "2026-09-29"}\'',
 ]
 
 SECRET_ENV_VARS = ("SJ_API_KEY", "SJ_SEC_KEY", "SJ_CA_PASSWD", "P1_PERSON_ID", "P1_EGRESS_IP")

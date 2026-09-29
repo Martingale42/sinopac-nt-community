@@ -10,13 +10,14 @@ touching load_config itself.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from p1rec.jsonpointer import is_valid_pointer_syntax
 
@@ -63,8 +64,15 @@ class EventFields:
 
 
 @dataclass(frozen=True)
+class HistoryQuery:
+    op: Literal["ticks", "kbars", "snapshots"]
+    body: str  # JSON object text, sent verbatim as the request body
+
+
+@dataclass(frozen=True)
 class HistoryConfig:
-    """Placeholder, filled in once history-query fields are defined."""
+    queries: tuple[HistoryQuery, ...]
+    usage_bytes_pointer: str  # JSON pointer into UsageOut, e.g. "/bytes"
 
 
 @dataclass(frozen=True)
@@ -327,9 +335,45 @@ def _parse_events(data: Mapping[str, Any], config_dir: Path) -> EventFields:
     return EventFields()
 
 
+_HISTORY_OPS = ("ticks", "kbars", "snapshots")
+
+
 def _parse_history(data: Mapping[str, Any], config_dir: Path) -> HistoryConfig:
-    _optional_table(data, "history")
-    return HistoryConfig()
+    # usage_bytes_pointer is looked up through _lookup (via _get_pointer)
+    # rather than read from the table below, so a p1.toml missing the
+    # whole [history] section fails here with that dotted key, the same
+    # way a missing [interlock] section does.
+    usage_bytes_pointer = _get_pointer(data, "history.usage_bytes_pointer")
+
+    table = _optional_table(data, "history")
+    raw_queries = table.get("query", [])
+    if not isinstance(raw_queries, list):
+        raise ConfigError("config key history.query must be an array of tables")
+
+    queries = tuple(_parse_history_query(item, index) for index, item in enumerate(raw_queries))
+    return HistoryConfig(queries=queries, usage_bytes_pointer=usage_bytes_pointer)
+
+
+def _parse_history_query(item: Any, index: int) -> HistoryQuery:
+    key = f"history.query[{index}]"
+    if not isinstance(item, Mapping):
+        raise ConfigError(f"config key {key} must be a table")
+
+    op = item.get("op")
+    if op not in _HISTORY_OPS:
+        raise ConfigError(f"config key {key}.op must be one of {_HISTORY_OPS}, got {op!r}")
+
+    body = item.get("body")
+    if not isinstance(body, str):
+        raise ConfigError(f"config key {key}.body must be a string, got {type(body).__name__}")
+    try:
+        parsed_body = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise ConfigError(f"config key {key}.body is not valid JSON: {exc}") from exc
+    if not isinstance(parsed_body, dict):
+        raise ConfigError(f"config key {key}.body must be a JSON object")
+
+    return HistoryQuery(op=op, body=body)
 
 
 def _parse_scrub(data: Mapping[str, Any], config_dir: Path) -> ScrubConfig:

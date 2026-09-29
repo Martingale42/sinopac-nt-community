@@ -14,6 +14,7 @@ from p1rec.config import (
     EventFields,
     FundsConfig,
     HistoryConfig,
+    HistoryQuery,
     InterlockConfig,
     OrdersConfig,
     ScrubConfig,
@@ -51,7 +52,15 @@ def test_load_config_success(tmp_path: Path, write_config: WriteConfig) -> None:
     assert cfg.stream == StreamConfig()
     assert cfg.orders == OrdersConfig()
     assert cfg.events == EventFields()
-    assert cfg.history == HistoryConfig()
+    assert cfg.history == HistoryConfig(
+        queries=(
+            HistoryQuery(
+                op="ticks",
+                body='{"contract": {"security_type": "STK", "exchange": "TSE", "code": "2330"}, "date": "2026-09-29"}',
+            ),
+        ),
+        usage_bytes_pointer="/bytes",
+    )
     assert cfg.scrub == ScrubConfig()
 
 
@@ -217,6 +226,38 @@ def test_interlock_pointer_rejects_empty_string(write_config: WriteConfig) -> No
     config_path = write_config(lines)
 
     with pytest.raises(ConfigError, match=r"interlock\.pointer"):
+        load_config(config_path)
+
+
+def test_history_query_rejects_unknown_op(write_config: WriteConfig) -> None:
+    lines = ['op = "unknown"' if line == 'op = "ticks"' else line for line in MINIMAL_CONFIG_LINES]
+    config_path = write_config(lines)
+
+    with pytest.raises(ConfigError, match=r"history\.query\[0\]\.op"):
+        load_config(config_path)
+
+
+def test_history_query_rejects_non_json_body(write_config: WriteConfig) -> None:
+    lines = ["body = 'not json'" if line.startswith("body = ") else line for line in MINIMAL_CONFIG_LINES]
+    config_path = write_config(lines)
+
+    with pytest.raises(ConfigError, match=r"history\.query\[0\]\.body"):
+        load_config(config_path)
+
+
+def test_history_query_rejects_non_object_body(write_config: WriteConfig) -> None:
+    lines = ["body = '[1, 2, 3]'" if line.startswith("body = ") else line for line in MINIMAL_CONFIG_LINES]
+    config_path = write_config(lines)
+
+    with pytest.raises(ConfigError, match=r"history\.query\[0\]\.body"):
+        load_config(config_path)
+
+
+def test_history_usage_bytes_pointer_required(write_config: WriteConfig) -> None:
+    lines = [line for line in MINIMAL_CONFIG_LINES if line != 'usage_bytes_pointer = "/bytes"']
+    config_path = write_config(lines)
+
+    with pytest.raises(ConfigError, match=r"history\.usage_bytes_pointer"):
         load_config(config_path)
 
 
