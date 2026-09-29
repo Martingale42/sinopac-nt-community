@@ -1,0 +1,113 @@
+# p1rec live configuration, holding no secrets, only the environment
+# variable names that hold them, mapped in [secrets] and read by redact.py.
+#
+# Relative paths (results_root, fixtures_root) resolve against the
+# directory that holds this file.
+
+base_url = "http://127.0.0.1:8080"
+http_timeout_s = 35
+results_root = "../../results/p1"
+fixtures_root = "../../test_data/official/1.7.6"
+
+[secrets]
+api_key = "SJ_API_KEY"
+sec_key = "SJ_SEC_KEY"
+ca_passwd = "SJ_CA_PASSWD"
+person_id = "P1_PERSON_ID"
+egress_ip = "P1_EGRESS_IP"
+
+# Logical operation name -> method + path, from docs/official-server-contract.md
+# section 1, excluding stream_connect, which has several SSE endpoints and
+# is configured in a [stream] section instead of here.
+
+[endpoints.mode]
+method = "GET"
+path = "/api/v1/info"
+
+[endpoints.accounts]
+method = "GET"
+path = "/api/v1/auth/accounts"
+
+[endpoints.contracts_stock]
+method = "GET"
+path = "/api/v1/data/contracts/{code}/info"
+
+[endpoints.contracts_futures]
+method = "GET"
+path = "/api/v1/data/contracts/futures"
+
+[endpoints.contracts_options]
+method = "GET"
+path = "/api/v1/data/contracts/options"
+
+[endpoints.snapshots]
+method = "POST"
+path = "/api/v1/data/snapshots"
+
+[endpoints.ticks]
+method = "POST"
+path = "/api/v1/data/ticks"
+
+[endpoints.kbars]
+method = "POST"
+path = "/api/v1/data/kbars"
+
+[endpoints.stream_subscribe]
+method = "POST"
+path = "/api/v1/stream/subscribe"
+
+[endpoints.stream_unsubscribe]
+method = "POST"
+path = "/api/v1/stream/unsubscribe"
+
+[endpoints.subscribe_trade]
+method = "POST"
+path = "/api/v1/auth/subscribe_trade"
+
+[endpoints.place_stock]
+method = "POST"
+path = "/api/v1/order/place_order"
+
+[endpoints.place_futures]
+method = "POST"
+path = "/api/v1/order/place_order"
+
+[endpoints.update_price]
+method = "POST"
+path = "/api/v1/order/update_price"
+
+[endpoints.update_qty]
+method = "POST"
+path = "/api/v1/order/update_qty"
+
+[endpoints.cancel]
+method = "POST"
+path = "/api/v1/order/cancel_order"
+
+[endpoints.trades]
+method = "POST"
+path = "/api/v1/order/trades"
+
+[endpoints.positions]
+method = "POST"
+path = "/api/v1/portfolio/position_unit"
+
+[endpoints.balance]
+method = "POST"
+path = "/api/v1/portfolio/account_balance"
+
+[endpoints.margin]
+method = "POST"
+path = "/api/v1/portfolio/margin"
+
+[endpoints.usage]
+method = "GET"
+path = "/api/v1/auth/usage"
+
+[endpoints.ca_status]
+method = "GET"
+path = "/api/v1/auth/ca_expiretime"
+
+[endpoints.harness_info]
+method = "GET"
+path = "/api/v1/agent/harness"
