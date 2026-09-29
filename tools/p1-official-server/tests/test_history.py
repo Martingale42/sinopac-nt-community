@@ -150,6 +150,8 @@ def test_usage_delta_recorded(tmp_path: Path) -> None:
     assert payload["baseline_usage_before"] == 100
     assert payload["baseline_usage_after"] == 100
     assert payload["baseline_drift"] == 0
+    assert payload["baseline_connections_before"] == 1
+    assert payload["baseline_connections_after"] == 1
     entry = payload["queries"][0]
     assert entry["op"] == "ticks"
     assert entry["body"] == json.loads(_TICKS_QUERY.body)  # a JSON object, not the source string
@@ -158,6 +160,8 @@ def test_usage_delta_recorded(tmp_path: Path) -> None:
     assert entry["usage_before"] == 100
     assert entry["usage_after"] == 250
     assert entry["usage_delta"] == 150
+    assert entry["connections_before"] == 1
+    assert entry["connections_after"] == 1
 
 
 def test_missing_usage_field_null_and_warn(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
@@ -298,6 +302,34 @@ def test_interrupted_query_writes_partial_history(tmp_path: Path) -> None:
     assert payload["queries"] == []  # the first query never finished appending a result
 
 
+def test_interrupted_second_query_keeps_first_result(tmp_path: Path) -> None:
+    cfg = _build_cfg(tmp_path, (_TICKS_QUERY, _KBARS_QUERY))
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        mode = _mode_response(request)
+        if mode is not None:
+            return mode
+        if request.method == "GET" and request.url.path == _USAGE_PATH:
+            return httpx.Response(200, content=_usage_body(bytes_used=100))
+        if request.url.path == _TICKS_PATH:
+            return httpx.Response(200, content=b'{"ticks": []}')
+        if request.url.path == _KBARS_PATH:
+            raise KeyboardInterrupt
+        return httpx.Response(404)
+
+    with pytest.raises(KeyboardInterrupt):
+        run_history(cfg, run_dir, transport=httpx.MockTransport(handler))
+
+    payload = _history_json(run_dir)
+    assert payload["interrupted"] is True
+    queries = payload["queries"]
+    assert len(queries) == 1  # the first (ticks) query finished before kbars interrupted
+    assert queries[0]["op"] == "ticks"
+    assert queries[0]["status"] == 200
+
+
 def test_usage_drift_between_queries_warns(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     cfg = _build_cfg(tmp_path, (_TICKS_QUERY, _KBARS_QUERY))
     run_dir = tmp_path / "run"
@@ -347,4 +379,26 @@ def test_negative_usage_delta_warns(tmp_path: Path, caplog: pytest.LogCaptureFix
     assert entry["usage_delta"] == -20
     assert any(
         record.levelno == logging.WARNING and "negative" in record.getMessage() for record in caplog.records
+    )
+
+
+def test_baseline_drift_warns(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    cfg = _build_cfg(tmp_path, (_TICKS_QUERY,))
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    # The two baseline reads (100, 130) differ with no query run yet, as
+    # if another session on this identity used quota in between.
+    handler = _queue_handler(
+        iter([100, 130, 130, 180]), {_TICKS_PATH: httpx.Response(200, content=b'{"ticks": []}')}
+    )
+
+    with caplog.at_level(logging.WARNING, logger="p1rec.history"):
+        exit_code = run_history(cfg, run_dir, transport=httpx.MockTransport(handler))
+
+    assert exit_code == 0
+    payload = _history_json(run_dir)
+    assert payload["baseline_drift"] == 30
+    assert any(
+        record.levelno == logging.WARNING and "baseline" in record.getMessage() for record in caplog.records
     )

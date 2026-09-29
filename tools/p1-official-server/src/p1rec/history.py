@@ -64,14 +64,15 @@ def run_history(cfg: P1Config, run_dir: Path, *, transport: httpx.BaseTransport 
     Checks simulation mode first, on the same client every read and
     query below reuses. Before the first query, two usage reads with
     nothing in between establish baseline_drift, since the daily counter
-    can move on its own while this run is idle. Each query is then
-    bracketed by a usage read the same way, and a usage_before that
-    differs from the previous read's usage_after, or a negative
-    usage_delta, is logged at WARN as further evidence that another
-    session under the same identity is active. A query that raises or
-    returns a non-2xx status is logged at ERROR and does not stop the
-    remaining queries; the run still exits EXIT_HISTORY_QUERY_FAILED if
-    any query failed. A usage read that fails or has no value at
+    can move on its own while this run is idle, and a non-zero
+    baseline_drift is logged at WARN. Each query is then bracketed by a
+    usage read the same way, and a usage_before that differs from the
+    previous read's usage_after, or a negative usage_delta, is also
+    logged at WARN, each as further evidence that another session under
+    the same identity is active. A query that raises or returns a
+    non-2xx status is logged at ERROR and does not stop the remaining
+    queries; the run still exits EXIT_HISTORY_QUERY_FAILED if any query
+    failed. A usage read that fails or has no value at
     cfg.history.usage_bytes_pointer only makes that reading null; it is
     logged at WARN, not treated as a failure. If a query iteration
     raises, including KeyboardInterrupt, whatever was collected so far is
@@ -89,6 +90,13 @@ def run_history(cfg: P1Config, run_dir: Path, *, transport: httpx.BaseTransport 
         failed_count = 0
         baseline_before = _read_usage(client, cfg)
         baseline_after = _read_usage(client, cfg)
+        baseline_drift = _delta(baseline_before.bytes_used, baseline_after.bytes_used)
+        if baseline_drift is not None and baseline_drift != 0:
+            logger.warning(
+                "baseline usage drifted by %d bytes before the first query; "
+                "another session on this identity may be active",
+                baseline_drift,
+            )
         try:
             previous_usage_after = baseline_after.bytes_used
             for query in cfg.history.queries:
@@ -100,26 +108,26 @@ def run_history(cfg: P1Config, run_dir: Path, *, transport: httpx.BaseTransport 
             raise
         finally:
             failed_count = _write_history_json(
-                run_dir, baseline_before, baseline_after, results, interrupted=interrupted
+                run_dir, baseline_before, baseline_after, baseline_drift, results, interrupted=interrupted
             )
 
     return EXIT_HISTORY_QUERY_FAILED if failed_count else 0
+
+
+def _delta(before: int | None, after: int | None) -> int | None:
+    return after - before if before is not None and after is not None else None
 
 
 def _write_history_json(
     run_dir: Path,
     baseline_before: _UsageReading,
     baseline_after: _UsageReading,
+    baseline_drift: int | None,
     results: list[_QueryResult],
     *,
     interrupted: bool,
 ) -> int:
     """Write run_dir/history.json and return the number of failed queries."""
-    baseline_drift = (
-        baseline_after.bytes_used - baseline_before.bytes_used
-        if baseline_before.bytes_used is not None and baseline_after.bytes_used is not None
-        else None
-    )
     failed_count = sum(1 for result in results if not _query_ok(result))
     payload: dict[str, object] = {
         "baseline_usage_before": baseline_before.bytes_used,
@@ -172,11 +180,7 @@ def _run_one(
             logger.error("%s query returned HTTP %d, expected 2xx", query.op, status)
 
     usage_after = _read_usage(client, cfg)
-    usage_delta = (
-        usage_after.bytes_used - usage_before.bytes_used
-        if usage_before.bytes_used is not None and usage_after.bytes_used is not None
-        else None
-    )
+    usage_delta = _delta(usage_before.bytes_used, usage_after.bytes_used)
     if usage_delta is not None and usage_delta < 0:
         logger.warning(
             "%s query's usage_delta is negative (%d); the daily counter may have reset between reads",
