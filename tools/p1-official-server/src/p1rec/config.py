@@ -875,9 +875,26 @@ _ORDER_TEMPLATE_PLACEHOLDERS: Mapping[str, tuple[frozenset[str], frozenset[str]]
 # scenarios.Market's values; config.py cannot import scenarios, which imports it
 ORDER_MARKETS = ("stock", "odd", "futures")
 
+# Every key [orders] may hold, so a misspelt one fails at load
+_ORDERS_KEYS = frozenset(
+    {
+        "body_templates",
+        "exchange",
+        "trade_id_pointer",
+        "filled_pointer",
+        "deal_quantity_pointer",
+        "step_wait_s",
+        "fill_poll_s",
+        "fill_timeout_s",
+    }
+)
+
+# ContractRequest.exchange values (openapi.json Exchange)
+_ORDER_EXCHANGES = ("TSE", "OTC", "OES", "TAIFEX", "TIM")
+
 
 def _parse_orders(data: Mapping[str, Any], config_dir: Path) -> OrdersConfig:
-    _optional_table(data, "orders")
+    _reject_unknown_keys(_optional_table(data, "orders"), _ORDERS_KEYS, "orders")
     known_endpoints = _lookup(data, "endpoints")
     if not isinstance(known_endpoints, Mapping):
         raise ConfigError("config key endpoints must be a table")
@@ -902,7 +919,9 @@ def _parse_orders(data: Mapping[str, Any], config_dir: Path) -> OrdersConfig:
         raise ConfigError(
             f"config key orders.exchange must be a table with exactly the keys {', '.join(ORDER_MARKETS)}"
         )
-    exchange = {market: _get_str(data, f"orders.exchange.{market}") for market in ORDER_MARKETS}
+    exchange = {
+        market: _item_choice(raw_exchange, market, "orders.exchange", _ORDER_EXCHANGES) for market in ORDER_MARKETS
+    }
 
     step_wait_s = _get_interval(data, "orders.step_wait_s")
     fill_poll_s = _get_interval(data, "orders.fill_poll_s")
@@ -913,13 +932,26 @@ def _parse_orders(data: Mapping[str, Any], config_dir: Path) -> OrdersConfig:
     return OrdersConfig(
         body_templates=templates,
         exchange=exchange,
-        trade_id_pointer=_get_pointer(data, "orders.trade_id_pointer"),
-        filled_pointer=_get_pointer(data, "orders.filled_pointer"),
-        deal_quantity_pointer=_get_pointer(data, "orders.deal_quantity_pointer"),
+        trade_id_pointer=_get_order_pointer(data, "orders.trade_id_pointer"),
+        filled_pointer=_get_order_pointer(data, "orders.filled_pointer"),
+        deal_quantity_pointer=_get_order_pointer(data, "orders.deal_quantity_pointer"),
         step_wait_s=step_wait_s,
         fill_poll_s=fill_poll_s,
         fill_timeout_s=fill_timeout_s,
     )
+
+
+def _get_order_pointer(data: Mapping[str, Any], dotted_key: str) -> str:
+    """Read an [orders] pointer, refusing one that ends at an account identifier.
+
+    The values these pointers find are logged and written to orders.json,
+    so none of them may be an account's identifier.
+    """
+    pointer = _get_pointer(data, dotted_key)
+    last = pointer.rsplit("/", 1)[-1].replace("~1", "/").replace("~0", "~")
+    if last in ACCOUNT_IDENTIFIER_KEYS:
+        raise ConfigError(f"config key {dotted_key} must not point at an account identifier ({last})")
+    return pointer
 
 
 def _get_order_template(
