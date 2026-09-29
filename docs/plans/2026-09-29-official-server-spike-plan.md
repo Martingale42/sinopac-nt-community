@@ -573,8 +573,8 @@ git commit -m "Run simulated order scenarios behind the interlock"
 - `p1rec reconcile --sse-run <run_id> [--rest-run <run_id>]`：run_id 為 `results_root` 下的目錄名，含路徑分隔字元時拒絕。未給 `--rest-run` 時，連鎖檢查後以 `{"refresh": true}`（`TradesRequest` 的帳戶欄位皆可省略，端點回傳全部委託）即時查 `trades`，記在本次 run 的 `rest.jsonl`；給了則用該 run 最後一次 `trades` 回應（非 2xx 時失敗，不退回較舊的回應）。先取 REST 再讀 SSE 檔。
 - 依 `EventFields` 從各 client 的全部 SSE 檔（`order_event` 串流與可能也帶委託事件的綜合串流）挑出事件名稱為 `order_event_name` 的 frame；報告在 `data/<state>`（OpenAPI `OrderEvent`），`state` 屬 `order_states` 為委託、屬 `deal_states` 為成交。同一 client 內以 `event_id`（空字串時以 data 原文）去重，依收到時間整理為「委託識別 → 最終狀態、累計成交量」。
 - 官方委託事件不帶狀態字串，SSE 端狀態由 `derive_status` 推得，依序取第一條成立者：New 的 `op_code` 不等於 `op_code_success` → Failed；沒有任何事件帶 `order_quantity` → Unknown；成交量大於 0 且不小於 `order_quantity` → Filled；有成功的 Cancel 且 `cancel_quantity` 不小於「`order_quantity` − 成交量」→ Cancelled；成交量大於 0 → PartFilled；New 成功 → Submitted；其餘 → Unknown。`order_quantity` 取最新值，`cancel_quantity` 取最大值；UpdatePrice、UpdateQty 只更新數量，其他 op_type 記 WARN。REST 狀態去掉 `Status.` 前綴後比較；`deal_quantity` 為 null 時視為 0。
-- `reconcile.json`：`only_in_rest`（沒有任何 client 看到）、`only_in_sse`、`mismatched`（每個看到該委託而狀態或成交量與 REST 不同的 client 各一筆）、`per_client_keys`（各 client 看到的委託識別，設計 §6 D），另記 `sse_run`、`rest_run`。前三者皆空時回 0，否則回 2；輸入無法分析時回 1。
-- `p1rec stats --sse-run <run_id>` 寫 `stats.json`：每個 client 各事件名稱的數量；以下皆逐檔（一個 recorder 一檔）計算：每秒 frame 數最高的前 10 秒（以 `recv_ts_ns` 取整秒，UTC ISO 時間）；心跳事件（名稱為 `heartbeat_event`）在同一連線內的間隔最小、中位數（`statistics.median`）、最大值；相鄰 frame 間隔超過 `gap_threshold_s` 的清單；斷線到下一次 200 連上的區間（含嘗試次數與第一個錯誤）；`exchange_ts_pointers` 有設定時，收到時間減交易所時間的 p50、p99（nearest-rank）、最大值與無法解析的筆數。
+- `reconcile.json`：`only_in_rest`（至少一個 client 沒看到的 REST 委託；GO 準則 4 與設計 §6 D1 量的是每個 client 都收齊，任一 client 缺一筆即列入）、`only_in_sse`（任一 client 看到而 REST 沒有的委託）、`mismatched`（`Mismatch(client, sse, rest)`：每個看到該委託而狀態或成交量與 REST 不同的 client 各一筆）、`missing_by_client`（各 client 缺的 REST 委託）、`per_client_keys`（各 client 看到的委託識別，設計 §6 D），另記 `sse_run`、`rest_run`。前三者皆空時回 0，否則回 2；輸入無法分析時回 1。
+- `p1rec stats --sse-run <run_id>` 只讀錄製檔、不連 server，因此不需要密鑰環境變數。寫 `stats.json`：每個 client 各事件名稱的數量；以下皆逐檔（一個 recorder 一檔）計算，同一 client 的綜合串流與 `order_event` 串流才不會重複計數：每秒 frame 數最高的前 10 秒（以 `recv_ts_ns` 取整秒，UTC ISO 時間）；心跳事件（名稱為 `heartbeat_event`）在同一連線內的間隔最小、中位數（`statistics.median`）、最大值；相鄰 frame 間隔超過 `gap_threshold_s` 的清單；斷線到下一次 200 連上的區間（含嘗試次數與第一個錯誤）；`exchange_ts_pointers` 有設定時，收到時間減交易所時間的 p50、p99（nearest-rank）、最大值與無法解析的筆數。
 - JSONL 最後一行無法解析時記 WARN 並略過（主機曾硬斷電，寫入未 fsync）；中間行無法解析時失敗。
 
 **Interface:**
@@ -617,10 +617,11 @@ class Mismatch:
 
 @dataclass(frozen=True)
 class ReconcileReport:
-    only_in_rest: list[str]
-    only_in_sse: list[str]
-    mismatched: list[Mismatch]
-    per_client_keys: dict[str, list[str]]
+    only_in_rest: list[str]                  # 至少一個 client 缺的 REST 委託
+    only_in_sse: list[str]                   # 任一 client 看到而 REST 沒有
+    mismatched: list[Mismatch]               # 每個不一致的 client 各一筆
+    missing_by_client: dict[str, list[str]]  # client -> 缺的 REST 委託
+    per_client_keys: dict[str, list[str]]    # client -> 看到的委託識別
 
 def derive_status(*, new_ok: bool | None, cancel_ok: bool, order_qty: Decimal | None,
                   cancel_qty: Decimal, filled_qty: Decimal) -> str: ...
@@ -639,7 +640,8 @@ def run_stats(cfg: P1Config, sse_run: str, run_dir: Path) -> int: ...
 - `test_all_match_exit_0` — 兩個 client 與 REST 一致時三份清單皆空。
 - `test_missing_in_sse_reported` — REST 多一筆時列入 `only_in_rest` 並回 2。
 - `test_status_mismatch_reported` — SSE 為 PartFilled、REST 為 Filled 時列入 `mismatched`。
-- `test_client_coverage_difference` — client b 缺一筆時 `per_client_keys` 可看出差集。
+- `test_client_coverage_difference` — client b 缺一筆（client a 有看到）時列入 `only_in_rest` 與 `missing_by_client`，`per_client_keys` 可看出差集，並回 2。
+- `test_stats_runs_without_secret_env` — 未設定密鑰環境變數時 `stats` 照常回 0。
 - `test_deals_accumulate_qty` — 同一委託兩筆成交數量加總。
 - `test_stats_peak_second_and_gaps` — 合成資料中某秒 50 個 frame、某處間隔 90 秒時，`stats.json` 的尖峰與間隔清單正確。
 - `test_derive_status_rules` — 推導規則逐條成立（含部分成交後刪單、只見成交、數量為 0）。

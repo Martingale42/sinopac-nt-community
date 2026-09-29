@@ -204,6 +204,7 @@ def test_all_match_exit_0(write_config: WriteConfig, monkeypatch: pytest.MonkeyP
     assert report["only_in_rest"] == []
     assert report["only_in_sse"] == []
     assert report["mismatched"] == []
+    assert report["missing_by_client"] == {"a": [], "b": []}
     assert report["per_client_keys"] == {"a": ["t1", "t2", "t3"], "b": ["t1", "t2", "t3"]}
 
 
@@ -221,6 +222,7 @@ def test_missing_in_sse_reported(
     assert report["only_in_rest"] == ["t4"]
     assert report["only_in_sse"] == []
     assert report["mismatched"] == []
+    assert report["missing_by_client"] == {"a": ["t4"], "b": ["t4"]}
 
 
 def test_status_mismatch_reported(tmp_path: Path, fields: EventFields) -> None:
@@ -241,19 +243,30 @@ def test_status_mismatch_reported(tmp_path: Path, fields: EventFields) -> None:
     assert not report.clean
 
 
-def test_client_coverage_difference(tmp_path: Path, fields: EventFields) -> None:
+def test_client_coverage_difference(
+    write_config: WriteConfig, monkeypatch: pytest.MonkeyPatch, results_root: Path
+) -> None:
     without_t2 = [event for event in _EVENTS if "t2" not in json.dumps(event)]
-    paths = {
-        "a": [_write_sse(tmp_path, "a", "order_event", _order_frames("a", _EVENTS))],
-        "b": [_write_sse(tmp_path, "b", "order_event", _order_frames("b", without_t2))],
-    }
+    _write_sse(results_root / SSE_RUN, "a", "order_event", _order_frames("a", _EVENTS))
+    _write_sse(results_root / SSE_RUN, "b", "order_event", _order_frames("b", without_t2))
+    _write_jsonl(results_root / REST_RUN / "rest.jsonl", [_trades_record(_MATCHING_TRADES)])
 
-    report = reconcile(orders_from_sse(paths, fields), orders_from_rest(_MATCHING_TRADES, fields))
+    exit_code, report = _run_cli_reconcile(write_config, monkeypatch, results_root)
 
-    keys = report.per_client_keys
+    # A report one client missed fails even though another client saw it
+    assert exit_code == 2
+    assert report["only_in_rest"] == ["t2"]
+    assert report["missing_by_client"] == {"a": [], "b": ["t2"]}
+    keys = report["per_client_keys"]
+    assert isinstance(keys, dict)
     assert set(keys["a"]) - set(keys["b"]) == {"t2"}
-    # Client a saw t2, so only the coverage, not the comparison, shows b's gap
-    assert report.only_in_rest == []
+
+
+def test_no_client_misses_every_rest_order(fields: EventFields) -> None:
+    report = reconcile({}, orders_from_rest(_MATCHING_TRADES, fields))
+
+    assert report.only_in_rest == ["t1", "t2", "t3"]
+    assert report.missing_by_client == {}
 
 
 def test_deals_accumulate_qty(tmp_path: Path, fields: EventFields) -> None:
@@ -556,7 +569,18 @@ def test_run_id_with_separator_rejected(write_config: WriteConfig) -> None:
     assert exc_info.value.code == 1
 
 
-def test_missing_sse_run_exits_1(write_config: WriteConfig, monkeypatch: pytest.MonkeyPatch) -> None:
-    _set_secret_env(monkeypatch)
-
+def test_missing_sse_run_exits_1(write_config: WriteConfig) -> None:
     assert main(["stats", "--config", str(write_config()), "--sse-run", SSE_RUN]) == 1
+
+
+def test_stats_runs_without_secret_env(
+    write_config: WriteConfig, monkeypatch: pytest.MonkeyPatch, results_root: Path
+) -> None:
+    for var in SECRET_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+    _write_sse(results_root / SSE_RUN, "a", "data", [_frame("a", "data", T0_NS, "heartbeat", {"type": "heartbeat"})])
+
+    exit_code = main(["stats", "--config", str(write_config()), "--sse-run", SSE_RUN])
+
+    assert exit_code == 0
+    assert (_only_new_run(results_root, "stats") / "stats.json").exists()

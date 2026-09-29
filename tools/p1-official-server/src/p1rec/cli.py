@@ -131,7 +131,12 @@ _SUBCOMMANDS: dict[str, Subcommand] = {
     "stream": Subcommand(add_arguments=_no_extra_arguments, handler=_not_implemented),
     "orders": Subcommand(add_arguments=_add_scenarios_argument, handler=_not_implemented),
     "reconcile": Subcommand(add_arguments=_add_reconcile_arguments, handler=_reconcile),
-    "stats": Subcommand(add_arguments=_add_sse_run_argument, handler=_stats),
+    "stats": Subcommand(
+        add_arguments=_add_sse_run_argument,
+        handler=_stats,
+        # stats only reads recorded files and never contacts the server
+        needs_secrets=False,
+    ),
     "history": Subcommand(add_arguments=_no_extra_arguments, handler=_not_implemented),
     "scrub": Subcommand(add_arguments=_no_extra_arguments, handler=_not_implemented),
 }

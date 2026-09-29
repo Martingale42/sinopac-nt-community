@@ -109,11 +109,15 @@ class Mismatch:
 class ReconcileReport:
     """How the orders every client saw on SSE compare with the REST trades list."""
 
+    # REST orders at least one client missed, and orders some client saw
+    # that REST does not list.
     only_in_rest: list[str]
     only_in_sse: list[str]
+
     mismatched: list[Mismatch]
 
-    # Order keys each client saw, so a coverage gap shows as a set difference
+    # REST orders each client missed, and the order keys each client saw
+    missing_by_client: dict[str, list[str]]
     per_client_keys: dict[str, list[str]]
 
     @property
@@ -135,6 +139,7 @@ class ReconcileReport:
                 }
                 for item in self.mismatched
             ],
+            "missing_by_client": self.missing_by_client,
             "per_client_keys": self.per_client_keys,
         }
 
@@ -488,13 +493,17 @@ def orders_from_rest(payload: object, fields: EventFields) -> dict[str, OrderVie
 def reconcile(sse: Mapping[str, dict[str, OrderView]], rest: dict[str, OrderView]) -> ReconcileReport:
     """Compare every client's orders with REST.
 
-    An order is only in REST when no client saw it, and only in SSE when
-    some client saw it but REST does not list it. Each client that saw an
-    order REST also lists must agree on both status and filled quantity,
-    and every client that does not adds a Mismatch; which client missed
-    which order shows in per_client_keys.
+    Every client must see every REST order, since each client is a
+    consumer that would otherwise miss a report: an order is only in REST
+    when at least one client missed it (every REST order, when there is no
+    client at all), and missing_by_client says which. An order is only in
+    SSE when some client saw it but REST does not list it. Each client
+    that saw an order REST also lists must agree on both status and filled
+    quantity, and every client that does not adds a Mismatch.
     """
     seen = {key for views in sse.values() for key in views}
+    missing_by_client = {client: sorted(rest.keys() - sse[client].keys()) for client in sorted(sse)}
+    missed = {key for keys in missing_by_client.values() for key in keys} if sse else set(rest)
     mismatched = [
         Mismatch(client=client, sse=view, rest=rest[key])
         for client in sorted(sse)
@@ -506,9 +515,10 @@ def reconcile(sse: Mapping[str, dict[str, OrderView]], rest: dict[str, OrderView
         )
     ]
     return ReconcileReport(
-        only_in_rest=sorted(rest.keys() - seen),
+        only_in_rest=sorted(missed),
         only_in_sse=sorted(seen - rest.keys()),
         mismatched=mismatched,
+        missing_by_client=missing_by_client,
         per_client_keys={client: sorted(sse[client]) for client in sorted(sse)},
     )
 
@@ -879,11 +889,11 @@ def run_reconcile(
     document: dict[str, object] = {"sse_run": sse_run, "rest_run": rest_run, **report.to_json()}
     _write_json(run_dir / "reconcile.json", document)
     logger.info(
-        "reconcile: %d only in REST, %d only in SSE, %d mismatched, clients %s",
+        "reconcile: %d only in REST, %d only in SSE, %d mismatched, missing by client %s",
         len(report.only_in_rest),
         len(report.only_in_sse),
         len(report.mismatched),
-        ", ".join(f"{client}={len(keys)}" for client, keys in report.per_client_keys.items()),
+        ", ".join(f"{client}={len(keys)}" for client, keys in report.missing_by_client.items()),
     )
     return EXIT_OK if report.clean else EXIT_CHECK_FAILED
 
