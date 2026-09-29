@@ -1,0 +1,258 @@
+# p1.toml for the offline rehearsal in test_rehearsal.py: the live
+# p1.toml's structure pointed at tests/stub_server.py, with every interval
+# scaled down so the whole pipeline runs in seconds.
+#
+# test_rehearsal.py copies it into a scratch git repository and replaces
+# base_url with the stub's address. As committed, base_url names the
+# discard port, which refuses connections, so this file alone reaches
+# nothing.
+
+base_url = "http://127.0.0.1:9"
+http_timeout_s = 5
+
+results_root = "results"
+fixtures_root = "test_data/official/1.7.6"
+
+[secrets]
+api_key = "SJ_API_KEY"
+sec_key = "SJ_SEC_KEY"
+ca_passwd = "SJ_CA_PASSWD"
+person_id = "P1_PERSON_ID"
+egress_ip = "P1_EGRESS_IP"
+
+[endpoints.mode]
+method = "GET"
+path = "/api/v1/info"
+
+[endpoints.accounts]
+method = "GET"
+path = "/api/v1/auth/accounts"
+
+[endpoints.contracts_stock]
+method = "GET"
+path = "/api/v1/data/contracts/{code}/info"
+
+[endpoints.contracts_futures]
+method = "GET"
+path = "/api/v1/data/contracts/futures"
+
+[endpoints.snapshots]
+method = "POST"
+path = "/api/v1/data/snapshots"
+
+[endpoints.ticks]
+method = "POST"
+path = "/api/v1/data/ticks"
+
+[endpoints.kbars]
+method = "POST"
+path = "/api/v1/data/kbars"
+
+[endpoints.stream_subscribe]
+method = "POST"
+path = "/api/v1/stream/subscribe"
+
+[endpoints.stream_unsubscribe]
+method = "POST"
+path = "/api/v1/stream/unsubscribe"
+
+[endpoints.subscribe_trade]
+method = "POST"
+path = "/api/v1/auth/subscribe_trade"
+
+[endpoints.place_stock]
+method = "POST"
+path = "/api/v1/order/place_order"
+
+[endpoints.place_futures]
+method = "POST"
+path = "/api/v1/order/place_order"
+
+[endpoints.update_price]
+method = "POST"
+path = "/api/v1/order/update_price"
+
+[endpoints.update_qty]
+method = "POST"
+path = "/api/v1/order/update_qty"
+
+[endpoints.cancel]
+method = "POST"
+path = "/api/v1/order/cancel_order"
+
+[endpoints.trades]
+method = "POST"
+path = "/api/v1/order/trades"
+
+[endpoints.balance]
+method = "POST"
+path = "/api/v1/portfolio/account_balance"
+
+[endpoints.margin]
+method = "POST"
+path = "/api/v1/portfolio/margin"
+
+[endpoints.trading_limits]
+method = "POST"
+path = "/api/v1/portfolio/trading_limits"
+
+[endpoints.usage]
+method = "GET"
+path = "/api/v1/auth/usage"
+
+[endpoints.ca_status]
+method = "GET"
+path = "/api/v1/auth/ca_expiretime"
+
+[interlock]
+endpoint_op = "mode"
+pointer = "/simulation"
+
+[history]
+usage_bytes_pointer = "/bytes"
+
+[[history.query]]
+op = "ticks"
+body = '{"contract": {"security_type": "STK", "exchange": "TSE", "code": "2890"}, "date": "2026-09-29", "query_type": "AllDay"}'
+
+[[history.query]]
+op = "kbars"
+body = '{"contract": {"security_type": "STK", "exchange": "TSE", "code": "2890"}, "start": "2026-09-29", "end": "2026-09-29"}'
+
+[[history.query]]
+op = "kbars"
+body = '{"contract": {"security_type": "FUT", "exchange": "TAIFEX", "code": "TMFJ6"}, "start": "2026-09-29", "end": "2026-09-29"}'
+
+[[history.query]]
+op = "snapshots"
+body = '{"contracts": [{"security_type": "STK", "exchange": "TSE", "code": "2890"}, {"security_type": "STK", "exchange": "TSE", "code": "00981A"}, {"security_type": "FUT", "exchange": "TAIFEX", "code": "TMFJ6"}]}'
+
+[contracts]
+code = "/code"
+limit_up = "/limit_up"
+limit_down = "/limit_down"
+reference = "/reference"
+futures_tick = "/tick"
+etf_codes = ["00981A"]
+
+[funds]
+stock_available_op = "trading_limits"
+stock_available_pointer = "/trading_available"
+futures_available_pointer = "/available_margin"
+
+[funds.stock_report_only]
+balance = "/acc_balance"
+
+[funds.futures_margin_twd]
+TMFJ6 = 12000
+
+[scrub]
+account_id_pointers = ["/account_id", "/username", "/person_id"]
+ca_pointers = ["/person_id"]
+account_id_keys = ["subaccount"]
+map_path = "results/scrub-map.json"
+selection = "fixtures.toml"
+contract_doc = "contract.md"
+extra_scan_paths = ["fixtures.toml"]
+
+[events]
+order_event_name = "order_event"
+order_states = ["StockOrder", "FuturesOrder"]
+deal_states = ["StockDeal", "FuturesDeal"]
+event_id = "/event_id"
+order_key = "/order/id"
+op_type = "/operation/op_type"
+op_code = "/operation/op_code"
+op_code_success = "00"
+order_qty = "/order/quantity"
+cancel_qty = "/status/cancel_quantity"
+deal_key = "/trade_id"
+deal_qty = "/quantity"
+deal_exchange_ts = "/ts"
+order_exchange_ts = "/status/exchange_ts"
+rest_list = ""
+rest_key = "/order/id"
+rest_status = "/status/status"
+rest_filled_qty = "/status/deal_quantity"
+rest_order_ts = "/status/order_ts"
+exchange_ts_pointers = ["/date", "/time"]
+exchange_ts_format = "%Y-%m-%d %H:%M:%S.%f"
+heartbeat_event = "heartbeat"
+
+# Five of the stub's heartbeat intervals, so only the rehearsal's outage
+# reads as a gap.
+gap_threshold_s = 1.0
+
+[stream]
+
+# Short enough that several reconnect attempts fall inside the outage the
+# rehearsal causes.
+retry_s = 0.2
+
+request_retry_s = 1.0
+daily_resend_at = "08:35"
+subscribe_body = '{"security_type": "{security_type}", "exchange": "{exchange}", "code": "{code}", "quote_type": "{quote_type}", "intraday_odd": "{intraday_odd}"}'
+unsubscribe_body = '{"security_type": "{security_type}", "exchange": "{exchange}", "code": "{code}", "quote_type": "{quote_type}", "intraday_odd": "{intraday_odd}"}'
+startup_requests = [
+  ["subscribe_trade", "@account:S"],
+  ["subscribe_trade", "@account:F"],
+]
+
+[stream.streams.data]
+method = "GET"
+path = "/api/v1/stream/data"
+
+[stream.streams.order_event]
+method = "GET"
+path = "/api/v1/stream/data/order_event"
+
+[stream.streams.contract_event]
+method = "GET"
+path = "/api/v1/stream/data/contract_event"
+
+[[stream.instrument]]
+code = "2890"
+exchange = "TSE"
+security_type = "STK"
+quote_types = ["Tick", "BidAsk"]
+intraday_odd = false
+
+[[stream.instrument]]
+code = "TMFJ6"
+exchange = "TAIFEX"
+security_type = "FUT"
+quote_types = ["Tick"]
+intraday_odd = false
+
+[orders]
+trade_id_pointer = "/order/id"
+filled_pointer = "/status/status"
+deal_quantity_pointer = "/status/deal_quantity"
+
+# The stub settles every order before answering, so these only need to
+# let the run pace itself like a live one.
+step_wait_s = 0.05
+fill_poll_s = 0.05
+fill_timeout_s = 2
+
+[orders.exchange]
+stock = "TSE"
+odd = "TSE"
+futures = "TAIFEX"
+
+[orders.body_templates]
+place_stock = '''
+{"contract": {"security_type": "{security_type}", "exchange": "{exchange}", "code": "{code}"},
+ "stock_order": {"action": "{action}", "price": "{price}", "quantity": "{quantity}",
+                 "price_type": "{price_type}", "order_type": "{order_type}", "order_lot": "{order_lot}",
+                 "custom_field": "{custom_field}", "account": "{account}"}}
+'''
+place_futures = '''
+{"contract": {"security_type": "{security_type}", "exchange": "{exchange}", "code": "{code}"},
+ "futures_order": {"action": "{action}", "price": "{price}", "quantity": "{quantity}",
+                   "price_type": "{price_type}", "order_type": "{order_type}", "octype": "{octype}",
+                   "custom_field": "{custom_field}", "account": "{account}"}}
+'''
+update_price = '{"trade_id": "{trade_id}", "price": "{price}"}'
+update_qty = '{"trade_id": "{trade_id}", "quantity": "{quantity}"}'
+cancel = '{"trade_id": "{trade_id}"}'

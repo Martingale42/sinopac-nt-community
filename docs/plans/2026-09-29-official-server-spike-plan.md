@@ -943,8 +943,9 @@ git commit -m "Scrub fixtures and scan for leaked identifiers"
 
 **Behaviour:**
 
-- `stub_server.py` 以 `ThreadingHTTPServer` 在隨機埠提供全部邏輯操作：`mode`（可切換 Simulation／Production）、帳戶、合約、餘額、保證金、usage、`ca_status`、`trades`、下單／改單／刪單、歷史查詢，以及可推送行情、委託、成交事件並能中途斷線的 SSE。欄位名稱沿用 Task 1 `openapi.json` 的對應 schema，資料為虛構。
-- `test_rehearsal.py` 以 subprocess 呼叫 `p1rec` console script，用指向假 server 的測試設定依序執行：`self-test-interlock` → `preflight` → `stream`（背景）→ `orders` → 中途切斷 SSE → `history` → `reconcile` → `stats` → `scrub` 匯出兩筆 → `scrub --scan-only`。
+- `stub_server.py` 以 `ThreadingHTTPServer` 在隨機埠提供全部邏輯操作：`mode`（可切換 Simulation／Production）、帳戶、合約、餘額、保證金、usage、`ca_status`、`trades`、下單／改單／刪單、歷史查詢，以及可推送行情、委託、成交事件並能中途斷線的 SSE。欄位名稱沿用 Task 1 `openapi.json` 的對應 schema，資料為虛構；preflight 查詢的回答沿用 `tests/mock_official.py` 的 `FakeServer`。
+- `test_rehearsal.py` 以 subprocess 呼叫 `p1rec` console script，用指向假 server 的測試設定（`tests/data/p1.toml`、`tests/data/scenarios.toml`，在 `git init` 過、`results_root` 被 git 忽略的暫存目錄執行）依序執行：`self-test-interlock` → `preflight` → `stream`（背景）→ `orders` → 中途切斷 SSE → `history` → 停止 `stream` → `reconcile`（不帶 `--rest-run`，連鎖檢查後即時查 `trades`，與 Task 12 相同）→ `stats` → `scrub` 匯出兩筆 → `scrub --scan-only`。
+- 例外：`orders` 在測試程序內以 `p1rec.cli.main([...])` 執行，並依 `tests/test_orders.py` 的方式注入時鐘（把 `cli.run_orders` 換成帶 `clock` 的版本；時鐘只把牆上時間移進交易時段，等待與經過時間照實）。`orders` 在期交所日盤與證交所交易時段外拒絕期貨與會成交的股票案例，而正式程式不留測試用的繞道，只有注入時鐘能讓演練在任何時刻執行。`stream` 則必須是 subprocess：它擋下停止訊號，且有其他執行緒（例如假 server 的）在跑時拒絕啟動。
 
 **Tests:**
 
