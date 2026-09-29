@@ -50,6 +50,7 @@ from p1rec.config import (
 )
 from p1rec.interlock import EXIT_INTERLOCK_ABORT
 from p1rec.records import EXIT_CHECK_FAILED
+from p1rec.redact import redaction_values, setup_logging
 from p1rec.stream import render_template, run_stream
 
 INFO_PATH = "/api/v1/info"
@@ -675,8 +676,8 @@ def test_failed_subscriptions_logged_and_rest_sent(tmp_path: Path, caplog: pytes
     assert not run.session.failed
     assert _posts(api.log()) == INITIAL_POSTS
     assert _messages(caplog, logging.ERROR) == [
-        "subscribe 2330 Tick failed: success is not true (message: 'fake')",
-        "subscribe 2330 BidAsk failed: success is not true (message: 'fake')",
+        "subscribe 2330 Tick failed: success is not true (the response has a message; see rest.jsonl)",
+        "subscribe 2330 BidAsk failed: success is not true (the response has a message; see rest.jsonl)",
         "subscribe 00981A Tick odd-lot failed: HTTP 500",
     ]
 
@@ -718,11 +719,56 @@ def test_account_lookup_failure_stops_the_first_send(tmp_path: Path, caplog: pyt
     assert _posts(api.log()) == []
     assert sum(path == ACCOUNTS_PATH for _, path, _ in api.log()) == 1
     assert _messages(caplog, logging.ERROR) == [
-        "subscribe_trade for account type S failed: the account list is unavailable (accounts: HTTP 500)",
-        "subscribe_trade for account type F failed: the account list is unavailable (accounts: HTTP 500)",
+        "subscribe_trade for account type S failed: the account list is unavailable (accounts returned HTTP 500)",
+        "subscribe_trade for account type F failed: the account list is unavailable (accounts returned HTTP 500)",
         "first send failed for subscribe_trade for account type S, subscribe_trade for account type F; "
         "stopping so that the run can be restarted once the cause is fixed",
     ]
+
+
+class _AccountQuotingApi(_FakeApi):
+    """Refuse each subscribe_trade with a message quoting the account's id and username."""
+
+    def answer(self, method: str, path: str, raw_body: bytes) -> tuple[int, object]:
+        status, body = super().answer(method, path, raw_body)
+        if (method, path) != ("POST", SUBSCRIBE_TRADE_PATH):
+            return status, body
+        request = cast(dict[str, object], json.loads(raw_body))
+        [account] = [account for account in ACCOUNTS if account["account_id"] == request["account_id"]]
+        message = f"account {account['account_id']} of {account['username']} is not signed"
+        return status, {"account": request, "subscribe_trade": False, "message": message, "ts": 0}
+
+
+def test_subscribe_trade_failure_message_not_logged(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    account_id, username = str(ACCOUNTS[0]["account_id"]), str(ACCOUNTS[0]["username"])
+    made_up_secrets = {
+        "api_key": "FakeApiKey0123456789abcdef",
+        "sec_key": "FakeSecKey9876543210zyxwv",
+        "ca_passwd": "fake-ca-passwd-q7",
+        "egress_ip": "203.0.113.77",
+    }
+    setup_logging(tmp_path, redaction_values(made_up_secrets), "INFO")
+    api = _AccountQuotingApi()
+
+    with _session(tmp_path, api, _cfg("http://fake")) as run:
+        _connect_all(run)
+        assert run.stop.wait(WAIT_S)
+
+    # Anything logged later that quotes an account the stream looked up is redacted
+    logging.getLogger("p1rec.stream").error("quoting %s and %s", account_id, username)
+    for handler in logging.getLogger().handlers:
+        handler.flush()
+
+    assert run.session.failed
+    assert "is not signed" in (tmp_path / "rest.jsonl").read_text(encoding="utf-8")
+    log_text = (tmp_path / "recorder.log").read_text(encoding="utf-8")
+    stderr = capsys.readouterr().err
+    for output in (log_text, stderr):
+        assert account_id not in output
+        assert username not in output
+        assert "is not signed" not in output
+        assert "subscribe_trade is not true (the response has a message; see rest.jsonl)" in output
+        assert "quoting *** and ***" in output
 
 
 def test_failed_startup_request_retried_on_any_next_connection(
@@ -769,7 +815,9 @@ def test_failed_subscription_retried_on_a_timer(tmp_path: Path, caplog: pytest.L
     assert _posts(api.log())[len(INITIAL_POSTS) :] == [tmfj6]
     sent = [line for line in _jsonl(tmp_path / "rest.jsonl") if '"TMFJ6"' in str(line["req_body"])]
     assert cast(int, sent[1]["sent_ts_ns"]) - cast(int, sent[0]["recv_ts_ns"]) >= retry_s * 1e9
-    assert _messages(caplog, logging.ERROR) == ["subscribe TMFJ6 Tick failed: success is not true (message: 'fake')"]
+    assert _messages(caplog, logging.ERROR) == [
+        "subscribe TMFJ6 Tick failed: success is not true (the response has a message; see rest.jsonl)"
+    ]
     assert "subscribe TMFJ6 Tick succeeded after 1 failed attempt(s)" in _messages(caplog, logging.INFO)
 
 

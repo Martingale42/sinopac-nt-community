@@ -46,6 +46,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from p1rec import sse
+from p1rec.broker import BrokerError, account_request, fetch_accounts
 from p1rec.capture import CapturedResponse, CapturingClient, describe_exception
 from p1rec.config import (
     ACCOUNTS_OP,
@@ -71,9 +72,6 @@ _REST_CLIENT_NAME = "stream"
 
 # The server's daily maintenance runs on Taipei time (docs/official-server-contract.md section 2)
 _TAIPEI = ZoneInfo(EXCHANGE_TZ_NAME)
-
-# AccountRequest fields (openapi.json), which each Account from accounts also carries
-_ACCOUNT_REQUEST_FIELDS = ("account_type", "broker_id", "account_id", "person_id")
 
 # Response fields that confirm an operation took effect, each required by its
 # response schema in openapi.json (SubscribeTradeOut, SubscriptionResponse).
@@ -170,11 +168,13 @@ def _failure_reason(response: CapturedResponse, field: str | None) -> str | None
         body = None
     if isinstance(body, dict) and body.get(field) is True:
         return None
-    detail = f" (message: {body['message']!r})" if isinstance(body, dict) and "message" in body else ""
+
+    # The message may quote the account, so only its presence is logged
+    detail = " (the response has a message; see rest.jsonl)" if isinstance(body, dict) and "message" in body else ""
     return f"{field} is not true{detail}"
 
 
-def _account_request(accounts: list[Mapping[str, object]] | str, account_type: str) -> dict[str, str] | str:
+def _account_request(accounts: Sequence[Mapping[str, object]] | str, account_type: str) -> dict[str, object] | str:
     """Return the AccountRequest for the account of account_type, or why there is none.
 
     accounts is the accounts response, or the reason it could not be had.
@@ -184,11 +184,11 @@ def _account_request(accounts: list[Mapping[str, object]] | str, account_type: s
     for account in accounts:
         if account.get("account_type") != account_type:
             continue
-        request = {name: account.get(name) for name in _ACCOUNT_REQUEST_FIELDS}
+        request = account_request(account)
         missing = [name for name, value in request.items() if not isinstance(value, str)]
         if missing:
             return f"the account has no {', '.join(missing)}"
-        return {name: str(value) for name, value in request.items()}
+        return request
     return f"{ACCOUNTS_OP} lists no such account"
 
 
@@ -231,6 +231,7 @@ class _Coordinator:
         if stream_cfg.subscribe is None or stream_cfg.unsubscribe is None:
             raise ValueError("p1.toml has no [stream] section")
 
+        self._cfg = cfg
         self._client = client
         self._endpoints = cfg.endpoints
         self._startup = stream_cfg.startup_requests
@@ -260,7 +261,7 @@ class _Coordinator:
         self._failures: dict[StartupRequest | Subscription, int] = {}
 
         # Kept once fetched successfully; a failed lookup is retried by the next round
-        self._accounts: list[Mapping[str, object]] | None = None
+        self._accounts: list[dict[str, object]] | None = None
 
     def on_connected(self, key: str) -> None:
         """Record that recorder key got a 200 response and wake the control thread.
@@ -404,7 +405,7 @@ class _Coordinator:
 
     def _send_startup(self, requests: Sequence[StartupRequest]) -> list[StartupRequest]:
         """Send requests in order and return those that failed, looking the accounts up at most once."""
-        accounts: list[Mapping[str, object]] | str | None = self._accounts
+        accounts: list[dict[str, object]] | str | None = self._accounts
         failed: list[StartupRequest] = []
         for request in requests:
             if self._stop.is_set():
@@ -420,11 +421,11 @@ class _Coordinator:
                         break
                     if not isinstance(accounts, str):
                         self._accounts = accounts
-                account_request = _account_request(accounts, request.account_type)
-                if isinstance(account_request, str):
-                    outcome = self._record(request, what, account_request)
+                body = _account_request(accounts, request.account_type)
+                if isinstance(body, str):
+                    outcome = self._record(request, what, body)
                 else:
-                    outcome = self._send_startup_request(request, what, account_request)
+                    outcome = self._send_startup_request(request, what, body)
             if outcome is False:
                 failed.append(request)
         return failed
@@ -438,22 +439,21 @@ class _Coordinator:
         reason = outcome if isinstance(outcome, str) else _failure_reason(outcome, confirmation)
         return self._record(request, what, reason)
 
-    def _query_accounts(self) -> list[Mapping[str, object]] | str | None:
-        """Return the accounts response, why it could not be had, or None if stop kept it from being sent."""
-        outcome = self._request(ACCOUNTS_OP, self._endpoints[ACCOUNTS_OP], None)
-        if outcome is None:
+    def _query_accounts(self) -> list[dict[str, object]] | str | None:
+        """Return the accounts response, why it could not be had, or None if stop kept it from being sent.
+
+        The query goes through fetch_accounts, which adds every account
+        identifier in the response to log redaction before this thread can
+        log anything that quotes one.
+        """
+        if self._stop.is_set():
             return None
-        if isinstance(outcome, str):
-            return f"{ACCOUNTS_OP}: {outcome}"
-        if not _is_success(outcome.status):
-            return f"{ACCOUNTS_OP}: HTTP {outcome.status}"
         try:
-            body = outcome.json()
-        except ValueError:
-            body = None
-        if not isinstance(body, list) or not all(isinstance(account, dict) for account in body):
-            return f"{ACCOUNTS_OP}: the response is not a JSON array of accounts"
-        return body
+            return fetch_accounts(self._client, self._cfg)
+        except httpx.HTTPError as exc:
+            return f"{ACCOUNTS_OP}: {describe_exception(exc)}"
+        except BrokerError as exc:
+            return str(exc)
 
     def _send_subscriptions(self) -> None:
         for subscription in list(self._active):
