@@ -209,7 +209,7 @@ map_path = "../../results/p1/scrub-map.json"
 selection = "fixtures.toml"
 contract_doc = "../../docs/official-server-contract.md"
 
-# Everything else the live tasks commit, checked by scrub --scan-only too
+# Every other committed file that could quote a recording
 extra_scan_paths = ["fixtures.toml", "p1.toml", "scenarios.toml", "../../docs", "../../ROADMAP.md"]
 
 # Order reports and stream timing, from the order_event and tick frames
