@@ -148,8 +148,16 @@ def _self_test_cfg(interlock: InterlockConfig) -> P1Config:
         secret_env={},
         endpoints={interlock.endpoint_op: Endpoint(method="GET", path="/api/v1/info")},
         interlock=interlock,
-        contracts=ContractFields(code="", limit_up="", limit_down="", reference="", etf_codes=()),
-        funds=FundsConfig(stock_available_pointer="", futures_available_pointer="", futures_margin_twd={}),
+        contracts=ContractFields(
+            code="", limit_up="", limit_down="", reference="", futures_tick="", etf_codes=()
+        ),
+        funds=FundsConfig(
+            stock_available_op="",
+            stock_available_pointer="",
+            stock_report_only={},
+            futures_available_pointer="",
+            futures_margin_twd={},
+        ),
         stream=StreamConfig(),
         orders=OrdersConfig(),
         events=EventFields(),

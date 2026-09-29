@@ -8,7 +8,15 @@ from typing import Literal
 import pytest
 
 from p1rec.config import ConfigError
-from p1rec.prices import ContractLimits, FundsRequirement, required_funds, resolve_price, tick_size
+from p1rec.prices import (
+    ContractLimits,
+    FundsRequirement,
+    check_limits,
+    format_decimal,
+    required_funds,
+    resolve_price,
+    tick_size,
+)
 from p1rec.scenarios import Case, Market, PriceRef
 
 _TMF = ContractLimits(code="TMFJ6", limit_up=Decimal("52559"), limit_down=Decimal("43003"), reference=Decimal("47781"))
@@ -146,8 +154,9 @@ def test_required_funds_single_position() -> None:
 
     requirement = required_funds(cases, _LIMITS, {}, etf_codes=_NO_ETFS)
 
-    # 1 * 1000 * 25.3 = 25300 beats 2 * 1000 * 11 = 22000; the two are never held together
-    assert requirement == FundsRequirement(stock_twd=Decimal("25300"), futures_margin_twd=Decimal("0"))
+    # 1 * 1000 * 25.3 = 25300 beats 2 * 1000 * 11 = 22000, the two never held together;
+    # 25300 * 1.001425 = 25336.0525 with the buy commission, rounded up to 25337
+    assert requirement == FundsRequirement(stock_twd=Decimal("25337"), futures_margin_twd=Decimal("0"))
 
 
 def test_required_funds_resting_order_dominates_fill() -> None:
@@ -155,8 +164,9 @@ def test_required_funds_resting_order_dominates_fill() -> None:
 
     requirement = required_funds(cases, _LIMITS, {}, etf_codes=_NO_ETFS)
 
-    # The resting 2 lots reserve 2 * 1000 * 20.7 = 41400 at placement, more than the 25300 fill
-    assert requirement.stock_twd == Decimal("41400")
+    # The resting 2 lots reserve 2 * 1000 * 20.7 = 41400 at placement, more than the
+    # 25300 fill; 41400 * 1.001425 = 41458.995, rounded up to 41459
+    assert requirement.stock_twd == Decimal("41459")
 
 
 def test_required_funds_update_price_raises_reservation() -> None:
@@ -164,27 +174,30 @@ def test_required_funds_update_price_raises_reservation() -> None:
 
     requirement = required_funds([case], _LIMITS, {}, etf_codes=_NO_ETFS)
 
-    # far_below 20.7 plus one 0.05 tick, held on 2 * 1000 shares
-    assert requirement.stock_twd == Decimal("41500")
+    # far_below 20.7 plus one 0.05 tick on 2 * 1000 shares is 41500, 41559.1375 with commission
+    assert requirement.stock_twd == Decimal("41560")
 
 
 def test_required_funds_resting_market_order_reserves_limit_up() -> None:
     case = _resting("odd_mkt", Market.ODD, "2222", 10, price_type="MKT")
 
-    assert required_funds([case], _LIMITS, {}, etf_codes=_NO_ETFS).stock_twd == Decimal("110")
+    # 10 shares up to limit_up 11 is 110, 110.15675 with commission
+    assert required_funds([case], _LIMITS, {}, etf_codes=_NO_ETFS).stock_twd == Decimal("111")
 
 
 def test_required_funds_uses_etf_ticks() -> None:
     case = _resting("etf", Market.ODD, "0050", 100, price_ref=PriceRef.LIMIT_DOWN_PLUS_TICK)
 
-    assert required_funds([case], _LIMITS, {}, etf_codes={"0050"}).stock_twd == Decimal("4951")
-    assert required_funds([case], _LIMITS, {}, etf_codes=_NO_ETFS).stock_twd == Decimal("4955")
+    # 100 shares at 49.51 (ETF tick) is 4951, at 49.55 (stock tick) 4955, before commission
+    assert required_funds([case], _LIMITS, {}, etf_codes={"0050"}).stock_twd == Decimal("4959")
+    assert required_funds([case], _LIMITS, {}, etf_codes=_NO_ETFS).stock_twd == Decimal("4963")
 
 
 def test_required_funds_odd_lot_counts_shares() -> None:
     requirement = required_funds([_fill("odd", Market.ODD, "0050", 3)], _LIMITS, {}, etf_codes=_NO_ETFS)
 
-    assert requirement.stock_twd == Decimal("181.5")
+    # 3 shares at 60.5 is 181.5, 181.7586375 with commission
+    assert requirement.stock_twd == Decimal("182")
 
 
 def test_required_funds_ignores_exceed_funds_and_resting_stock_sell() -> None:
@@ -214,3 +227,52 @@ def test_required_funds_futures_uses_largest_margin() -> None:
 def test_required_funds_missing_margin_names_code() -> None:
     with pytest.raises(ConfigError, match=r"'TMFJ6'"):
         required_funds([_resting("far", Market.FUTURES, "TMFJ6", 1)], {}, {}, etf_codes=_NO_ETFS)
+
+
+def test_required_funds_whole_twd_commission_rounds_up() -> None:
+    limits = {
+        "3333": ContractLimits(code="3333", limit_up=Decimal("11"), limit_down=Decimal("9"), reference=Decimal("10"))
+    }
+
+    # 1 * 1000 * 11 = 11000, and 11000 * 1.001425 = 11015.675
+    requirement = required_funds([_fill("fill", Market.STOCK, "3333", 1)], limits, {}, etf_codes=_NO_ETFS)
+
+    assert requirement.stock_twd == Decimal("11016")
+
+
+def test_check_limits_accepts_well_formed_band() -> None:
+    check_limits(_STOCK, Market.STOCK, is_etf=False)
+    check_limits(_TMF, Market.FUTURES, is_etf=False)
+
+
+@pytest.mark.parametrize(
+    ("limit_up", "limit_down", "reference", "match"),
+    [
+        ("12.15", "9.95", "12.15", r"out of order"),
+        ("12.15", "0", "11.05", r"out of order"),
+        ("12.17", "9.95", "11.05", r"limit_up 12.17 is not a multiple of its tick 0.05"),
+        ("12.15", "9.955", "11.05", r"limit_down 9.955 is not a multiple of its tick 0.01"),
+    ],
+)
+def test_check_limits_rejects_malformed_band(limit_up: str, limit_down: str, reference: str, match: str) -> None:
+    limits = ContractLimits(
+        code="9999", limit_up=Decimal(limit_up), limit_down=Decimal(limit_down), reference=Decimal(reference)
+    )
+
+    with pytest.raises(ValueError, match=match):
+        check_limits(limits, Market.STOCK, is_etf=False)
+
+
+def test_check_limits_futures_grid_is_whole_points() -> None:
+    limits = ContractLimits(
+        code="TMFJ6", limit_up=Decimal("52559.5"), limit_down=Decimal("43003"), reference=Decimal("47781")
+    )
+
+    with pytest.raises(ValueError, match=r"limit_up"):
+        check_limits(limits, Market.FUTURES, is_etf=False)
+
+
+def test_format_decimal_never_uses_exponent() -> None:
+    assert format_decimal(Decimal("1E+3")) == "1000"
+    assert format_decimal(Decimal("45391")) == "45391"
+    assert format_decimal(Decimal("0.00001")) == "0.00001"

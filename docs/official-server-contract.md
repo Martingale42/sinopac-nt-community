@@ -58,7 +58,7 @@ P1 spike 的產出文件（設計：`docs/plans/2026-09-29-official-server-spike
 - tick（`event:tick_fop`）價格為十進位字串，`date` 與 `time` 為台北本地時間且無時區標記，帶 `simtrade` 布林欄位。
 - 訂閱與取消訂閱回 `{"success": true, "message": …, "subscription": …}`。
 - 期貨 API 測試（2026-09-29 18:31–18:40，模擬模式）：`subscribe_trade` 後 `order_event` 送出拒單、New、Cancel 三個事件；登入加一筆期貨下單與刪單後，重新登入時 `F` 的 `signed` 由 `false` 變為 `true`。
-- 夜盤以合約檔的 `limit_down` 買進 TMF 被拒（op_code `88`，「價格超過漲跌幅範圍」），以 `reference × 0.95` 買進則被接受；模擬撮合採用的漲跌幅基準與合約檔不同，原因未查證。
+- 夜盤以合約檔的 `limit_down` 買進 TMF 被拒（op_code `88`，「價格超過漲跌幅範圍」），以 `reference × 0.95` 買進則被接受。推論（未查證）：合約檔的漲跌停只適用期交所日盤，夜盤依當日日盤結算另計；該筆 18:33 下單時，日盤收盤 48193 × 0.9 ≈ 43374 已高於合約檔的 `limit_down` 43003。錄製器的期貨劇本單因此只在日盤下。
 - `place_order` 的 `account` 須帶 `/auth/accounts` 回傳的完整帳戶物件；只帶帳號時 `account_type` 預設為 `S`。
 - 重啟 server 會沿用 `SJ_HOME_PATH` 下 token pool 的快取 token，不會重新登入；要強制重新登入須先 `shioaji utils token clean --slot <n>`。
 - server log 的 `Subscribed trade events for account …` 一行含帳號明文，引用 server log 前須去識別化。

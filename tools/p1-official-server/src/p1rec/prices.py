@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
-from decimal import ROUND_FLOOR, Decimal
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from typing import assert_never
 
 from p1rec.config import ConfigError
@@ -37,10 +37,14 @@ _ETF_TOP_TICK = Decimal("0.05")
 # TAIFEX contract specifications for TXF, MXF and TMF
 _FUTURES_TICK = Decimal("1")
 
-# The simulated matcher rejects a futures order at the contract's
-# limit_down but accepts one at this fraction of reference
+# The simulated matcher accepted a futures buy at this fraction of
+# reference where it rejected one at the contract file's limit_down
 # (docs/official-server-contract.md section 2).
 _FUTURES_FAR_BELOW_RATIO = Decimal("0.95")
+
+# TWSE maximum brokerage commission rate, added to every stock requirement
+# since a buy reserves its commission along with its price.
+STOCK_BUY_FEE_RATE = Decimal("0.001425")
 
 
 @dataclass(frozen=True)
@@ -55,6 +59,11 @@ class ContractLimits:
 class FundsRequirement:
     stock_twd: Decimal
     futures_margin_twd: Decimal
+
+
+def format_decimal(value: Decimal) -> str:
+    """Render value in plain positional notation, never exponent notation such as 1E+3."""
+    return format(value, "f")
 
 
 def tick_size(market: Market, price: Decimal, *, is_etf: bool) -> Decimal:
@@ -90,11 +99,10 @@ def resolve_price(ref: PriceRef, limits: ContractLimits, market: Market, *, is_e
                 far_below = limit_down for stock and odd lots,
                 floor(reference * 0.95 / tick) * tick for futures;
                 far_below_plus_tick = far_below + tick(far_below).
-    Domain:     limits from the live contract response, all positive and on
-                the tick grid; is_etf selects the ETF tick table for stock and
-                odd lots. Futures use a fraction of reference instead of
-                limit_down because the simulated matcher rejects futures
-                orders at limit_down.
+    Domain:     limits from the live contract response that passed
+                check_limits; is_etf selects the ETF tick table for stock and
+                odd lots. See _far_below for why futures do not use
+                limit_down.
     Returns:    Price in TWD (stock, odd lot) or index points (futures); a
                 far_below price is meant to rest without filling.
     """
@@ -115,7 +123,48 @@ def resolve_price(ref: PriceRef, limits: ContractLimits, market: Market, *, is_e
     assert_never(ref)
 
 
+def check_limits(limits: ContractLimits, market: Market, *, is_etf: bool) -> None:
+    """Raise ValueError unless a contract's price band is well formed.
+
+    Definition: A sanity check on the limits a contract response reports.
+    Formula:    0 < limit_down < reference < limit_up, and for each limit L,
+                L mod tick(L) = 0.
+    Domain:     limits from one live contract record; market and is_etf pick
+                the tick table as in tick_size. A limit off its tick grid or
+                out of order means the record is not what p1rec expects, so
+                every price derived from it is untrustworthy.
+    Returns:    None when the band is well formed; otherwise raises ValueError
+                naming the first violation.
+    """
+    if not 0 < limits.limit_down < limits.reference < limits.limit_up:
+        raise ValueError(
+            f"limits out of order: limit_down {format_decimal(limits.limit_down)}, "
+            f"reference {format_decimal(limits.reference)}, limit_up {format_decimal(limits.limit_up)}"
+        )
+    for name, value in (("limit_down", limits.limit_down), ("limit_up", limits.limit_up)):
+        tick = tick_size(market, value, is_etf=is_etf)
+        if value % tick != 0:
+            raise ValueError(f"{name} {format_decimal(value)} is not a multiple of its tick {format_decimal(tick)}")
+
+
 def _far_below(limits: ContractLimits, market: Market, *, is_etf: bool) -> Decimal:
+    """Return a buy price far enough below the market to rest without filling.
+
+    Definition: The lowest price a resting buy can use that the simulated
+                matcher is known to accept.
+    Formula:    stock and odd lot: limit_down;
+                futures: floor(reference * 0.95 / tick) * tick.
+    Domain:     limits passed check_limits. The contract file's limits are
+                the day session's, and a night-session futures order is
+                checked against limits derived from that day's settlement
+                (inferred from the futures API test,
+                docs/official-server-contract.md section 2), so futures
+                scenario orders run in the day session only. Even there a
+                fraction of reference, which the matcher accepted, is used
+                rather than limit_down, which it rejected.
+    Returns:    Price in TWD (stock, odd lot) or index points (futures), on
+                the tick grid.
+    """
     if market is not Market.FUTURES:
         return limits.limit_down
     target = limits.reference * _FUTURES_FAR_BELOW_RATIO
@@ -143,6 +192,8 @@ def required_funds(
                 resolve_price among its price_ref and its update_price steps;
                 futures_margin_twd = max over counted futures cases of
                 quantity * margins_twd[code]; 0 when a market has no counted case.
+                The stock figure is then raised by the brokerage commission:
+                stock_twd = ceil(stock_twd * (1 + STOCK_BUY_FEE_RATE)).
     Domain:     A case is counted unless its quantity is exceed_funds (sized to
                 be refused, never to be funded) or it is a stock or odd-lot Sell
                 that does not expect a fill, which reserves shares rather than
@@ -152,12 +203,13 @@ def required_funds(
                 every counted stock and odd-lot code, margins_twd the
                 per-contract initial margin in TWD of every counted futures
                 code, and etf_codes selects the ETF tick table for prices one
-                tick off a limit. Fees and taxes are not included. Raises
-                ConfigError naming the code if a margin is missing, and
-                LookupError if a stock or odd-lot code has no limits.
-    Returns:    FundsRequirement in TWD, to compare against the stock
-                account's available balance and the futures account's
-                available margin respectively.
+                tick off a limit. Securities transaction tax falls on sells
+                only and is not included. Raises ConfigError naming the code if
+                a margin is missing, and LookupError if a stock or odd-lot code
+                has no limits.
+    Returns:    FundsRequirement in TWD, the stock figure a whole TWD, to
+                compare against the stock account's available amount and the
+                futures account's available margin respectively.
     """
     stock_twd = Decimal(0)
     futures_margin_twd = Decimal(0)
@@ -178,11 +230,23 @@ def required_funds(
                 raise LookupError(f"no contract limits for {case.code!r}, needed by case {case.id!r}")
             price = _reserved_price(case, contract, is_etf=case.code in etf_codes)
             stock_twd = max(stock_twd, case.quantity * _SHARES_PER_UNIT[case.market] * price)
+    stock_twd = (stock_twd * (1 + STOCK_BUY_FEE_RATE)).to_integral_value(rounding=ROUND_CEILING)
     return FundsRequirement(stock_twd=stock_twd, futures_margin_twd=futures_margin_twd)
 
 
 def _reserved_price(case: Case, limits: ContractLimits, *, is_etf: bool) -> Decimal:
-    """Return the highest per-share price case's order can hold while it rests or fills."""
+    """Return the highest per-share price a stock or odd-lot case's order can hold.
+
+    Definition: The price a case's order reserves funds at, at its most
+                expensive point while it rests or fills.
+    Formula:    limit_up if case.expect_fill or case.price_type is MKT or MKP;
+                else max(resolve_price(r)) over r in {case.price_ref} and the
+                price_ref of every update_price step.
+    Domain:     case is a stock or odd-lot case; limits passed check_limits.
+                A market order, or any case expected to fill, may pay
+                anything up to limit_up, so both reserve at limit_up.
+    Returns:    Price per share in TWD.
+    """
     if case.expect_fill or case.price_type != "LMT":
         return limits.limit_up
     refs = [case.price_ref]

@@ -43,8 +43,16 @@ def _build_cfg(tmp_path: Path) -> P1Config:
         secret_env={},
         endpoints={_OP: Endpoint(method="GET", path=_INFO_PATH)},
         interlock=InterlockConfig(endpoint_op=_OP, pointer="/simulation"),
-        contracts=ContractFields(code="", limit_up="", limit_down="", reference="", etf_codes=()),
-        funds=FundsConfig(stock_available_pointer="", futures_available_pointer="", futures_margin_twd={}),
+        contracts=ContractFields(
+            code="", limit_up="", limit_down="", reference="", futures_tick="", etf_codes=()
+        ),
+        funds=FundsConfig(
+            stock_available_op="",
+            stock_available_pointer="",
+            stock_report_only={},
+            futures_available_pointer="",
+            futures_margin_twd={},
+        ),
         stream=StreamConfig(),
         orders=OrdersConfig(),
         events=EventFields(),

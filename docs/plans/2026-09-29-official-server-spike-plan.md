@@ -311,20 +311,23 @@ git commit -m "Abort unless the official server reports simulation mode"
 ### Task 5：劇本模型、價格參照與第 0 步 preflight
 
 **Files:**
-- Create: `src/p1rec/scenarios.py`、`src/p1rec/prices.py`、`src/p1rec/preflight.py`
+- Create: `src/p1rec/scenarios.py`、`src/p1rec/prices.py`、`src/p1rec/broker.py`（與 Task 7 共用的查詢）、`src/p1rec/preflight.py`（編排與報告）
 - Modify: `src/p1rec/config.py`、`src/p1rec/cli.py`、`src/p1rec/interlock.py`（自我測試的設定）、`src/p1rec/redact.py`（執行期遮蔽值）、`p1.toml`
-- Test: `tests/test_scenarios.py`、`tests/test_prices.py`、`tests/test_preflight.py`、`tests/test_redact.py`
+- Test: `tests/test_scenarios.py`、`tests/test_prices.py`、`tests/test_broker.py`、`tests/test_preflight.py`、`tests/test_redact.py`；`tests/mock_official.py` 為共用的程序內假 server
 
 **Behaviour:**
 
-- `load_scenarios` 讀 `scenarios.toml` 的 `[[case]]` 表；案例 id 重複、`steps` 含未知動詞、`steps` 不以唯一的 `place` 開頭、`expect_fill` 案例用了 `exceed_funds` 時拋 `ConfigError`。
-- 價格參照 `limit_down`、`limit_up`、`reference` 取自合約回應；`limit_down_plus_tick` 為跌停價加一個升降單位；`far_below` 在股票與零股為跌停價，在期貨為「參考價 × 0.95 向下取到升降單位」；`far_below_plus_tick` 為 `far_below` 加一個升降單位；升降單位依市場、價格區間與 `etf_codes` 查表。
-- `preflight`：連鎖檢查；查 `accounts`、`balance`、`margin`、`usage`、`ca_status`；查劇本案例用到的全部商品的合約（股票與零股逐檔查 `contracts_stock`；期貨依商品根代號各查一次 `contracts_futures`，取 `code` 相符的唯一一筆）；計算資金需求並比對可用額度。
-- `balance`、`margin` 的請求本體取自 `accounts` 回應中第一個 `S`、`F` 帳戶的 `account_type`、`broker_id`、`account_id`、`person_id`；`ca_status` 的 `person_id` 同樣取自該回應，帳戶識別不進 `p1.toml`。
-- 取得 `accounts` 後，每個帳戶的 `account_id`、`person_id`、`username` 立即以 `add_redaction_values` 加入 log 遮蔽；`setup_logging` 把 `httpx`、`httpcore` 降為 WARNING，請求 URL（含 `ca_status` 的 `person_id`）只留在 `rest.jsonl`。
-- 資金需求以單一部位計（設計 §4；案例逐筆執行，掛著的單在下一筆開始前已刪單）：計入除 `exceed_funds` 以外的每個買進案例、會成交的案例與期貨賣出案例（期貨委託不分買賣都要保證金；股票賣出圈存的是股票而非現金）。股票為 `max(案例的 張數 × 1000 或零股股數 × 圈存價)`，圈存價在會成交或市價類（MKT、MKP）案例為漲停價，其餘為下單與各 `update_price` 步驟價格參照的最高價；期貨為 `max(案例口數 × 該契約代號的原始保證金)`。計入的期貨案例在 `futures_margin_twd` 缺該代號時記 ERROR、以 2 結束；漲跌停價或參考價不是正數時同樣以 2 結束。
+- `load_scenarios` 讀 `scenarios.toml` 的 `[[case]]` 表；`[[case]]` 以外的頂層鍵、案例 id 重複、`steps` 含未知動詞、`steps` 不以唯一的 `place` 開頭、`cancel` 之後還有步驟、`update_qty` 累計減量超過案例數量、`expect_fill` 案例用了 `exceed_funds` 時拋 `ConfigError`。
+- 價格參照 `limit_down`、`limit_up`、`reference` 取自合約回應；`limit_down_plus_tick` 為跌停價加一個升降單位；`far_below` 在股票與零股為跌停價，在期貨為「參考價 × 0.95 向下取到升降單位」（合約檔的漲跌停只適用期交所日盤，夜盤依當日結算另計，屬推論，見契約文件 §2；期貨劇本單只在日盤下）；`far_below_plus_tick` 為 `far_below` 加一個升降單位；升降單位依市場、價格區間與 `etf_codes` 查表。
+- `preflight`：連鎖檢查；查 `accounts`、股票資金來源、`margin`、`usage`、`ca_status`；查劇本案例用到的全部商品的合約（股票與零股逐檔查 `contracts_stock`；期貨依商品根代號各查一次 `contracts_futures`，取 `code` 相符的唯一一筆）；計算資金需求並比對可用額度。只有劇本交易的市場才需要對應帳戶與可用額度：純股票劇本不查 `F` 帳戶與 `margin`。
+- 股票可用額度取自 `funds.stock_available_op` 與 `funds.stock_available_pointer`（`p1.toml` 為 `trading_limits` 的 `/trading_available`：推論券商以交易額度而非交割帳戶餘額檢查委託，`calibrate:` Task 12 以模擬帳戶的實際回應確認）；`funds.stock_report_only` 所列的其他來源（`balance` 的 `/acc_balance`）照樣查詢、落地並寫入報告，但不參與比對，失敗只記 WARN。這些操作須為 POST 端點，載入設定時檢查。
+- 資金查詢的請求本體取自 `accounts` 回應中第一個 `S`、`F` 帳戶的 `account_type`、`broker_id`、`account_id`、`person_id`；`ca_status` 的 `person_id` 同樣取自該回應，帳戶識別不進 `p1.toml`；`accounts` 查詢失敗時不查 `ca_status`。
+- `fetch_accounts` 本身在使用回應前，把每個帳戶的 `account_id`、`person_id`、`username` 以 `add_redaction_values` 加入 log 遮蔽，所有呼叫者（含 Task 7）自動適用；`setup_logging` 把 `httpx`、`httpcore` 降為 WARNING，請求 URL（含 `ca_status` 的 `person_id`）只留在 `rest.jsonl`。
+- 2xx 的資金回應帶非空錯誤訊息（`AccountBalance.errmsg`；`Margin`、`TradingLimits` 沒有錯誤欄位）時視為查詢失敗，不當成資金不足；錯誤訊息只留在 `rest.jsonl`。
+- 合約限價須 `0 < 跌停 < 參考價 < 漲停`，且漲跌停皆落在所屬市場的升降單位格點上；期貨紀錄帶 `tick` 時須等於 1 點；任一不符即記 ERROR、以 2 結束。
+- 資金需求以單一部位計（設計 §4；案例逐筆執行，掛著的單在下一筆開始前已刪單）：計入除 `exceed_funds` 以外的每個買進案例、會成交的案例與期貨賣出案例（期貨委託不分買賣都要保證金；股票賣出圈存的是股票而非現金）。股票為 `max(案例的 張數 × 1000 或零股股數 × 圈存價)`，圈存價在會成交或市價類（MKT、MKP）案例為漲停價，其餘為下單與各 `update_price` 步驟價格參照的最高價；股票需求再加券商手續費：`× (1 + 0.001425)` 後無條件進位到元。期貨為 `max(案例口數 × 該契約代號的原始保證金)`。計入的期貨案例在 `futures_margin_twd` 缺該代號時記 ERROR、以 2 結束。
 - 連鎖檢查通過後，任一查詢拿不到回應（連線被拒、逾時）時記 ERROR、該值記為未知、其餘查詢照跑，最後以 2 結束。
-- 不足、或找不到可用額度欄位時記 ERROR、以 2 結束；不論成敗（含連鎖檢查中止）都寫 `preflight.json`，金額以十進位字串表示，鍵為 `funds_ok`、`required`、`available`、`connections`、`accounts`（帳戶類型 → `signed`）、`limits`（商品 → 漲停、跌停、參考價）。
+- 不足、或找不到可用額度欄位時記 ERROR、以 2 結束；不論成敗（含連鎖檢查中止）都寫 `preflight.json`，金額以十進位字串表示，鍵為 `funds_ok`、`required`、`available`（`stock_twd`、`futures_margin_twd` 與 `stock_sources`：各股票資金來源 → 金額，比對用的在前）、`connections`、`accounts`（帳戶類型 → `signed`）、`limits`（商品 → 漲停、跌停、參考價）。
 - 劇本含某市場的案例、而對應帳戶（股票與零股為 `S`，期貨為 `F`）的 `signed` 不是 `true` 時記 WARN，不中止；該市場的拒單照樣錄製。
 - 所有查詢的原始回應經 `CapturingClient` 落地，供 Task 15 挑選 fixture。
 
@@ -367,11 +370,14 @@ class ContractFields:  # 皆為 JSON 指標，取自 Task 1
     limit_up: str
     limit_down: str
     reference: str
+    futures_tick: str
     etf_codes: tuple[str, ...]
 
 @dataclass(frozen=True)
 class FundsConfig:
+    stock_available_op: str           # 比對用的股票資金查詢（POST）
     stock_available_pointer: str
+    stock_report_only: dict[str, str]  # 其他股票資金查詢：操作 -> 指標，只報告
     futures_available_pointer: str
     futures_margin_twd: dict[str, Decimal]  # 契約代號 -> 每口原始保證金
 
@@ -382,7 +388,9 @@ class FundsRequirement:
 
 def load_scenarios(path: Path) -> list[Case]: ...
 def parse_step(raw: str) -> Step: ...
+def format_decimal(value: Decimal) -> str: ...  # 一律定點表示，不出現 1E+3
 def tick_size(market: Market, price: Decimal, *, is_etf: bool) -> Decimal: ...
+def check_limits(limits: ContractLimits, market: Market, *, is_etf: bool) -> None: ...  # 不符拋 ValueError
 def resolve_price(ref: PriceRef, limits: ContractLimits, market: Market, *, is_etf: bool) -> Decimal: ...
 def required_funds(cases: Sequence[Case], limits: Mapping[str, ContractLimits],
                    margins_twd: Mapping[str, Decimal], *, etf_codes: Collection[str]) -> FundsRequirement: ...
@@ -390,10 +398,15 @@ def add_redaction_values(values: Iterable[str]) -> None: ...  # redact.py
 def run_preflight(cfg: P1Config, scenarios: Path, run_dir: Path, *,
                   transport: httpx.BaseTransport | None = None) -> int: ...
 
-# preflight.py 另供 Task 7 沿用，查詢失敗或欄位不符時拋 PreflightError
+# broker.py：與 Task 7 共用；回應欄位不符拋 BrokerError，拿不到回應時照原樣拋 httpx 例外
+class BrokerError(RuntimeError): ...
+ACCOUNT_TYPE_FOR_MARKET: Mapping[Market, str]
+def parse_json_exact(op: str, response: CapturedResponse) -> object: ...  # 非整數一律 Decimal
 def fetch_accounts(client: CapturingClient, cfg: P1Config) -> list[dict[str, object]]: ...
 def account_for_market(accounts: Sequence[Mapping[str, object]], market: Market) -> Mapping[str, object]: ...
 def account_request(account: Mapping[str, object]) -> dict[str, object]: ...
+def fetch_funds_value(client: CapturingClient, cfg: P1Config, op: str, pointer: str,
+                      account: Mapping[str, object]) -> Decimal: ...
 def fetch_available_twd(client: CapturingClient, cfg: P1Config, market: Market,
                         account: Mapping[str, object]) -> Decimal: ...
 def fetch_limits(client: CapturingClient, cfg: P1Config, cases: Sequence[Case]) -> dict[str, ContractLimits]: ...
@@ -414,6 +427,11 @@ def fetch_limits(client: CapturingClient, cfg: P1Config, cases: Sequence[Case]) 
 - `test_missing_futures_margin_exits_2` — 會成交的期貨案例缺原始保證金時回 2，ERROR 含該代號。
 - `test_unsigned_futures_account_warns` — `F` 帳戶 `signed: false` 且劇本含期貨案例時記 WARN、結束碼仍為 0。
 - `test_refused_connection_mid_preflight_exits_2` — `margin` 連線被拒時記 ERROR、其餘查詢照跑、回 2。
+- `test_stock_only_scenarios_need_no_futures_account` — 純股票劇本在沒有 `F` 帳戶時回 0，不查 `margin`、沒有 ERROR。
+- `test_errmsg_on_compared_balance_is_failed_query_not_shortfall` — 帶 `errmsg` 的 2xx 回應記為查詢失敗，不記資金不足。
+- `test_malformed_stock_limits_fail_closed`、`test_futures_tick_mismatch_fails_closed` — 限價順序、格點或期貨 `tick` 不符時拋 `BrokerError`。
+- `test_continuous_month_alias_resolves_its_root` — `TMFR1` 與 `TMFJ6` 同屬根代號 `TMF`，只查一次。
+- `test_malformed_scenarios_writes_json_and_raises` — 劇本檔有誤時仍寫出 `preflight.json`。
 - `test_httpx_request_url_not_logged`、`test_added_redaction_value_is_redacted` — `recorder.log` 與 stderr 都看不到請求 URL 與執行期加入的值。
 
 **Numbers:**
@@ -424,11 +442,12 @@ def fetch_limits(client: CapturingClient, cfg: P1Config, cases: Sequence[Case]) 
 - 股票升降單位（<10：0.01；10–<50：0.05；50–<100：0.1；100–<500：0.5；500–<1000：1；≥1000：5）與 ETF（<50：0.01；≥50：0.05）：證交所升降單位規定。
 - 期貨升降單位 1 點：期交所 TXF／MXF／TMF 契約規格。
 - 期貨遠價 0.95：期貨 API 測試（契約文件 §2）中以跌停價下單被拒、以參考價 × 0.95 下單被接受。
+- 股票買進手續費率 0.001425：證交所規定的券商手續費上限。
 - `futures_margin_twd`：`calibrate:` Task 12 執行 preflight 前，依期交所當日公告的原始保證金填入。
 
 **Verification:**
 
-Run: `uv run pytest -q tests/test_scenarios.py tests/test_prices.py tests/test_preflight.py tests/test_redact.py`
+Run: `uv run pytest -q tests/test_scenarios.py tests/test_prices.py tests/test_broker.py tests/test_preflight.py tests/test_redact.py`
 Expected: 全部 passed。
 
 **Commit:**

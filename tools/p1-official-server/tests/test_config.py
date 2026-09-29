@@ -44,13 +44,23 @@ def test_load_config_success(tmp_path: Path, write_config: WriteConfig) -> None:
     assert cfg.endpoints == {
         "mode": Endpoint(method="GET", path="/api/v1/info"),
         "place_stock": Endpoint(method="POST", path="/api/v1/order/place_order"),
+        "trading_limits": Endpoint(method="POST", path="/api/v1/portfolio/trading_limits"),
     }
     assert cfg.interlock == InterlockConfig(endpoint_op="mode", pointer="/simulation")
     assert cfg.contracts == ContractFields(
-        code="/code", limit_up="/limit_up", limit_down="/limit_down", reference="/reference", etf_codes=("0050",)
+        code="/code",
+        limit_up="/limit_up",
+        limit_down="/limit_down",
+        reference="/reference",
+        futures_tick="/tick",
+        etf_codes=("0050",),
     )
     assert cfg.funds == FundsConfig(
-        stock_available_pointer="/acc_balance", futures_available_pointer="/available_margin", futures_margin_twd={}
+        stock_available_op="trading_limits",
+        stock_available_pointer="/trading_available",
+        stock_report_only={},
+        futures_available_pointer="/available_margin",
+        futures_margin_twd={},
     )
     # These remaining placeholder types only need to construct and load here
     assert cfg.stream == StreamConfig()
@@ -335,3 +345,27 @@ def test_missing_contracts_section_names_key(write_config: WriteConfig) -> None:
 
     with pytest.raises(ConfigError, match=r"contracts\."):
         load_config(write_config(lines))
+
+
+def _with_funds_line(key: str, line: str) -> list[str]:
+    return [line if entry.startswith(f"{key} =") else entry for entry in MINIMAL_CONFIG_LINES]
+
+
+@pytest.mark.parametrize("op", ["mode", "no_such_op"])
+def test_stock_available_op_must_be_post_endpoint(write_config: WriteConfig, op: str) -> None:
+    lines = _with_funds_line("stock_available_op", f'stock_available_op = "{op}"')
+
+    with pytest.raises(ConfigError, match=r"funds\.stock_available_op must name a POST endpoint"):
+        load_config(write_config(lines))
+
+
+def test_stock_report_only_entries_validated(write_config: WriteConfig) -> None:
+    at = MINIMAL_CONFIG_LINES.index("[funds.stock_report_only]") + 1
+
+    unknown = [*MINIMAL_CONFIG_LINES[:at], 'balance = "/acc_balance"', *MINIMAL_CONFIG_LINES[at:]]
+    with pytest.raises(ConfigError, match=r"funds\.stock_report_only\.balance must name a POST endpoint"):
+        load_config(write_config(unknown))
+
+    repeated = [*MINIMAL_CONFIG_LINES[:at], 'trading_limits = "/trading_available"', *MINIMAL_CONFIG_LINES[at:]]
+    with pytest.raises(ConfigError, match=r"repeats funds\.stock_available_op"):
+        load_config(write_config(repeated))
