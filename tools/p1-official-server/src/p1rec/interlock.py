@@ -166,7 +166,15 @@ def _self_test_cfg(interlock: InterlockConfig) -> P1Config:
         orders=OrdersConfig(),
         events=EventFields(),
         history=HistoryConfig(queries=(), usage_bytes_pointer="/bytes"),
-        scrub=ScrubConfig(),
+        scrub=ScrubConfig(
+            account_id_pointers=(),
+            ca_pointers=(),
+            account_id_keys=(),
+            map_path=Path("."),
+            selection=Path("."),
+            contract_doc=Path("."),
+            extra_scan_paths=(),
+        ),
     )
 
 

@@ -194,3 +194,18 @@ balance = "/acc_balance"
 # code any futures case trades, resting or filling; preflight fails while
 # one is missing.
 [funds.futures_margin_twd]
+
+# Identifiers to scrub besides the secrets above: what each pointer finds
+# in every account of a recorded accounts response (an array) or in a
+# ca_status response, its last token naming the placeholder category
+# (ACCOUNT_ID_1, USERNAME_1, ...), and the value of each account_id_keys
+# key at any depth of recorded JSON, while broker_id, a public branch
+# code, is kept.
+[scrub]
+account_id_pointers = ["/account_id", "/username", "/person_id"]
+ca_pointers = ["/person_id"]
+account_id_keys = ["subaccount"]
+map_path = "../../results/p1/scrub-map.json"
+selection = "fixtures.toml"
+contract_doc = "../../docs/official-server-contract.md"
+extra_scan_paths = ["fixtures.toml"]

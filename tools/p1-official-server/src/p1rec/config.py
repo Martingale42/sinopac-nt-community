@@ -104,7 +104,26 @@ class HistoryConfig:
 
 @dataclass(frozen=True)
 class ScrubConfig:
-    """Placeholder, filled in once de-identification fields are defined."""
+    # JSON pointers applied to every element of each recorded accounts
+    # response, and to each ca_status response, to find the identifiers to
+    # scrub, with the pointer's last token upper-cased naming the category.
+    account_id_pointers: tuple[str, ...]
+    ca_pointers: tuple[str, ...]
+
+    # Key names whose non-empty values, at any depth of recorded JSON, are
+    # account identifiers too, with the key upper-cased naming the category.
+    account_id_keys: tuple[str, ...]
+
+    # Holds the original values themselves, so it must stay under results_root
+    map_path: Path
+
+    # fixtures.toml; each entry has name, run_id, source, lines, checklist, instrument and optionally recorded_at
+    selection: Path
+
+    # scrub --scan-only always scans fixtures_root's parent and this
+    # document, and extra_scan_paths can only add to them.
+    contract_doc: Path
+    extra_scan_paths: tuple[Path, ...]
 
 
 @dataclass(frozen=True)
@@ -480,6 +499,59 @@ def _parse_history_query(item: Any, index: int, known_endpoints: Mapping[str, An
     return HistoryQuery(op=op, body=body)
 
 
+def _get_str_tuple(data: Mapping[str, Any], dotted_key: str) -> tuple[str, ...]:
+    value = _lookup(data, dotted_key)
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ConfigError(f"config key {dotted_key} must be an array of strings")
+    return tuple(value)
+
+
+# A plain field name not ending in _<digits>, since it becomes a
+# placeholder category and <CATEGORY>_<n> must parse back unambiguously.
+_SCRUB_FIELD_NAME = r"(?![A-Za-z0-9_]*_[0-9]+$)[A-Za-z][A-Za-z0-9_]*"
+
+# The last token names the placeholder category of every value the pointer finds
+_SCRUB_POINTER_RE = re.compile(rf"^(/[^/]*)*/{_SCRUB_FIELD_NAME}$")
+
+
+def _get_scrub_pointers(data: Mapping[str, Any], dotted_key: str) -> tuple[str, ...]:
+    pointers = _get_str_tuple(data, dotted_key)
+    if not pointers:
+        raise ConfigError(f"config key {dotted_key} must list at least one JSON pointer")
+    for index, pointer in enumerate(pointers):
+        if not _SCRUB_POINTER_RE.fullmatch(pointer):
+            raise ConfigError(
+                f"config key {dotted_key}[{index}] must be a JSON pointer ending in a field name "
+                "that does not end in _<digits>"
+            )
+    return pointers
+
+
+_SCRUB_KEY_RE = re.compile(rf"^{_SCRUB_FIELD_NAME}$")
+
+
+def _get_scrub_keys(data: Mapping[str, Any], dotted_key: str) -> tuple[str, ...]:
+    keys = _get_str_tuple(data, dotted_key)
+    for index, key in enumerate(keys):
+        if not _SCRUB_KEY_RE.fullmatch(key):
+            raise ConfigError(f"config key {dotted_key}[{index}] must be a plain field name not ending in _<digits>")
+    return keys
+
+
 def _parse_scrub(data: Mapping[str, Any], config_dir: Path) -> ScrubConfig:
     _optional_table(data, "scrub")
-    return ScrubConfig()
+    results_root = _get_fs_path(data, "results_root", config_dir)
+    map_path = _get_fs_path(data, "scrub.map_path", config_dir)
+    if not map_path.is_relative_to(results_root):
+        raise ConfigError("config key scrub.map_path must be inside results_root, which stays out of version control")
+    return ScrubConfig(
+        account_id_pointers=_get_scrub_pointers(data, "scrub.account_id_pointers"),
+        ca_pointers=_get_scrub_pointers(data, "scrub.ca_pointers"),
+        account_id_keys=_get_scrub_keys(data, "scrub.account_id_keys"),
+        map_path=map_path,
+        selection=_get_fs_path(data, "scrub.selection", config_dir),
+        contract_doc=_get_fs_path(data, "scrub.contract_doc", config_dir),
+        extra_scan_paths=tuple(
+            (config_dir / raw).resolve() for raw in _get_str_tuple(data, "scrub.extra_scan_paths")
+        ),
+    )
