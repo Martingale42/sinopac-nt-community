@@ -17,10 +17,15 @@ injected clock lets the rehearsal run at any hour. That clock shifts the
 wall time alone; its sleeps and elapsed time are real. stream has to be a
 subprocess regardless, since it blocks its stop signals and refuses to
 start while any other thread, such as the stub's, is running.
+
+The rehearsal config must keep the live p1.toml's tables, keys and body
+template placeholders, values aside, so that what passes here is the
+configuration a live run loads; a drift test holds the two together.
 """
 
 from __future__ import annotations
 
+import copy
 import functools
 import json
 import os
@@ -47,13 +52,19 @@ from stub_server import (
 )
 
 from p1rec import cli, orders
-from p1rec.config import P1Config, load_config
+from p1rec.config import PLACEHOLDER_RE, P1Config, load_config
 from p1rec.interlock import EXIT_INTERLOCK_ABORT
 from p1rec.scenarios import load_scenarios
 
 _DATA_DIR = Path(__file__).resolve().parent / "data"
 _CONFIG_TEMPLATE = _DATA_DIR / "p1.toml"
 _SCENARIOS = _DATA_DIR / "scenarios.toml"
+_REAL_CONFIG = Path(__file__).resolve().parent.parent / "p1.toml"
+
+# Tables whose keys are data rather than structure: futures_margin_twd
+# names the contracts a run trades, and the live file leaves it empty until
+# it is calibrated for the run date.
+_DATA_KEYED_TABLES = frozenset({"funds.futures_margin_twd"})
 
 # The console script uv installs beside the interpreter running the tests
 _P1REC = Path(sys.executable).with_name("p1rec")
@@ -151,6 +162,77 @@ class _Rehearsal:
 
 def _process_env() -> dict[str, str]:
     return {**os.environ, **_SECRETS}
+
+
+def _toml(path: Path) -> dict[str, Any]:
+    return tomllib.loads(path.read_text(encoding="utf-8"))
+
+
+def _body_template(value: str) -> dict[str, Any] | None:
+    """Return value parsed as a JSON body template, or None if it is not a JSON object with a placeholder."""
+    try:
+        document = json.loads(value)
+    except ValueError:
+        return None
+    if not isinstance(document, dict) or not _template_members(document, ""):
+        return None
+    return document
+
+
+def _template_members(node: object, pointer: str) -> dict[str, str]:
+    """Return each leaf of a JSON body template, as a JSON pointer, with the placeholder it holds."""
+    if isinstance(node, dict):
+        members: dict[str, str] = {}
+        for key, item in node.items():
+            members.update(_template_members(item, f"{pointer}/{key}"))
+        return members
+    if isinstance(node, list):
+        members = {}
+        for index, item in enumerate(node):
+            members.update(_template_members(item, f"{pointer}/{index}"))
+        return members
+    match = PLACEHOLDER_RE.fullmatch(node) if isinstance(node, str) else None
+    return {pointer: f"placeholder {match.group(0)}"} if match else {}
+
+
+def _config_shape(node: dict[str, Any], prefix: str = "") -> dict[str, str]:
+    """Return every key path of a parsed p1.toml with the kind of thing it holds.
+
+    An array of tables contributes the union of its elements' keys under
+    <path>[], since the two configs list different instruments and
+    queries. A JSON body template contributes each placeholder it holds
+    under <path>/<JSON pointer>, so templates that fill a field from
+    different placeholders differ, not only templates with different
+    placeholder sets.
+    """
+    shape: dict[str, str] = {}
+    for key, value in node.items():
+        path = f"{prefix}.{key}" if prefix else key
+        if isinstance(value, dict):
+            shape[path] = "table"
+            if path not in _DATA_KEYED_TABLES:
+                shape.update(_config_shape(value, path))
+        elif isinstance(value, list) and value and all(isinstance(item, dict) for item in value):
+            shape[path] = "array of tables"
+            for item in value:
+                shape.update(_config_shape(item, f"{path}[]"))
+        elif isinstance(value, str) and (template := _body_template(value)) is not None:
+            shape[path] = "body template"
+            shape.update({f"{path}{member}": kind for member, kind in _template_members(template, "").items()})
+        else:
+            shape[path] = "value"
+    return shape
+
+
+def _config_drift(real: dict[str, Any], rehearsal: dict[str, Any]) -> list[str]:
+    """Return one line per key path whose kind differs between the live and rehearsal configs, naming the path."""
+    real_shape, rehearsal_shape = _config_shape(real), _config_shape(rehearsal)
+    return [
+        f"{path}: {real_shape.get(path, 'absent')} in p1.toml, "
+        f"{rehearsal_shape.get(path, 'absent')} in tests/data/p1.toml"
+        for path in sorted(real_shape.keys() | rehearsal_shape.keys())
+        if real_shape.get(path) != rehearsal_shape.get(path)
+    ]
 
 
 def _config_text(base_url: str) -> str:
@@ -287,6 +369,28 @@ def _fixture_table(name: str, run_id: str, source: str, line: int, checklist: li
             "",
         ]
     )
+
+
+def test_rehearsal_config_matches_the_real_one() -> None:
+    drift = _config_drift(_toml(_REAL_CONFIG), _toml(_CONFIG_TEMPLATE))
+
+    assert drift == [], "tests/data/p1.toml has drifted from p1.toml:\n" + "\n".join(drift)
+
+
+def test_config_drift_names_the_differing_key() -> None:
+    altered = copy.deepcopy(_toml(_CONFIG_TEMPLATE))
+    del altered["events"]["gap_threshold_s"]
+    altered["orders"]["body_templates"]["cancel"] = '{"trade_id": "{price}"}'
+    altered["stream"]["instrument"][0]["lot"] = "odd"
+
+    drift = _config_drift(_toml(_REAL_CONFIG), altered)
+
+    assert [line.partition(": ")[0] for line in drift] == [
+        "events.gap_threshold_s",
+        "orders.body_templates.cancel/trade_id",
+        "stream.instrument[].lot",
+    ]
+    assert "placeholder {trade_id} in p1.toml, placeholder {price} in tests/data/p1.toml" in drift[1]
 
 
 def test_full_pipeline_against_stub(rehearsal: _Rehearsal, monkeypatch: pytest.MonkeyPatch) -> None:
