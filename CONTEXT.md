@@ -6,10 +6,10 @@
 
 **官方 server**:
 永豐隨 shioaji 1.7 起發佈的官方 HTTP gateway（CLI 指令 `shioaji server`）。
-_Avoid_: shioaji-server, gateway（未加限定時）
+_Avoid_: shioaji-gateway, gateway（未加限定時）
 
 **舊 gateway**:
-自架的 Python 服務 `Martingale42/shioaji-server`，包裝 shioaji 1.3，是 v0.1.x adapter 的連線對象。
+自架的 Python 服務 shioaji-gateway，包裝 shioaji 1.3，是 v0.1.x adapter 的連線對象。
 _Avoid_: shioaji server, 官方 server
 
 ## Orders
