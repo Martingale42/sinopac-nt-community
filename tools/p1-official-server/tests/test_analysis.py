@@ -32,6 +32,10 @@ from p1rec.config import ConfigError, EventFields, load_config
 from p1rec.interlock import InterlockError
 
 T0_NS = int(datetime(2026, 10, 1, 1, 0, tzinfo=timezone.utc).timestamp()) * NS_PER_S
+
+# 2026-10-01 09:00 Taipei in epoch seconds, the exchange and order time of the fixtures
+T0_S = float(T0_NS // NS_PER_S)
+SECONDS_PER_DAY = 86_400
 SSE_RUN = "20261001T010000Z-stream"
 REST_RUN = "20261001T011000Z-orders"
 
@@ -55,6 +59,7 @@ def _order(
     event_id: str,
     quantity: int = 2,
     cancel_qty: int = 0,
+    exchange_ts: float = T0_S,
     state: str = "FuturesOrder",
 ) -> dict[str, object]:
     """Return an OrderEvent with the keys of the official server's recorded order reports, values fake.
@@ -87,7 +92,7 @@ def _order(
                 },
                 "status": {
                     "id": key,
-                    "exchange_ts": 1790000000.0,
+                    "exchange_ts": exchange_ts,
                     "modified_price": 0.0,
                     "cancel_quantity": cancel_qty,
                     "order_quantity": status_order_qty,
@@ -99,7 +104,7 @@ def _order(
     }
 
 
-def _deal(key: str, quantity: int, *, event_id: str, state: str = "FuturesDeal") -> dict[str, object]:
+def _deal(key: str, quantity: int, *, event_id: str, ts: float = T0_S, state: str = "FuturesDeal") -> dict[str, object]:
     """Return an OrderEvent shaped like the OpenAPI FuturesDealEvent."""
     return {
         "state": state,
@@ -115,7 +120,7 @@ def _deal(key: str, quantity: int, *, event_id: str, state: str = "FuturesDeal")
                 "price": 100.0,
                 "quantity": quantity,
                 "security_type": "FUT",
-                "ts": 1790000000.0,
+                "ts": ts,
             }
         },
     }
@@ -150,7 +155,9 @@ def _write_sse(run_dir: Path, client: str, stream: str, records: list[dict[str, 
     return _write_jsonl(run_dir / f"sse_{client}_{stream}.jsonl", records)
 
 
-def _trade(key: str, status: str, deal_quantity: int | None, order_quantity: int = 2) -> dict[str, object]:
+def _trade(
+    key: str, status: str, deal_quantity: int | None, order_quantity: int = 2, order_ts: float | None = T0_S
+) -> dict[str, object]:
     """Return a Trade shaped like the official server's trades list items."""
     return {
         "contract": {"code": "TMFJ6"},
@@ -162,6 +169,7 @@ def _trade(key: str, status: str, deal_quantity: int | None, order_quantity: int
             "deal_quantity": deal_quantity,
             "cancel_quantity": 0,
             "order_quantity": order_quantity,
+            "order_ts": order_ts,
         },
     }
 
@@ -205,12 +213,11 @@ def _only_new_run(results_root: Path, subcommand: str) -> Path:
 
 
 def _run_cli_reconcile(
-    write_config: WriteConfig, monkeypatch: pytest.MonkeyPatch, results_root: Path
+    write_config: WriteConfig, monkeypatch: pytest.MonkeyPatch, results_root: Path, *extra_args: str
 ) -> tuple[int, dict[str, object]]:
     _set_secret_env(monkeypatch)
-    exit_code = main(
-        ["reconcile", "--config", str(write_config()), "--sse-run", SSE_RUN, "--rest-run", REST_RUN]
-    )
+    args = ["reconcile", "--config", str(write_config()), "--sse-run", SSE_RUN, "--rest-run", REST_RUN, *extra_args]
+    exit_code = main(args)
     report = json.loads((_only_new_run(results_root, "reconcile") / "reconcile.json").read_text(encoding="utf-8"))
     return exit_code, report
 
@@ -387,6 +394,55 @@ def test_rejected_update_qty_does_not_change_size(tmp_path: Path, fields: EventF
     views = orders_from_sse({"a": [path]}, fields)
 
     assert views["a"].orders["t1"] == OrderView(key="t1", status="PartFilled", filled_qty=Decimal(1))
+
+
+def test_two_day_sse_against_one_day_rest_snapshot(
+    write_config: WriteConfig, monkeypatch: pytest.MonkeyPatch, results_root: Path
+) -> None:
+    yesterday = T0_S - SECONDS_PER_DAY
+    earlier = [_order("t0", event_id="e0", exchange_ts=yesterday), _deal("t0", 2, event_id="d0", ts=yesterday)]
+    for client in ("a", "b"):
+        _write_sse(results_root / SSE_RUN, client, "order_event", _order_frames(client, [*earlier, *_EVENTS]))
+    _write_jsonl(results_root / REST_RUN / "rest.jsonl", [_trades_record(_MATCHING_TRADES)])
+
+    exit_code, report = _run_cli_reconcile(write_config, monkeypatch, results_root)
+
+    assert exit_code == 0
+    assert report["trading_day"] == "2026-10-01"
+    assert report["excluded_other_days"] == {"a": 1, "b": 1}
+    assert report["per_client_keys"] == {"a": ["t1", "t2", "t3"], "b": ["t1", "t2", "t3"]}
+    assert report["missing_events_by_client"] == {"a": [], "b": []}
+
+
+def test_trading_day_required_without_rest_order_times(
+    write_config: WriteConfig, monkeypatch: pytest.MonkeyPatch, results_root: Path
+) -> None:
+    for client in ("a", "b"):
+        _write_sse(results_root / SSE_RUN, client, "order_event", _order_frames(client, _EVENTS))
+    undated = [_trade("t1", "Submitted", 0, order_ts=None), _trade("t2", "Cancelled", 0, order_ts=None)]
+    undated.append(_trade("t3", "Filled", 2, order_ts=None))
+    _write_jsonl(results_root / REST_RUN / "rest.jsonl", [_trades_record(undated)])
+    _set_secret_env(monkeypatch)
+    config = str(write_config())
+    base_args = ["reconcile", "--config", config, "--sse-run", SSE_RUN, "--rest-run", REST_RUN]
+
+    assert main(base_args) == 1
+    assert main([*base_args, "--trading-day", "2026-10-01", "--tag", "dated"]) == 0
+
+
+def test_rest_snapshot_spanning_two_days_needs_trading_day(fields: EventFields) -> None:
+    trades = [_trade("t1", "Submitted", 0), _trade("t0", "Filled", 2, order_ts=T0_S - SECONDS_PER_DAY)]
+
+    with pytest.raises(AnalysisError, match=r"2026-09-30, 2026-10-01"):
+        analysis.trading_day_of(trades, fields)
+
+
+@pytest.mark.parametrize("value", ["2026-1-01", "20261001", "2026-02-30"])
+def test_trading_day_flag_rejects_bad_dates(write_config: WriteConfig, value: str) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        main(["reconcile", "--config", str(write_config()), "--sse-run", SSE_RUN, "--trading-day", value])
+
+    assert exc_info.value.code == 1
 
 
 def test_client_missing_reports_fails(

@@ -17,7 +17,7 @@ import re
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import NoReturn
 
@@ -84,6 +84,19 @@ def _add_sse_run_argument(sub: argparse.ArgumentParser) -> None:
     )
 
 
+_TRADING_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _parse_trading_day(value: str) -> date:
+    """Parse a --trading-day value, which must be a YYYY-MM-DD calendar date."""
+    try:
+        if not _TRADING_DAY_RE.fullmatch(value):
+            raise ValueError(value)
+        return date.fromisoformat(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid --trading-day {value!r}: must be a YYYY-MM-DD date") from None
+
+
 def _add_reconcile_arguments(sub: argparse.ArgumentParser) -> None:
     _add_sse_run_argument(sub)
     sub.add_argument(
@@ -92,10 +105,16 @@ def _add_reconcile_arguments(sub: argparse.ArgumentParser) -> None:
         type=_validate_run_id,
         help="run id whose last recorded trades response is used (default: query trades now)",
     )
+    sub.add_argument(
+        "--trading-day",
+        default=None,
+        type=_parse_trading_day,
+        help="Asia/Taipei date (YYYY-MM-DD) whose SSE orders are reconciled (default: the trades snapshot's date)",
+    )
 
 
 def _reconcile(args: argparse.Namespace, cfg: P1Config, run_dir: Path) -> int:
-    return run_reconcile(cfg, args.sse_run, args.rest_run, run_dir)
+    return run_reconcile(cfg, args.sse_run, args.rest_run, run_dir, trading_day=args.trading_day)
 
 
 def _stats(args: argparse.Namespace, cfg: P1Config, run_dir: Path) -> int:

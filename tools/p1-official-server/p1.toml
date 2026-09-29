@@ -147,12 +147,21 @@ cancel_qty = "/status/cancel_quantity"
 # StockDealEvent and FuturesDealEvent schemas until the first one is.
 deal_key = "/trade_id"
 deal_qty = "/quantity"
+deal_exchange_ts = "/ts"
+
+# Epoch seconds, which date an order for the trading-day window
+order_exchange_ts = "/status/exchange_ts"
 
 # trades answers with a bare array of Trade objects
 rest_list = ""
 rest_key = "/order/id"
 rest_status = "/status/status"
 rest_filled_qty = "/status/deal_quantity"
+
+# calibrate: assumed to be epoch seconds like the events' exchange_ts,
+# following the OpenAPI OrderStatusInfo schema until a trades response
+# with orders is recorded.
+rest_order_ts = "/status/order_ts"
 
 # Tick frames carry the exchange time as Taipei-local date and time
 # strings without a zone (docs/official-server-contract.md section 2).

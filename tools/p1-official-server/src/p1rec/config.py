@@ -80,12 +80,21 @@ class EventFields:
     # op_code of an accepted operation
     op_code_success: str
 
+    # Pointers to the exchange time, in epoch seconds, of an order report
+    # and of a deal report, which date an order for the trading-day window.
+    order_exchange_ts: str
+    deal_exchange_ts: str
+
     # JSON pointers into the trades response: the list ("" for a bare
     # array), then key, status and filled quantity within each item.
     rest_list: str
     rest_key: str
     rest_status: str
     rest_filled_qty: str
+
+    # Pointer into each trades item to its order time in epoch seconds,
+    # which dates the snapshot when no trading day is given.
+    rest_order_ts: str
 
     # Pointers into a frame's data giving the exchange time, empty to skip
     # latency: one numeric epoch-seconds value when exchange_ts_format is
@@ -412,10 +421,13 @@ def _parse_events(data: Mapping[str, Any], config_dir: Path) -> EventFields:
         deal_key=pointer("deal_key"),
         deal_qty=pointer("deal_qty"),
         op_code_success=name("op_code_success"),
+        order_exchange_ts=pointer("order_exchange_ts"),
+        deal_exchange_ts=pointer("deal_exchange_ts"),
         rest_list=pointer("rest_list", allow_root=True),
         rest_key=pointer("rest_key"),
         rest_status=pointer("rest_status"),
         rest_filled_qty=pointer("rest_filled_qty"),
+        rest_order_ts=pointer("rest_order_ts"),
         exchange_ts_pointers=exchange_ts_pointers,
         exchange_ts_format=exchange_ts_format,
         heartbeat_event=name("heartbeat_event"),

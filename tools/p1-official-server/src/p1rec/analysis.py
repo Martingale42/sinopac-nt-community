@@ -20,7 +20,7 @@ from array import array
 from collections import Counter
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from fractions import Fraction
 from pathlib import Path
@@ -116,6 +116,9 @@ class ClientOrders:
     # the data text for a report without one.
     event_ids: frozenset[str]
 
+    # Orders left out because they belong to another trading day
+    excluded_other_days: int = 0
+
 
 @dataclass(frozen=True)
 class ReconcileReport:
@@ -134,6 +137,9 @@ class ReconcileReport:
 
     # Report identities some client saw and this one did not
     missing_events_by_client: dict[str, list[str]]
+
+    # Orders each client saw on other trading days, left out of the comparison
+    excluded_other_days: dict[str, int]
 
     @property
     def clean(self) -> bool:
@@ -158,6 +164,7 @@ class ReconcileReport:
             "missing_by_client": self.missing_by_client,
             "missing_events_by_client": self.missing_events_by_client,
             "per_client_keys": self.per_client_keys,
+            "excluded_other_days": self.excluded_other_days,
         }
 
 
@@ -350,6 +357,11 @@ class _OrderProgress:
     filled_qty: Decimal = Decimal(0)
     identities: set[str] = field(default_factory=set)
 
+    # Exchange time of the first report that carried one, else the first
+    # report's receive time.
+    first_time_ns: int | None = None
+    first_time_is_exchange: bool = False
+
     def view(self, key: str) -> OrderView:
         status = derive_status(
             new_ok=self.new_ok,
@@ -463,6 +475,7 @@ def _apply_report(orders: dict[str, _OrderProgress], report: _Report, fields: Ev
             deal_progress = orders.setdefault(key, _OrderProgress())
             deal_progress.filled_qty += quantity
             deal_progress.identities.add(report.identity)
+            _note_time(deal_progress, report, fields.deal_exchange_ts)
             return
 
         key = _pointer_str(report.body, fields.order_key)
@@ -476,6 +489,7 @@ def _apply_report(orders: dict[str, _OrderProgress], report: _Report, fields: Ev
 
     progress = orders.setdefault(key, _OrderProgress())
     progress.identities.add(report.identity)
+    _note_time(progress, report, fields.order_exchange_ts)
     if accepted and order_qty is not None and order_qty > 0:
         progress.order_qty = order_qty
     if accepted and cancel_qty is not None:
@@ -490,21 +504,82 @@ def _apply_report(orders: dict[str, _OrderProgress], report: _Report, fields: Ev
         logger.warning("%s: op_type %r of order %s does not change its derived status", report.where, op_type, key)
 
 
-def orders_from_sse(paths: Mapping[str, Sequence[Path]], fields: EventFields) -> dict[str, ClientOrders]:
+def _note_time(progress: _OrderProgress, report: _Report, pointer: str) -> None:
+    """Keep the exchange time of an order's first report that has one, else its first receive time."""
+    if progress.first_time_is_exchange:
+        return
+    try:
+        exchange_ns = epoch_s_to_ns(resolve_pointer(report.body, pointer))
+    except (JsonPointerError, ValueError):
+        exchange_ns = None
+    if exchange_ns is not None and exchange_ns > 0:
+        progress.first_time_ns = exchange_ns
+        progress.first_time_is_exchange = True
+    elif progress.first_time_ns is None:
+        progress.first_time_ns = report.recv_ts_ns
+
+
+def epoch_s_to_ns(value: object) -> int:
+    """Return a JSON number of epoch seconds as integer epoch nanoseconds.
+
+    Definition: The same instant on the recorder's nanosecond scale.
+    Formula:    ns = round(Decimal(text of value) * 1e9), half to even.
+    Domain:     A JSON number (not a boolean) of seconds since
+                1970-01-01T00:00Z; going through its decimal text keeps it
+                exact, where float multiplication would blur it by
+                hundreds of nanoseconds at this magnitude. Raises
+                ValueError for anything else.
+    Returns:    Integer nanoseconds since the epoch.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{value!r} is not a number of epoch seconds")
+    return int((_to_decimal(value) * NS_PER_S).to_integral_value())
+
+
+def taipei_date(ts_ns: int) -> date:
+    """Return the Asia/Taipei calendar date of an epoch-nanosecond instant.
+
+    Definition: The local calendar date in Taiwan at that instant.
+    Formula:    date(floor(ts_ns / 1e9) seconds after the epoch, in
+                Asia/Taipei).
+    Domain:     Integer nanoseconds since 1970-01-01T00:00Z; Asia/Taipei
+                is UTC+8 with no daylight saving time.
+    Returns:    A date; an instant after 16:00Z falls on the next UTC day's date.
+    """
+    return datetime.fromtimestamp(ts_ns // NS_PER_S, tz=_exchange_tz()).date()
+
+
+def orders_from_sse(
+    paths: Mapping[str, Sequence[Path]], fields: EventFields, trading_day: date | None = None
+) -> dict[str, ClientOrders]:
     """Return, for each client, every order it saw keyed by order key, and the reports behind them.
 
     paths maps a client to all of its SSE files. Reports are read from
     frames named fields.order_event_name, deduplicated per client, and
     folded in arrival order; see derive_status for how the status follows.
+    With trading_day, only orders whose first report's exchange time falls
+    on that Asia/Taipei date take part, and the rest are counted in
+    excluded_other_days; an order none of whose reports carries an
+    exchange time is dated by its first receive time, with a WARNING.
     """
     result: dict[str, ClientOrders] = {}
     for client, client_paths in paths.items():
         orders: dict[str, _OrderProgress] = {}
         for report in _reports(client_paths, fields):
             _apply_report(orders, report, fields)
+
+        kept: dict[str, _OrderProgress] = {}
+        for key, progress in orders.items():
+            if trading_day is not None and not progress.first_time_is_exchange:
+                logger.warning("client %s order %s has no exchange time; dating it by receive time", client, key)
+            if trading_day is None or (
+                progress.first_time_ns is not None and taipei_date(progress.first_time_ns) == trading_day
+            ):
+                kept[key] = progress
         result[client] = ClientOrders(
-            orders={key: progress.view(key) for key, progress in orders.items()},
-            event_ids=frozenset(identity for progress in orders.values() for identity in progress.identities),
+            orders={key: progress.view(key) for key, progress in kept.items()},
+            event_ids=frozenset(identity for progress in kept.values() for identity in progress.identities),
+            excluded_other_days=len(orders) - len(kept),
         )
     return result
 
@@ -538,6 +613,29 @@ def orders_from_rest(payload: object, fields: EventFields) -> dict[str, OrderVie
             logger.warning("trades lists order %s more than once; keeping item %d", key, index)
         orders[key] = OrderView(key=key, status=status, filled_qty=filled)
     return orders
+
+
+def trading_day_of(payload: object, fields: EventFields) -> date:
+    """Return the Asia/Taipei date every order time in a trades response falls on.
+
+    Items without an order time are passed over. Raises AnalysisError
+    when no item has one, or when they span more than one date, since the
+    snapshot then names no single trading day and one must be given.
+    """
+    try:
+        items = resolve_pointer(payload, fields.rest_list)
+    except JsonPointerError:
+        items = []
+    days: set[date] = set()
+    for item in items if isinstance(items, list) else []:
+        try:
+            days.add(taipei_date(epoch_s_to_ns(resolve_pointer(item, fields.rest_order_ts))))
+        except (JsonPointerError, ValueError):
+            continue
+    if len(days) != 1:
+        found = ", ".join(sorted(day.isoformat() for day in days)) or "none"
+        raise AnalysisError(f"trades order times give no single trading day (found: {found}); pass --trading-day")
+    return days.pop()
 
 
 def reconcile(sse: Mapping[str, ClientOrders], rest: dict[str, OrderView]) -> ReconcileReport:
@@ -575,6 +673,7 @@ def reconcile(sse: Mapping[str, ClientOrders], rest: dict[str, OrderView]) -> Re
         missing_by_client=missing_by_client,
         per_client_keys={client: sorted(sse[client].orders) for client in clients},
         missing_events_by_client={client: sorted(all_events - sse[client].event_ids) for client in clients},
+        excluded_other_days={client: sse[client].excluded_other_days for client in clients},
     )
 
 
@@ -642,9 +741,8 @@ def exchange_ts_ns(doc: object, fields: EventFields) -> int | None:
 
     Definition: The instant the exchange stamped on a frame, on the same
                 scale as recv_ts_ns.
-    Formula:    Without exchange_ts_format: ns = round(Decimal(v) * 1e9),
-                v the single pointer's value in epoch seconds, exact to
-                its decimal text. With it: t = strptime(" ".join(values),
+    Formula:    Without exchange_ts_format: ns = epoch_s_to_ns(v), v the
+                single pointer's value in epoch seconds. With it: t = strptime(" ".join(values),
                 exchange_ts_format) as Asia/Taipei local time, ns =
                 (t - 1970-01-01T00:00Z) in whole microseconds * 1000.
     Domain:     doc is a frame's parsed data. Frames where a pointer does
@@ -661,12 +759,7 @@ def exchange_ts_ns(doc: object, fields: EventFields) -> int | None:
 
     if fields.exchange_ts_format is None:
         (value,) = values
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise ValueError(f"exchange time {value!r} is not a number of epoch seconds")
-
-        # Through the number's decimal text, which float multiplication would
-        # blur by hundreds of nanoseconds at this magnitude.
-        return int((_to_decimal(value) * NS_PER_S).to_integral_value())
+        return epoch_s_to_ns(value)
 
     texts = [value for value in values if isinstance(value, str)]
     if len(texts) != len(values):
@@ -936,6 +1029,7 @@ def run_reconcile(
     rest_run: str | None,
     run_dir: Path,
     *,
+    trading_day: date | None = None,
     transport: httpx.BaseTransport | None = None,
 ) -> int:
     """Write run_dir/reconcile.json and return 0 if SSE and REST agree, 2 if not.
@@ -944,8 +1038,10 @@ def run_reconcile(
     simulation-mode check, and recorded in run_dir; with it, the last
     trades response in that run's rest.jsonl is used. REST is read
     before the SSE files, so an order placed meanwhile shows up as only
-    in SSE rather than silently widening the comparison. InterlockError
-    propagates; any other failure to analyse is logged and returns 1.
+    in SSE rather than silently widening the comparison. Only SSE orders
+    of trading_day take part, which defaults to the date of the
+    snapshot's order times. InterlockError propagates; any other failure
+    to analyse is logged and returns 1.
     """
     try:
         sse_dir = resolve_run_dir(cfg.results_root, sse_run)
@@ -954,13 +1050,19 @@ def run_reconcile(
         else:
             payload = last_trades_payload(resolve_run_dir(cfg.results_root, rest_run) / "rest.jsonl")
         rest = orders_from_rest(payload, cfg.events)
+        day = trading_day if trading_day is not None else trading_day_of(payload, cfg.events)
         sse_files = discover_sse_files(sse_dir)
-        report = reconcile(orders_from_sse(sse_files, cfg.events), rest)
+        report = reconcile(orders_from_sse(sse_files, cfg.events, day), rest)
     except (AnalysisError, OSError) as exc:
         logger.error("reconcile failed: %s", exc)
         return EXIT_ANALYSIS_ERROR
 
-    document: dict[str, object] = {"sse_run": sse_run, "rest_run": rest_run, **report.to_json()}
+    document: dict[str, object] = {
+        "sse_run": sse_run,
+        "rest_run": rest_run,
+        "trading_day": day.isoformat(),
+        **report.to_json(),
+    }
     _write_json(run_dir / "reconcile.json", document)
     logger.info(
         "reconcile: %d only in REST, %d only in SSE, %d mismatched, missing orders %s, missing reports %s",
