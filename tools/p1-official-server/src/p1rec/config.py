@@ -315,9 +315,12 @@ def _get_str_tuple(data: Mapping[str, Any], dotted_key: str) -> tuple[str, ...]:
     return tuple(value)
 
 
-# The last token must be a plain field name, since it becomes the
-# placeholder category of every value the pointer finds.
-_SCRUB_POINTER_RE = re.compile(r"^(/[^/]*)*/[A-Za-z][A-Za-z0-9_]*$")
+# A plain field name not ending in _<digits>, since it becomes a
+# placeholder category and <CATEGORY>_<n> must parse back unambiguously.
+_SCRUB_FIELD_NAME = r"(?![A-Za-z0-9_]*_[0-9]+$)[A-Za-z][A-Za-z0-9_]*"
+
+# The last token names the placeholder category of every value the pointer finds
+_SCRUB_POINTER_RE = re.compile(rf"^(/[^/]*)*/{_SCRUB_FIELD_NAME}$")
 
 
 def _get_scrub_pointers(data: Mapping[str, Any], dotted_key: str) -> tuple[str, ...]:
@@ -326,18 +329,21 @@ def _get_scrub_pointers(data: Mapping[str, Any], dotted_key: str) -> tuple[str, 
         raise ConfigError(f"config key {dotted_key} must list at least one JSON pointer")
     for index, pointer in enumerate(pointers):
         if not _SCRUB_POINTER_RE.fullmatch(pointer):
-            raise ConfigError(f"config key {dotted_key}[{index}] must be a JSON pointer ending in a field name")
+            raise ConfigError(
+                f"config key {dotted_key}[{index}] must be a JSON pointer ending in a field name "
+                "that does not end in _<digits>"
+            )
     return pointers
 
 
-_SCRUB_KEY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+_SCRUB_KEY_RE = re.compile(rf"^{_SCRUB_FIELD_NAME}$")
 
 
 def _get_scrub_keys(data: Mapping[str, Any], dotted_key: str) -> tuple[str, ...]:
     keys = _get_str_tuple(data, dotted_key)
     for index, key in enumerate(keys):
         if not _SCRUB_KEY_RE.fullmatch(key):
-            raise ConfigError(f"config key {dotted_key}[{index}] must be a plain field name")
+            raise ConfigError(f"config key {dotted_key}[{index}] must be a plain field name not ending in _<digits>")
     return keys
 
 

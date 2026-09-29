@@ -8,11 +8,12 @@ gives each original a placeholder, <CATEGORY>_<n>, numbered per category in
 order of first appearance and kept stable across runs by the map file under
 results_root, which is the only place originals are written.
 
-Recorded files hold a value not only verbatim but also JSON-escaped, once
-as a string in a JSONL line or twice as a server's escaped body stored in
-one, percent-encoded in a URL, and inside base64 fields. scrub_text and
-scan match all of those forms, case-insensitively, so an upper-case
-\\uXXXX escape counts too.
+Recorded files hold a value not only verbatim but also JSON-escaped at any
+depth, percent-encoded in a URL, stripped of surrounding blanks, and
+inside base64 fields. scrub_text and scan match all of those forms,
+case-insensitively, so an upper-case \\uXXXX escape counts too, and scan
+also matches after NFKC normalization. An original shorter than
+MIN_SUBSTRING_MATCH_LEN matches only as a whole token.
 """
 
 from __future__ import annotations
@@ -25,8 +26,11 @@ import logging
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 import tomllib
+import unicodedata
+from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -39,6 +43,18 @@ from p1rec.redact import redaction_values
 from p1rec.sse import parse_frame
 
 logger = logging.getLogger(__name__)
+
+# Shorter originals, such as a two-digit branch suffix or a stock code
+# like 2330, occur by chance inside prices, timestamps and other codes, so
+# they match only as whole tokens rather than anywhere; measured in UTF-8
+# bytes so that a two-character Chinese name, distinctive and written
+# without separators, still matches anywhere.
+# calibrate: check against the lengths of the real values once recorded.
+MIN_SUBSTRING_MATCH_LEN = 6
+
+# Characters that continue a token around a short original, the ones
+# placeholders are built from, so a short original never matches inside one.
+_TOKEN_CHAR = "[0-9A-Za-z_]"
 
 # Logical operations whose recorded responses the scrub pointers apply to
 _ACCOUNTS_OP = "accounts"
@@ -54,15 +70,22 @@ _ROLE_ORDER = ("person_id", "egress_ip", "api_key", "sec_key", "ca_passwd")
 # returning as is, which is the API key's clientname prefix.
 _DERIVED_CATEGORY = "API_KEY_PREFIX"
 
-_CATEGORY_RE = re.compile(r"[A-Z][A-Z0-9_]*")
+# A category never ends in _<digits>, so <CATEGORY>_<n> parses back unambiguously
+_CATEGORY_RE = re.compile(r"(?![A-Z0-9_]*_[0-9]+$)[A-Z][A-Z0-9_]*")
 _PLACEHOLDER_RE = re.compile(r"([A-Z][A-Z0-9_]*)_([1-9][0-9]*)")
 
 # A body or frame that is not valid UTF-8 is kept in a *_b64 field, and
 # legacy Taiwanese systems encode Chinese text as Big5.
 _LEGACY_ENCODINGS = ("cp950",)
 
-# A base64 field as a JSON member, allowing the optional \/ escape of "/"
-_B64_FIELD_RE = re.compile(r'"[A-Za-z0-9_]*_b64"\s*:\s*"((?:[A-Za-z0-9+=]|\\?/)*)"')
+# A JSON escape sequence, whose backslash becomes a run of them when the
+# JSON holding it is itself nested in a JSON string.
+_ESCAPE_SEQUENCE_RE = re.compile(r'\\(?:u[0-9a-fA-F]{4}|["\\/bfnrt])')
+_ESCAPED_SLASH_RE = re.compile(r"\\+/")
+
+# A base64 field as a JSON member at any escape depth
+_B64_FIELD_RE = re.compile(r'(?P<esc>\\*)"[A-Za-z0-9_]*_b64(?P=esc)"\s*:\s*(?P=esc)"(?P<value>.*?)(?P=esc)"')
+UNDECODABLE_B64 = "UNDECODABLE_B64"
 
 _ARRAY_INDEX_RE = re.compile(r"0|[1-9][0-9]*")
 
@@ -105,6 +128,9 @@ _MANIFEST_NAME = "MANIFEST.toml"
 _ENTRY_KEYS = ("name", "run_id", "source", "lines", "checklist", "instrument")
 _OPTIONAL_ENTRY_KEYS = ("recorded_at",)
 
+# The server's OpenAPI document, committed beside the fixtures rather than exported from a recording
+_KEPT_BESIDE_FIXTURES = frozenset({"openapi.json"})
+
 
 class ScrubError(RuntimeError):
     """Raised when scrubbing cannot proceed safely; never holds an original value."""
@@ -113,7 +139,7 @@ class ScrubError(RuntimeError):
 @dataclass(frozen=True)
 class Leak:
     path: Path
-    line: int  # 1-based
+    line: int  # 1-based, or 0 when the file or directory name itself holds the original
     kind: str  # Category of the original found, never the value itself
 
 
@@ -140,32 +166,70 @@ class FixtureEntry:
     recorded_at_ns: int | None  # Given explicitly, for a source whose first selected line has no timestamp
 
 
-def _json_escapes(value: str) -> set[str]:
-    """Return value as it appears inside a JSON string, with and without the optional escapes."""
-    forms: set[str] = set()
-    for ensure_ascii in (False, True):
-        body = json.dumps(value, ensure_ascii=ensure_ascii)[1:-1]
-        forms.add(body)
-        forms.add(body.replace("/", "\\/"))
-    return forms
+def _decode_b64(value: str) -> bytes | None:
+    """Decode strict base64, allowing a JSON-escaped "/" at any depth, or return None if it is not base64."""
+    try:
+        return base64.b64decode(_ESCAPED_SLASH_RE.sub("/", value), validate=True)
+    except (binascii.Error, ValueError):
+        return None
+
+
+def _is_short(value: str) -> bool:
+    return len(value.encode("utf-8")) < MIN_SUBSTRING_MATCH_LEN
+
+
+def _plain_bases(original: str) -> set[str]:
+    """Return original as written, stripped of surrounding blanks, and NFKC-normalized, without empties."""
+    normalized = unicodedata.normalize("NFKC", original)
+    return {original, original.strip(), normalized, normalized.strip()} - {""}
+
+
+def _literal_pattern(text: str) -> str:
+    # A "/" may carry the optional JSON escape at any depth
+    return "".join(r"\\*/" if char == "/" else re.escape(char) for char in text)
+
+
+def _escaped_pattern(body: str) -> str:
+    """Return a regex for a JSON-escaped string body at any depth: a run of backslashes for each one it has."""
+    parts: list[str] = []
+    position = 0
+    for match in _ESCAPE_SEQUENCE_RE.finditer(body):
+        parts.append(_literal_pattern(body[position : match.start()]))
+        parts.append(r"\\+" + re.escape(match.group(0)[1:]))
+        position = match.end()
+    parts.append(_literal_pattern(body[position:]))
+    return "".join(parts)
+
+
+def _base_alternatives(base: str) -> list[str]:
+    """Return regexes for base verbatim, percent-encoded and JSON-escaped, longest first."""
+    alternatives: set[str] = set()
+    for form in (base, quote(base, safe=""), quote(base)):
+        alternatives.add(_literal_pattern(form))
+        for ensure_ascii in (False, True):
+            alternatives.add(_escaped_pattern(json.dumps(form, ensure_ascii=ensure_ascii)[1:-1]))
+    return sorted(alternatives, key=lambda alternative: (-len(alternative), alternative))
 
 
 @functools.cache
-def _text_forms(value: str) -> frozenset[str]:
-    """Return every textual form value can take in recorded files and fixtures.
+def _original_pattern(original: str) -> re.Pattern[str]:
+    """Return a pattern matching any textual form of original, ignoring case.
 
-    That is the value itself or percent-encoded, each also JSON-escaped
-    once or twice.
+    A form of a base shorter than MIN_SUBSTRING_MATCH_LEN matches only
+    where no token character adjoins it.
     """
-    plain = {value, quote(value, safe=""), quote(value)}
-    once = {form for item in plain for form in _json_escapes(item)}
-    twice = {form for item in once for form in _json_escapes(item)}
-    return frozenset(plain | once | twice)
+    groups: list[str] = []
+    for base in sorted(_plain_bases(original), key=lambda b: (-len(b), b)):
+        body = "|".join(_base_alternatives(base))
+        groups.append(f"(?<!{_TOKEN_CHAR})(?:{body})(?!{_TOKEN_CHAR})" if _is_short(base) else f"(?:{body})")
+    return re.compile("|".join(groups), re.IGNORECASE)
 
 
 @functools.cache
 def _byte_forms(value: str) -> frozenset[bytes]:
-    """Return value in each legacy encoding whose bytes differ from UTF-8."""
+    """Return value in each legacy encoding whose bytes differ from UTF-8, unless value is short."""
+    if _is_short(value):
+        return frozenset()
     utf8 = value.encode("utf-8")
     forms: set[bytes] = set()
     for encoding in _LEGACY_ENCODINGS:
@@ -176,16 +240,6 @@ def _byte_forms(value: str) -> frozenset[bytes]:
         if encoded != utf8:
             forms.add(encoded)
     return frozenset(forms)
-
-
-def _longest_first(forms: Iterable[str]) -> list[str]:
-    return sorted(forms, key=lambda form: (-len(form), form))
-
-
-@functools.cache
-def _original_pattern(original: str) -> re.Pattern[str]:
-    """Return a pattern matching any textual form of original, ignoring case."""
-    return re.compile("|".join(map(re.escape, _longest_first(_text_forms(original)))), re.IGNORECASE)
 
 
 class _Replacer:
@@ -206,7 +260,10 @@ class _Replacer:
         if any(_MARKER_RE.search(original) for original in originals):
             raise ScrubError("an original contains a private-use character reserved as a marker")
         markers = [chr(_MARKER_FIRST + index) for index in range(len(originals))]
-        self._text_steps = [(_original_pattern(o), marker) for o, marker in zip(originals, markers, strict=True)]
+        self._text_steps = [
+            (_original_pattern(o), marker, category_of(mapping[o]))
+            for o, marker in zip(originals, markers, strict=True)
+        ]
         self._placeholders = {marker: mapping[o] for o, marker in zip(originals, markers, strict=True)}
 
         # Backslashes doubled, since re.sub reads its replacement as a template
@@ -214,26 +271,32 @@ class _Replacer:
             (
                 re.compile(b"|".join(map(re.escape, sorted(forms, key=lambda f: (-len(f), f))))),
                 mapping[o].encode("utf-8").replace(b"\\", b"\\\\"),
+                category_of(mapping[o]),
             )
             for o in originals
             if (forms := _byte_forms(o))
         ]
 
-    def scrub_str(self, text: str) -> str:
+    def scrub_str(self, text: str, counts: Counter[str] | None = None) -> str:
+        """Return text scrubbed, adding the number of replacements per category to counts."""
         if not self._text_steps:
             return text
         if _MARKER_RE.search(text):
             raise ScrubError("text to scrub contains a private-use character reserved as a marker")
-        for pattern, marker in self._text_steps:
-            text = pattern.sub(marker, text)
+        for pattern, marker, category in self._text_steps:
+            text, replaced = pattern.subn(marker, text)
+            if counts is not None and replaced:
+                counts[category] += replaced
         placeholders = self._placeholders
         return _MARKER_RE.sub(lambda match: placeholders[match.group(0)], text)
 
-    def scrub_bytes(self, data: bytes) -> bytes:
-        # surrogateescape keeps bytes that are not UTF-8 exactly as they were
-        scrubbed = self.scrub_str(data.decode("utf-8", "surrogateescape")).encode("utf-8", "surrogateescape")
-        for pattern, placeholder in self._byte_steps:
-            scrubbed = pattern.sub(placeholder, scrubbed)
+    def scrub_bytes(self, data: bytes, counts: Counter[str] | None = None) -> bytes:
+        """Return data scrubbed, keeping bytes that are not UTF-8 exactly as they were."""
+        scrubbed = self.scrub_str(data.decode("utf-8", "surrogateescape"), counts).encode("utf-8", "surrogateescape")
+        for pattern, placeholder, category in self._byte_steps:
+            scrubbed, replaced = pattern.subn(placeholder, scrubbed)
+            if counts is not None and replaced:
+                counts[category] += replaced
         return scrubbed
 
 
@@ -253,17 +316,41 @@ def scrub_text(text: str, mapping: Mapping[str, str]) -> str:
     originals are replaced first, so a full API key becomes one placeholder
     rather than its prefix's placeholder plus a visible remainder, and a
     value embedded in a longer string, such as the key prefix inside a
-    clientname, is replaced too.
+    clientname, is replaced too, unless the value is shorter than
+    MIN_SUBSTRING_MATCH_LEN.
     """
     return _replacer(mapping).scrub_str(text)
+
+
+def _field_patterns(keys: Iterable[str]) -> tuple[re.Pattern[str], ...]:
+    """Return patterns capturing a string field named in keys as key and value.
+
+    The field may be a JSON member at any escape depth, a Debug-printed
+    field (key: "value" or key: Some("value")), or a key=value pair,
+    quoted or bare.
+    """
+    names = "(?P<key>" + "|".join(map(re.escape, sorted(keys))) + ")"
+    start = f"(?<!{_TOKEN_CHAR})"
+    quoted = r'(?P<esc>\\*)"(?P<value>.*?)(?P=esc)"'
+    return (
+        re.compile(r'(?P<esc>\\*)"' + names + r'(?P=esc)"\s*:\s*(?P=esc)"(?P<value>.*?)(?P=esc)"'),
+        re.compile(start + names + r"\s*:\s*(?:Some\()?" + quoted),
+        re.compile(start + names + "=(?:" + quoted + r"|(?P<bare>[^\s\"',;(){}\[\]]*))"),
+    )
+
+
+def _is_placeholder(value: str) -> bool:
+    return _PLACEHOLDER_RE.fullmatch(value) is not None
 
 
 class _Detector:
     """Report which originals occur in a line, in any form, including inside base64 fields.
 
     It also reports, under its key's category, the non-empty value of every
-    JSON member named in keys that is not a placeholder, at any escape
-    depth, since such a value may be an identifier no known original names.
+    field named in keys that is not a placeholder, since such a value may
+    be an identifier no known original names, and reports a *_b64 field
+    that does not decode as UNDECODABLE_B64, since its content cannot be
+    checked.
     """
 
     def __init__(self, originals: Mapping[str, str], keys: Mapping[str, str]) -> None:
@@ -273,46 +360,41 @@ class _Detector:
                 continue
             self._checks.append((category_of(label), _original_pattern(original), _byte_forms(original)))
         self._key_categories = dict(keys)
-        self._member_re = _member_pattern(keys)
+        self._field_patterns = _field_patterns(keys)
 
     def kinds_in(self, data: bytes) -> set[str]:
         text = data.decode("utf-8", "surrogateescape")
+        normalized = unicodedata.normalize("NFKC", text)
+        texts = (text,) if normalized == text else (text, normalized)
         found = {
             kind
             for kind, pattern, byte_forms in self._checks
-            if pattern.search(text) or any(form in data for form in byte_forms)
+            if any(pattern.search(candidate) for candidate in texts) or any(form in data for form in byte_forms)
         }
-        for match in self._member_re.finditer(text):
-            value = match.group(3)
-            if value and not _is_placeholder(value):
-                found.add(self._key_categories[match.group(2)])
+        for candidate in texts:
+            for pattern in self._field_patterns:
+                for match in pattern.finditer(candidate):
+                    fields = match.groupdict()
+                    value = fields["value"] if fields["value"] is not None else fields.get("bare")
+                    if value and not _is_placeholder(value):
+                        found.add(self._key_categories[fields["key"]])
 
         # Decoded content is shorter than its base64 text, so the recursion ends
         for match in _B64_FIELD_RE.finditer(text):
-            try:
-                decoded = base64.b64decode(match.group(1).replace("\\/", "/"), validate=True)
-            except (binascii.Error, ValueError):
-                continue
-            found |= self.kinds_in(decoded)
+            decoded = _decode_b64(match.group("value"))
+            if decoded is None:
+                found.add(UNDECODABLE_B64)
+            else:
+                found |= self.kinds_in(decoded)
         return found
 
 
-def _member_pattern(keys: Iterable[str]) -> re.Pattern[str]:
-    """Match a JSON string member named in keys at any escape depth, capturing the backslashes, key and value."""
-    names = "|".join(map(re.escape, sorted(keys)))
-    return re.compile(rf'(\\*)"({names})\1"\s*:\s*\1"(.*?)\1"')
-
-
-def _is_placeholder(value: str) -> bool:
-    return _PLACEHOLDER_RE.fullmatch(value) is not None
-
-
-def _iter_files(paths: Iterable[Path]) -> Iterator[Path]:
-    """Yield each file named in paths, or found under a directory in it, once."""
+def _iter_entries(paths: Iterable[Path]) -> Iterator[Path]:
+    """Yield each file named in paths, and each file and directory under a directory in it, once."""
     seen: set[Path] = set()
     for path in paths:
         if path.is_dir():
-            candidates = sorted(candidate for candidate in path.rglob("*") if candidate.is_file())
+            candidates = sorted(path.rglob("*"))
         elif path.is_file():
             candidates = [path]
         else:
@@ -331,19 +413,25 @@ def scan(
 
     originals maps each original to its category or to a <CATEGORY>_<n>
     placeholder, so build_map's result can be passed as is; a Leak names
-    the file, line and category, never the value. A non-empty "ca" member
-    that is not a placeholder is reported as CA_SIGNATURE, and so is, under
-    its own category, a member named in keys (key -> category). Directories
-    are scanned recursively, and a path that does not exist raises
+    the file, line and category, never the value. The name of every file
+    and directory under a scanned directory, and of a scanned file, is
+    checked too and reported as line 0. A non-empty "ca" field that is not
+    a placeholder is reported as CA_SIGNATURE, and so is, under its own
+    category, a field named in keys (key -> category). Directories are
+    scanned recursively, and a path that does not exist raises
     FileNotFoundError rather than passing unscanned.
     """
     detector = _Detector(originals, {_CA_KEY: _CA_CATEGORY, **(keys or {})})
     leaks: list[Leak] = []
-    for file in _iter_files(paths):
-        with file.open("rb") as fh:
+    for entry in _iter_entries(paths):
+        for kind in sorted(detector.kinds_in(entry.name.encode("utf-8", "surrogateescape"))):
+            leaks.append(Leak(path=entry, line=0, kind=kind))
+        if not entry.is_file():
+            continue
+        with entry.open("rb") as fh:
             for number, line in enumerate(fh, start=1):
                 for kind in sorted(detector.kinds_in(line)):
-                    leaks.append(Leak(path=file, line=number, kind=kind))
+                    leaks.append(Leak(path=entry, line=number, kind=kind))
     return leaks
 
 
@@ -410,18 +498,16 @@ def build_map(
 
 
 def _check_placeholders(mapping: Mapping[str, str]) -> None:
-    """Raise ScrubError unless every placeholder is distinct and free of every original."""
+    """Raise ScrubError unless every placeholder is distinct and free of every original.
+
+    A short original matches only as a whole token, which no placeholder
+    can hold, so it is never checked here.
+    """
     placeholders = list(mapping.values())
     if "" in placeholders or len(set(placeholders)) != len(placeholders):
         raise ScrubError("the scrub map must give every original its own non-empty placeholder")
-    _check_contained(mapping)
-
-
-def _check_contained(mapping: Mapping[str, str]) -> None:
-    """Raise ScrubError if any placeholder contains an original, in any of its forms."""
-    placeholders = set(mapping.values())
     for original, own_placeholder in mapping.items():
-        if not original:
+        if not original or _is_short(original):
             continue
         pattern = _original_pattern(original)
         if any(pattern.search(placeholder) for placeholder in placeholders):
@@ -429,7 +515,7 @@ def _check_contained(mapping: Mapping[str, str]) -> None:
             # only its category is named, and only when that does not.
             kind = category_of(own_placeholder)
             label = f"a {kind} value" if not pattern.search(kind) else "an original value"
-            raise ScrubError(f"{label} occurs inside a placeholder, so it is too short or generic to scrub safely")
+            raise ScrubError(f"{label} occurs inside a placeholder, so it is too generic to scrub safely")
 
 
 def load_map(path: Path) -> dict[str, str]:
@@ -451,16 +537,28 @@ def _placeholder_sort_key(placeholder: str) -> tuple[str, int]:
 
 
 def save_map(path: Path, mapping: Mapping[str, str]) -> None:
-    """Write the map readable by its owner only, replacing any previous file atomically."""
+    """Write the map readable by its owner only, replacing any previous file atomically and durably.
+
+    mkstemp creates the temporary file exclusively and with mode 0600, so
+    nothing planted at its name, such as a symlink, can redirect the write.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     ordered = dict(sorted(mapping.items(), key=lambda item: _placeholder_sort_key(item[1])))
-    tmp = path.with_name(f".{path.name}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        # A tmp file left over from an interrupted run keeps its old mode otherwise
-        os.fchmod(fh.fileno(), 0o600)
-        fh.write(json.dumps(ordered, ensure_ascii=False, indent=2) + "\n")
-    os.replace(tmp, path)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(ordered, ensure_ascii=False, indent=2) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_name, path)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
 
 
 def _resolve_pointer(document: object, pointer: str) -> object | None:
@@ -490,18 +588,26 @@ def _identifier_text(value: object) -> str | None:
     return None
 
 
+def _field_text(record: Mapping[str, object], key: str) -> str | None:
+    """Return a recorded text field, decoding its *_b64 twin instead when the text was not UTF-8."""
+    encoded = record.get(f"{key}_b64")
+    if isinstance(encoded, str):
+        decoded = _decode_b64(encoded)
+        if decoded is not None:
+            return decoded.decode("utf-8", "replace")
+    value = record.get(key)
+    return value if isinstance(value, str) else None
+
+
 def _response_json(record: Mapping[str, object]) -> object | None:
     """Parse a rest.jsonl record's response body as JSON, or return None."""
-    body = record.get("resp_body")
-    encoded = record.get("resp_body_b64")
+    body = _field_text(record, "resp_body")
+    if body is None:
+        return None
     try:
-        if isinstance(body, str):
-            return json.loads(body)
-        if isinstance(encoded, str):
-            return json.loads(base64.b64decode(encoded, validate=True))
+        return json.loads(body)
     except ValueError:
         return None
-    return None
 
 
 def _iter_jsonl_records(path: Path, markers: Iterable[bytes]) -> Iterator[dict[str, Any]]:
@@ -528,18 +634,6 @@ def _key_categories(cfg: P1Config) -> dict[str, str]:
 def _record_keys(cfg: P1Config) -> dict[str, str]:
     """Return every key whose values are originals wherever recorded JSON holds it: "ca" and account_id_keys."""
     return {_CA_KEY: _CA_CATEGORY, **_key_categories(cfg)}
-
-
-def _field_text(record: Mapping[str, object], key: str) -> str | None:
-    """Return a recorded text field, decoding its *_b64 twin instead when the text was not UTF-8."""
-    encoded = record.get(f"{key}_b64")
-    if isinstance(encoded, str):
-        try:
-            return base64.b64decode(encoded, validate=True).decode("utf-8", "replace")
-        except (binascii.Error, ValueError):
-            pass
-    value = record.get(key)
-    return value if isinstance(value, str) else None
 
 
 def _record_documents(record: Mapping[str, object]) -> Iterator[object]:
@@ -770,37 +864,50 @@ def _parse_record(entry: FixtureEntry, number: int, line: bytes) -> dict[str, An
     return record
 
 
-def _scrub_b64(key: str, value: str, replacer: _Replacer) -> str:
-    try:
-        data = base64.b64decode(value, validate=True)
-    except (binascii.Error, ValueError):
-        raise ScrubError(f"field {key} is not valid base64, so it cannot be scrubbed") from None
-    return base64.b64encode(replacer.scrub_bytes(data)).decode("ascii")
+@dataclass(frozen=True)
+class _FixtureScrubber:
+    """Scrub one fixture's content through a replacer, counting replacements by category."""
+
+    replacer: _Replacer
+    counts: Counter[str]
+
+    def scrub_str(self, text: str) -> str:
+        return self.replacer.scrub_str(text, self.counts)
+
+    def scrub_bytes(self, data: bytes) -> bytes:
+        return self.replacer.scrub_bytes(data, self.counts)
 
 
-def _scrub_record(record: Mapping[str, object], replacer: _Replacer) -> dict[str, object]:
+def _scrub_b64(key: str, value: str, scrubber: _FixtureScrubber) -> str:
+    data = _decode_b64(value)
+    if data is None:
+        raise ScrubError(f"field {key} is not valid base64, so it cannot be scrubbed")
+    return base64.b64encode(scrubber.scrub_bytes(data)).decode("ascii")
+
+
+def _scrub_record(record: Mapping[str, object], scrubber: _FixtureScrubber) -> dict[str, object]:
     """Scrub every key, string and base64 field in a parsed record, leaving numbers alone.
 
     The numbers in a record are the recorder's own timestamps and status
     codes, and replacing digits inside them would corrupt the JSON.
     """
     return {
-        replacer.scrub_str(key): (
-            _scrub_b64(key, value, replacer)
+        scrubber.scrub_str(key): (
+            _scrub_b64(key, value, scrubber)
             if key.endswith("_b64") and isinstance(value, str)
-            else _scrub_json(value, replacer)
+            else _scrub_json(value, scrubber)
         )
         for key, value in record.items()
     }
 
 
-def _scrub_json(value: object, replacer: _Replacer) -> object:
+def _scrub_json(value: object, scrubber: _FixtureScrubber) -> object:
     if isinstance(value, str):
-        return replacer.scrub_str(value)
+        return scrubber.scrub_str(value)
     if isinstance(value, list):
-        return [_scrub_json(item, replacer) for item in value]
+        return [_scrub_json(item, scrubber) for item in value]
     if isinstance(value, dict):
-        return _scrub_record(value, replacer)
+        return _scrub_record(value, scrubber)
     return value
 
 
@@ -843,12 +950,12 @@ def _select(cfg: P1Config, entry: FixtureEntry) -> _Selection:
     return _Selection(entry=entry, lines=lines, records=records)
 
 
-def _export_rest(selection: _Selection, replacer: _Replacer) -> tuple[bytes, int | None]:
+def _export_rest(selection: _Selection, scrubber: _FixtureScrubber) -> tuple[bytes, int | None]:
     """Return the selected REST records as a scrubbed, pretty-printed JSON array."""
     entry = selection.entry
     scrubbed_records = []
     for number, record in zip(entry.lines, selection.records, strict=True):
-        scrubbed = _scrub_record(record, replacer)
+        scrubbed = _scrub_record(record, scrubber)
         for key in ("req_body", "resp_body"):
             _check_json_kept(record.get(key), scrubbed.get(key), f"{key} of line {number} of {entry.source}")
         scrubbed_records.append(scrubbed)
@@ -856,14 +963,16 @@ def _export_rest(selection: _Selection, replacer: _Replacer) -> tuple[bytes, int
     return text.encode("utf-8"), _record_ns(selection.records[0])
 
 
-def _export_sse(selection: _Selection, replacer: _Replacer) -> tuple[bytes, int | None]:
+def _export_sse(selection: _Selection, scrubber: _FixtureScrubber) -> tuple[bytes, int | None]:
     """Return the selected frames' exact bytes, scrubbed and concatenated into stream text."""
     entry = selection.entry
     frames: list[bytes] = []
     for number, record in zip(entry.lines, selection.records, strict=True):
         raw_b64 = record.get("raw_b64")
-        data = _decode_b64_field(entry, number, raw_b64) if isinstance(raw_b64, str) else record["raw"].encode()
-        scrubbed = replacer.scrub_bytes(data)
+        data = record["raw"].encode("utf-8") if not isinstance(raw_b64, str) else _decode_b64(raw_b64)
+        if data is None:
+            raise ScrubError(f"line {number} of {entry.source} has invalid base64")
+        scrubbed = scrubber.scrub_bytes(data)
         _check_json_kept(
             parse_frame(data.decode("utf-8", "replace")).data,
             parse_frame(scrubbed.decode("utf-8", "replace")).data,
@@ -873,27 +982,20 @@ def _export_sse(selection: _Selection, replacer: _Replacer) -> tuple[bytes, int 
     return b"".join(frames), _record_ns(selection.records[0])
 
 
-def _decode_b64_field(entry: FixtureEntry, number: int, value: str) -> bytes:
-    try:
-        return base64.b64decode(value, validate=True)
-    except (binascii.Error, ValueError):
-        raise ScrubError(f"fixture {entry.name!r}: line {number} of {entry.source} has invalid base64") from None
-
-
-def _export_selection(selection: _Selection, replacer: _Replacer) -> tuple[str, bytes, int | None]:
+def _export_selection(selection: _Selection, scrubber: _FixtureScrubber) -> tuple[str, bytes, int | None]:
     """Return the output file name, scrubbed content and the first selected line's time, if it has one."""
     entry = selection.entry
     try:
         if entry.source == _REST_SOURCE:
-            data, recorded_ns = _export_rest(selection, replacer)
+            data, recorded_ns = _export_rest(selection, scrubber)
             return f"{entry.name}.json", data, recorded_ns
         if _SSE_SOURCE_RE.fullmatch(entry.source):
-            data, recorded_ns = _export_sse(selection, replacer)
+            data, recorded_ns = _export_sse(selection, scrubber)
             return f"{entry.name}.sse", data, recorded_ns
+        lines = selection.lines
+        return f"{entry.name}.log", b"".join(scrubber.scrub_bytes(line) for line in lines), _log_line_ns(lines[0])
     except ScrubError as exc:
         raise ScrubError(f"fixture {entry.name!r}: {exc}") from None
-    lines = selection.lines
-    return f"{entry.name}.log", b"".join(replacer.scrub_bytes(line) for line in lines), _log_line_ns(lines[0])
 
 
 def _datetime_ns(moment: datetime) -> int:
@@ -994,13 +1096,14 @@ def export_fixtures(cfg: P1Config, mapping: Mapping[str, str]) -> list[Path]:
     else from the entry's explicit recorded_at, never from file times.
     mapping must hold every original, "ca" signatures and
     scrub.account_id_keys values included, as build_map over discover's
-    result does; one it lacks is caught by the scan as a leak.
-    Every entry is validated, and the output staged and scanned under
-    results_root, before anything reaches fixtures_root: an invalid entry,
-    or one with an original in a field that goes public, raises
-    ConfigError, and output that still holds an original raises
-    LeakError, leaving fixtures_root untouched and the staged copy in
-    place for inspection. Returns the written paths, MANIFEST.toml last.
+    result does; one it lacks is caught by the scan as a leak. The number
+    of replacements per category is logged for each fixture. Every entry
+    is validated, and the output staged and scanned under results_root,
+    before anything reaches fixtures_root: an invalid entry, or one with an
+    original in a field that goes public, raises ConfigError, and output
+    that still holds an original raises LeakError, leaving fixtures_root
+    untouched and the staged copy in place for inspection. Returns the
+    written paths, MANIFEST.toml last.
     """
     entries = load_selection(cfg.scrub.selection)
     for entry in entries:
@@ -1012,7 +1115,13 @@ def export_fixtures(cfg: P1Config, mapping: Mapping[str, str]) -> list[Path]:
     manifest: list[dict[str, object]] = []
     for selection in selections:
         entry = selection.entry
-        filename, data, derived_ns = _export_selection(selection, replacer)
+        scrubber = _FixtureScrubber(replacer=replacer, counts=Counter())
+        filename, data, derived_ns = _export_selection(selection, scrubber)
+        logger.info(
+            "fixture %r: replaced %s",
+            entry.name,
+            ", ".join(f"{category}={count}" for category, count in sorted(scrubber.counts.items())) or "nothing",
+        )
         outputs[filename] = data
         manifest.append(
             {
@@ -1079,19 +1188,50 @@ def _scan_targets(cfg: P1Config) -> list[Path]:
     return targets
 
 
+def _require_git_ignored(path: Path) -> None:
+    """Raise ConfigError unless git ignores path, where the scrub map and staged output are written."""
+    try:
+        result = subprocess.run(["git", "check-ignore", "-q", str(path)], cwd=path, capture_output=True, check=False)
+    except OSError as exc:
+        raise ConfigError(f"cannot run git to check that results_root {path} is ignored ({exc})") from exc
+    if result.returncode != 0:
+        raise ConfigError(f"results_root {path} is not ignored by git, so the scrub map could be committed")
+
+
+def _unselected_entries(fixtures_root: Path, written: Iterable[Path]) -> list[Path]:
+    """Return what fixtures_root holds besides the files just written and those kept beside the fixtures."""
+    produced = {path.name for path in written} | _KEPT_BESIDE_FIXTURES
+    return sorted(entry for entry in fixtures_root.iterdir() if entry.name not in produced)
+
+
+def _log_short_originals(mapping: Mapping[str, str]) -> None:
+    short = Counter(category_of(placeholder) for original, placeholder in mapping.items() if _is_short(original))
+    for category, count in sorted(short.items()):
+        logger.warning(
+            "%s: %d values shorter than %d UTF-8 bytes match only as whole tokens",
+            category,
+            count,
+            MIN_SUBSTRING_MATCH_LEN,
+        )
+
+
 def run_scrub(cfg: P1Config, *, scan_only: bool) -> int:
     """Export the selected fixtures, or with scan_only scan the committed ones, and return the exit code.
 
-    Both first extend and save the scrub map with the current secrets and
-    newly discovered identifiers. Returns 0 when no original was found, 2
-    when one was (each reported as path:line:category, never the value),
-    and 1 on a configuration or scrubbing error, including when a category
-    the scrub pointers name has no known value, since its identifiers
-    could then pass unscrubbed.
+    Both first check that git ignores results_root, then extend and save the
+    scrub map with the current secrets and newly discovered identifiers.
+    Returns 0 when no original was found, 2 when one was (each reported as
+    path:line:category, the path scrubbed, never the value) or when the
+    fixture directory holds files the selection did not produce, and 1 on
+    a configuration or scrubbing error, including when a category the
+    scrub pointers name has no known value, since its identifiers could
+    then pass unscrubbed.
     """
     try:
+        _require_git_ignored(cfg.results_root)
         mapping = build_map(read_secrets(cfg), discover(cfg), load_map(cfg.scrub.map_path))
         save_map(cfg.scrub.map_path, mapping)
+        _log_short_originals(mapping)
         missing = _missing_categories(cfg, mapping)
         if missing:
             logger.error(
@@ -1101,6 +1241,7 @@ def run_scrub(cfg: P1Config, *, scan_only: bool) -> int:
             )
             return 1
 
+        unselected: list[Path] = []
         if scan_only:
             leaks = scan(_scan_targets(cfg), mapping, _key_categories(cfg))
         else:
@@ -1116,14 +1257,19 @@ def run_scrub(cfg: P1Config, *, scan_only: bool) -> int:
             else:
                 leaks = []
                 logger.info("exported %d files to %s", len(written), cfg.fixtures_root)
+                unselected = _unselected_entries(cfg.fixtures_root, written)
     except (ConfigError, ScrubError) as exc:
         logger.error("scrub failed: %s", exc)
         return 1
 
     for leak in leaks:
-        logger.error("%s:%d:%s", leak.path, leak.line, leak.kind)
-    if leaks:
-        logger.error("found %d leaks", len(leaks))
+        logger.error("%s:%d:%s", scrub_text(str(leak.path), mapping), leak.line, leak.kind)
+    for entry in unselected:
+        logger.error(
+            "%s was not produced by the current selection; nothing was removed", scrub_text(str(entry), mapping)
+        )
+    if leaks or unselected:
+        logger.error("found %d leaks and %d files the selection did not produce", len(leaks), len(unselected))
         return 2
     logger.info("no original value found")
     return 0

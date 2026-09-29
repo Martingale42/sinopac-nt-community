@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import stat
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -61,3 +62,22 @@ def test_new_run_refuses_existing_dir(tmp_path: Path) -> None:
     other = new_run(tmp_path, "orders", _NOW, tag="dryrun")
     assert other.is_dir()
     assert other != tmp_path / "20260929T010203Z-orders-soak"
+
+
+def test_new_run_keeps_results_private(tmp_path: Path) -> None:
+    results_root = tmp_path / "results" / "p1"
+
+    run_dir = new_run(results_root, "stream", _NOW, tag=None)
+
+    assert stat.S_IMODE(results_root.stat().st_mode) == 0o700
+    assert stat.S_IMODE(run_dir.stat().st_mode) == 0o700
+
+
+def test_new_run_narrows_existing_results_root(tmp_path: Path) -> None:
+    results_root = tmp_path / "results"
+    results_root.mkdir(mode=0o755)
+    results_root.chmod(0o755)
+
+    new_run(results_root, "stream", _NOW, tag=None)
+
+    assert stat.S_IMODE(results_root.stat().st_mode) == 0o700

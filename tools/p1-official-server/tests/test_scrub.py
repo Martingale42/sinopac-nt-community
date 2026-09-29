@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import json
 import stat
+import subprocess
 import tomllib
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -24,6 +25,8 @@ from p1rec.cli import main
 from p1rec.config import ConfigError, P1Config, load_config
 from p1rec.redact import API_KEY_PREFIX_LEN
 from p1rec.scrub import (
+    MIN_SUBSTRING_MATCH_LEN,
+    UNDECODABLE_B64,
     Leak,
     ScrubError,
     build_map,
@@ -31,6 +34,7 @@ from p1rec.scrub import (
     discover,
     export_fixtures,
     load_map,
+    save_map,
     scan,
     scrub_text,
 )
@@ -247,6 +251,10 @@ def env(tmp_path: Path, write_config: WriteConfig, monkeypatch: pytest.MonkeyPat
     """A config under tmp_path, fake secrets in the environment and recordings holding them."""
     for var, value in SECRET_ENV.items():
         monkeypatch.setenv(var, value)
+
+    # scrub refuses to write the map unless git ignores results_root
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / ".gitignore").write_text("/results/\n", encoding="utf-8")
     config_path = write_config(_config_lines())
     (tmp_path / "fixtures.toml").write_text("", encoding="utf-8")
     (tmp_path / "contract.md").write_text("clientname is PYAPI/API_KEY_PREFIX_1/...\n", encoding="utf-8")
@@ -309,9 +317,9 @@ def test_credential_equal_to_identity_takes_identity_placeholder() -> None:
 
 def test_placeholder_containing_original_rejected() -> None:
     with pytest.raises(ScrubError) as exc_info:
-        build_map(SECRETS, {"ACCOUNT_ID": [ACCOUNT_S], "USERNAME": ["ID_1"]}, {})
+        build_map(SECRETS, {"ACCOUNT_ID": [ACCOUNT_S], "USERNAME": ["ACCOUNT_ID"]}, {})
 
-    assert "ID_1" not in str(exc_info.value)
+    assert "ACCOUNT_ID" not in str(exc_info.value)
 
 
 def test_longest_first_replacement() -> None:
@@ -339,13 +347,13 @@ def test_overlapping_originals_replace_longer_whole() -> None:
 
 
 def test_placeholder_never_rewritten_by_shorter_original(tmp_path: Path) -> None:
-    mapping = build_map({}, {"ACCOUNT_ID": ["LONGVALUE0"], "USERNAME": ["_1Q"]}, {})
+    mapping = build_map({}, {"ACCOUNT_ID": ["LONGVALUE0"], "USERNAME": ["D_1QQQ"]}, {})
 
-    result = scrub_text("LONGVALUE0Q", mapping)
+    result = scrub_text("LONGVALUE0QQQ", mapping)
 
     # The shorter original re-forms across the placeholder's end, and the
     # scan reports it instead of a rewritten placeholder hiding it.
-    assert result == "ACCOUNT_ID_1Q"
+    assert result == "ACCOUNT_ID_1QQQ"
     output = tmp_path / "output.txt"
     output.write_text(result, encoding="utf-8")
     assert scan([output], mapping) == [Leak(path=output, line=1, kind="USERNAME")]
@@ -767,6 +775,172 @@ def test_entry_field_holding_original_rejected(env: _Env, field: str) -> None:
         export_fixtures(env.cfg, _full_map(env))
     assert ACCOUNT_S not in str(exc_info.value)
     assert not env.cfg.fixtures_root.exists()
+
+
+def test_short_originals_match_only_whole_tokens(tmp_path: Path) -> None:
+    # An existing SUBACCOUNT_100 holds "00" and "1" inside it, which a short original may never trip over
+    mapping = build_map({}, {"SUBACCOUNT": ["A1", "00", "2330"]}, {"zzzzzzzzzz": "SUBACCOUNT_100"})
+    assert all(len(value) < MIN_SUBSTRING_MATCH_LEN for value in ("A1", "00", "2330"))
+
+    result = scrub_text("A1 A10 CA1 x00y 100 00 2330 23300 12330 code=2330", mapping)
+
+    assert result == "SUBACCOUNT_101 A10 CA1 x00y 100 SUBACCOUNT_102 SUBACCOUNT_103 23300 12330 code=SUBACCOUNT_103"
+    fixture = tmp_path / "C1_codes.log"
+    fixture.write_text("A10 CA1 x00y 100 23300 12330 SUBACCOUNT_100\nfill for A1\n", encoding="utf-8")
+    assert scan([fixture], mapping) == [Leak(path=fixture, line=2, kind="SUBACCOUNT")]
+
+
+def test_short_originals_and_replacements_logged(env: _Env, caplog: pytest.LogCaptureFixture) -> None:
+    frame = "event:order_event\ndata:" + json.dumps({"order": {"subaccount": "A1"}}) + "\n\n"
+    append_jsonl(env.cfg.results_root / STREAM_RUN / "sse_b_order_event.jsonl", _sse("frame", TS + 70, raw=frame))
+    _select(env, _fixture_table("C1_futures_order", STREAM_RUN, "sse_b_order_event.jsonl", [1, 2], ["C1"], ""))
+
+    assert main(["scrub", "--config", str(env.config_path)]) == 0
+
+    messages = [record.getMessage() for record in caplog.records]
+    short = f"SUBACCOUNT: 1 values shorter than {MIN_SUBSTRING_MATCH_LEN} UTF-8 bytes match only as whole tokens"
+    assert short in messages
+    assert (
+        "fixture 'C1_futures_order': replaced ACCOUNT_ID=1, CA_SIGNATURE=1, PERSON_ID=1, SUBACCOUNT=2, USERNAME=1"
+        in messages
+    )
+    exported = (env.cfg.fixtures_root / "C1_futures_order.sse").read_text(encoding="utf-8")
+    # The stream run sorts before the reconcile run, so A1 takes the second number
+    assert '"subaccount": "SUBACCOUNT_2"' in exported
+
+
+def test_scan_reports_debug_and_key_value_fields(tmp_path: Path) -> None:
+    unknown_signature = base64.b64encode(b"never recorded as JSON").decode("ascii")
+    fixture = tmp_path / "E1_server.log"
+    fixture.write_text(
+        "\n".join(
+            [
+                f'2026-10-01T00:00:02Z DEBUG Order {{ id: "o1", ca: "{unknown_signature}", combo: false }}',
+                f'2026-10-01T00:00:02Z DEBUG Order {{ ca: Some("{unknown_signature}") }}',
+                "2026-10-01T00:00:02Z  INFO order placed subaccount=S9 ca=AAAA",
+                '2026-10-01T00:00:02Z  INFO order placed subaccount="S9"',
+                'Order { ca: "CA_SIGNATURE_1", subaccount: "" } subaccount=SUBACCOUNT_2 ca= ca_status: "x"',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    leaks = scan([fixture], {}, {"subaccount": "SUBACCOUNT"})
+
+    assert leaks == [
+        Leak(path=fixture, line=1, kind="CA_SIGNATURE"),
+        Leak(path=fixture, line=2, kind="CA_SIGNATURE"),
+        Leak(path=fixture, line=3, kind="CA_SIGNATURE"),
+        Leak(path=fixture, line=3, kind="SUBACCOUNT"),
+        Leak(path=fixture, line=4, kind="SUBACCOUNT"),
+    ]
+
+
+def test_scan_reports_names_and_logs_them_scrubbed(env: _Env, capsys: pytest.CaptureFixture[str]) -> None:
+    named = env.cfg.fixtures_root / f"C9_{ACCOUNT_S}_clean.json"
+    named.parent.mkdir(parents=True)
+    named.write_text("{}\n", encoding="utf-8")
+    directory = env.cfg.fixtures_root.parent / f"v{ACCOUNT_F}"
+    directory.mkdir()
+
+    assert main(["scrub", "--scan-only", "--config", str(env.config_path)]) == 2
+
+    stderr = capsys.readouterr().err
+    assert f"{env.cfg.fixtures_root}/C9_ACCOUNT_ID_1_clean.json:0:ACCOUNT_ID" in stderr
+    assert f"{env.cfg.fixtures_root.parent}/vACCOUNT_ID_2:0:ACCOUNT_ID" in stderr
+    _assert_no_original(stderr.encode("utf-8"))
+
+
+def test_scan_matches_normalized_deeply_escaped_and_stripped_forms(tmp_path: Path) -> None:
+    mapping = build_map({}, {"ACCOUNT_ID": [ACCOUNT_S], "USERNAME": [f" {USERNAME} "]}, {})
+    fullwidth = ACCOUNT_S.translate({ord(digit): ord(digit) + 0xFEE0 for digit in "0123456789"})
+    triple = json.dumps(json.dumps(json.dumps({"username": USERNAME})))
+    fixture = tmp_path / "C1_forms.log"
+    fixture.write_text(f"account {fullwidth}\n{triple}\nname {USERNAME}.\n", encoding="utf-8")
+
+    assert scan([fixture], mapping) == [
+        Leak(path=fixture, line=1, kind="ACCOUNT_ID"),
+        Leak(path=fixture, line=2, kind="USERNAME"),
+        Leak(path=fixture, line=3, kind="USERNAME"),
+    ]
+    assert USERNAME not in scrub_text(f"name {USERNAME}.", mapping)
+    assert json.loads(json.loads(json.loads(scrub_text(triple, mapping)))) == {"username": "USERNAME_1"}
+
+
+def test_scan_reports_undecodable_base64(tmp_path: Path) -> None:
+    fixture = tmp_path / "F1_bad.json"
+    fixture.write_text('{"resp_body_b64": "not base64!"}\n{"resp_body_b64": "e30="}\n', encoding="utf-8")
+
+    assert scan([fixture], {}) == [Leak(path=fixture, line=1, kind=UNDECODABLE_B64)]
+
+
+def test_export_reports_unselected_files_without_removing_them(
+    env: _Env, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _select(env, REST_ENTRY)
+    assert main(["scrub", "--config", str(env.config_path)]) == 0
+    stale = env.cfg.fixtures_root / "F0_stale.json"
+    stale.write_text("{}\n", encoding="utf-8")
+    (env.cfg.fixtures_root / "openapi.json").write_text("{}\n", encoding="utf-8")
+    capsys.readouterr()
+
+    assert main(["scrub", "--config", str(env.config_path), "--tag", "again"]) == 2
+
+    stderr = capsys.readouterr().err
+    assert f"{stale} was not produced by the current selection" in stderr
+    assert "openapi.json was not produced" not in stderr
+    assert stale.exists()
+
+
+def test_log_scrub_error_names_the_fixture(env: _Env) -> None:
+    log = env.cfg.results_root / PREFLIGHT_RUN / "server-start.log"
+    with log.open("a", encoding="utf-8") as fh:
+        fh.write("2026-10-01T00:00:04Z INFO \U000f0000 reserved\n")
+    appended = len(SERVER_LOG_LINES) + 1
+    _select(env, _fixture_table("E1_reserved", PREFLIGHT_RUN, "server-start.log", [appended], ["E1"], ""))
+
+    with pytest.raises(ScrubError, match="E1_reserved"):
+        export_fixtures(env.cfg, _full_map(env))
+
+
+def test_scrub_refuses_results_root_git_does_not_ignore(
+    env: _Env, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (tmp_path / ".gitignore").unlink()
+
+    assert main(["scrub", "--scan-only", "--config", str(env.config_path)]) == 1
+    assert "is not ignored by git" in capsys.readouterr().err
+    assert not env.cfg.scrub.map_path.exists()
+
+
+def test_save_map_does_not_follow_a_planted_symlink(tmp_path: Path) -> None:
+    victim = tmp_path / "victim.txt"
+    victim.write_text("untouched\n", encoding="utf-8")
+    map_path = tmp_path / "results" / "scrub-map.json"
+    map_path.parent.mkdir()
+    (map_path.parent / ".scrub-map.json.tmp").symlink_to(victim)
+
+    save_map(map_path, {ACCOUNT_S: "ACCOUNT_ID_1"})
+
+    assert victim.read_text(encoding="utf-8") == "untouched\n"
+    assert stat.S_IMODE(map_path.stat().st_mode) == 0o600
+    assert load_map(map_path) == {ACCOUNT_S: "ACCOUNT_ID_1"}
+
+
+@pytest.mark.parametrize(
+    ("line", "message"),
+    [
+        ('account_id_pointers = ["/account_1"]', r"scrub\.account_id_pointers\[0\]"),
+        ('account_id_keys = ["sub_2"]', r"scrub\.account_id_keys\[0\]"),
+    ],
+)
+def test_scrub_field_names_ending_in_digits_rejected(write_config: WriteConfig, line: str, message: str) -> None:
+    key = line.split(" = ", 1)[0]
+    lines = [line if existing.startswith(f"{key} = ") else existing for existing in MINIMAL_CONFIG_LINES]
+
+    with pytest.raises(ConfigError, match=message):
+        load_config(write_config(lines))
 
 
 def test_map_path_must_stay_under_results_root(write_config: WriteConfig) -> None:

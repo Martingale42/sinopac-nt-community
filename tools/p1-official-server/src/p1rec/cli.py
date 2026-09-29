@@ -71,7 +71,10 @@ def _add_scrub_arguments(sub: argparse.ArgumentParser) -> None:
     sub.add_argument(
         "--scan-only",
         action="store_true",
-        help="only scan fixtures_root and scrub.extra_scan_paths for original values, exiting 2 on any",
+        help=(
+            "only scan fixtures_root's parent, scrub.contract_doc and scrub.extra_scan_paths "
+            "for original values, exiting 2 on any"
+        ),
     )
 
 
