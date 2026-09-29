@@ -819,6 +819,26 @@ def test_rejected_cancel_of_failed_order_completes(tmp_path: Path, write_config:
     assert summary["cases"][0]["reason"] == "cancel rejected, but the order had already ended unfilled"
 
 
+def test_trades_list_pointer_followed(tmp_path: Path, write_config: WriteConfig) -> None:
+    server = OrderServer()
+
+    def wrapped_trades(path: str, _body: dict[str, Any]) -> httpx.Response | None:
+        if path != _TRADES_PATH:
+            return None
+        trades = [server._trade(trade_id, refresh=True) for trade_id in server.orders]
+        return httpx.Response(200, json={"trades": trades})
+
+    server.answer = wrapped_trades
+    cfg = _config(write_config)
+    cfg = dataclasses.replace(cfg, trades=dataclasses.replace(cfg.trades, list="/trades"))
+
+    exit_code, summary = _run(tmp_path, cfg, server, [_fill_case("fill")])
+
+    # The fill and its close are only seen through the configured list pointer
+    assert exit_code == 0
+    assert _outcomes(summary) == ["closed"]
+
+
 def test_failed_status_on_a_2xx_place_counts_as_rejected(tmp_path: Path, write_config: WriteConfig) -> None:
     def failed_place(path: str, _body: dict[str, Any]) -> httpx.Response | None:
         body = {"order": {"id": "F00001"}, "status": {"id": "F00001", "status": "Failed", "status_code": "88"}}

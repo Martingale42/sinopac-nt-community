@@ -769,10 +769,11 @@ class _Runner:
             # Broad on purpose, since a deeply nested body raises RecursionError
             logger.warning("trades poll for order %s failed: %s", trade_id, describe_exception(exc))
             return _OrderState.PENDING
-        if not isinstance(trades, list):
-            logger.warning("trades poll for order %s: response is not an array", trade_id)
+        items = _value_or_none(trades, self._trades.list)
+        if not isinstance(items, list):
+            logger.warning("trades poll for order %s: response has no array at %r", trade_id, self._trades.list)
             return _OrderState.PENDING
-        for item in trades:
+        for item in items:
             if _value_or_none(item, self._trades.id) == trade_id:
                 return _order_state(item, self._trades)
         return _OrderState.PENDING

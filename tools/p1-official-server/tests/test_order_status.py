@@ -23,7 +23,7 @@ def _trade(status: str, deal_quantity: int) -> dict[str, object]:
     }
 
 
-def _in_orders(trade: dict[str, object], fields: TradeFields) -> tuple[str, bool]:
+def _in_orders(trade: dict[str, object], fields: TradeFields) -> tuple[orders._OrderState, bool]:
     """Return the state orders gives trade in a trades poll, and whether a 2xx carrying it counts as accepted."""
     response = CapturedResponse(status=200, body=json.dumps(trade).encode(), recv_ts_ns=0)
     accepted, _ = orders._judge(response, fields)
@@ -44,7 +44,7 @@ def _in_reconcile(trade: dict[str, object], fields: TradeFields) -> str:
     ],
 )
 def test_prefixed_status_same_in_orders_and_reconcile(
-    write_config: WriteConfig, status: str, deal_quantity: int, state: str, accepted: bool
+    write_config: WriteConfig, status: str, deal_quantity: int, state: orders._OrderState, accepted: bool
 ) -> None:
     fields = load_config(write_config()).trades
     plain, prefixed = _trade(status, deal_quantity), _trade(f"Status.{status}", deal_quantity)

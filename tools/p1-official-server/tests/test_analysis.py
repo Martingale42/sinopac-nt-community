@@ -326,6 +326,29 @@ def test_empty_comparison_fails(
     assert "nothing was compared, since trades lists no order on 2026-10-02" in caplog.text
 
 
+def test_empty_trades_without_day_fails(
+    tmp_path: Path, write_config: WriteConfig, results_root: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    for client in ("a", "b"):
+        _write_sse(results_root / SSE_RUN, client, "order_event", _order_frames(client, _EVENTS))
+    _write_jsonl(results_root / REST_RUN / "rest.jsonl", [_trades_record([])])
+    cfg = load_config(write_config())
+    run_dir = tmp_path / "reconcile-run"
+    run_dir.mkdir()
+
+    with caplog.at_level(logging.ERROR, logger="p1rec.reconcile"):
+        exit_code = run_reconcile(cfg, SSE_RUN, REST_RUN, run_dir)
+
+    # With no day to window by, the orders the clients saw are not counted as compared
+    report = json.loads((run_dir / "reconcile.json").read_text(encoding="utf-8"))
+    assert exit_code == 2
+    assert report["trading_day"] is None
+    assert report["clean"] is False
+    assert report["rest_order_count"] == 0
+    assert report["sse_order_count_by_client"] == {"a": 0, "b": 0}
+    assert "nothing was compared, since trades lists no order at all" in caplog.text
+
+
 def test_counts_recorded(write_config: WriteConfig, monkeypatch: pytest.MonkeyPatch, results_root: Path) -> None:
     day_before = T0_S - SECONDS_PER_DAY
     earlier = [_order("t0", event_id="e0", exchange_ts=day_before), _deal("t0", 2, event_id="d0", ts=day_before)]

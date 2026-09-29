@@ -951,8 +951,10 @@ def _parse_trades(data: Mapping[str, Any], config_dir: Path) -> TradeFields:
 def _get_trade_pointer(data: Mapping[str, Any], dotted_key: str, *, allow_root: bool = False) -> str:
     """Read a [trades] pointer, refusing one that ends at an account identifier.
 
-    The values these pointers find are logged and written to orders.json
-    and reconcile.json, so none of them may be an account's identifier.
+    The order id, status and deal quantity these pointers find are logged
+    or written to orders.json and reconcile.json, so none of them may be
+    an account's identifier; the list and order time pointers have no
+    reason to end at one, so the same rule holds for them.
     """
     pointer = _get_pointer(data, dotted_key, allow_root=allow_root)
     last = pointer.rsplit("/", 1)[-1].replace("~1", "/").replace("~0", "~")

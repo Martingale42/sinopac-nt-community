@@ -265,8 +265,9 @@ id = "/order/id"
 
 # OrderStatusInfo.status and deal_quantity within a Trade. An order the
 # exchange rejects shows Failed only in a later trades response
-# (docs/official-server-contract.md section 2). A Failed order with a null
-# deal quantity counts as unfilled, a Cancelled one as possibly filled.
+# (docs/official-server-contract.md section 2). `p1rec orders` counts a
+# Failed order with a null deal quantity as unfilled, and a Cancelled one
+# as possibly filled.
 # calibrate: confirm Filled and the deal quantity on the first order that
 # fills, and whether a Cancelled order ever reports a null deal quantity.
 status = "/status/status"

@@ -680,9 +680,11 @@ def run_reconcile(
     only the orders of trading_day take part: an Asia/Taipei calendar
     date, not a TAIFEX trading day, so a night-session order counts on the
     date it was placed. It defaults to the date of the snapshot's order
-    times. When REST lists no order on that date, nothing was compared,
-    which is logged as an ERROR and returns 2. InterlockError propagates;
-    any other failure to analyse is logged and returns 1.
+    times, except that an empty snapshot gives no date, so no SSE order
+    is compared either and reconcile.json records trading_day as null.
+    When REST lists no order on the day, nothing was compared, which is
+    logged as an ERROR and returns 2. InterlockError propagates; any
+    other failure to analyse is logged and returns 1.
     """
     try:
         sse_dir = resolve_run_dir(cfg.results_root, sse_run)
@@ -690,10 +692,18 @@ def run_reconcile(
             payload = _query_trades(cfg, run_dir, transport)
         else:
             payload = last_trades_payload(resolve_run_dir(cfg.results_root, rest_run) / "rest.jsonl")
-        day = trading_day if trading_day is not None else trading_day_of(payload, cfg.trades)
+        day = trading_day
+        if day is None and _rest_items(payload, cfg.trades):
+            day = trading_day_of(payload, cfg.trades)
         rest = orders_from_rest(payload, cfg.trades, day)
         sse_files = discover_sse_files(sse_dir)
-        report = reconcile(orders_from_sse(sse_files, cfg.events, day), rest)
+
+        # With no day to window SSE by, no SSE order takes part either
+        if day is None:
+            sse = {client: ClientOrders(orders={}, event_ids=frozenset()) for client in sse_files}
+        else:
+            sse = orders_from_sse(sse_files, cfg.events, day)
+        report = reconcile(sse, rest)
     except (AnalysisError, OSError) as exc:
         logger.error("reconcile failed: %s", exc)
         return EXIT_ANALYSIS_ERROR
@@ -701,12 +711,13 @@ def run_reconcile(
     document: dict[str, object] = {
         "sse_run": sse_run,
         "rest_run": rest_run,
-        "trading_day": day.isoformat(),
+        "trading_day": day.isoformat() if day is not None else None,
         **report.to_json(),
     }
     write_json(run_dir / "reconcile.json", document)
     if report.rest_order_count == 0:
-        logger.error("reconcile: nothing was compared, since trades lists no order on %s", day.isoformat())
+        where = f"on {day.isoformat()}" if day is not None else "at all"
+        logger.error("reconcile: nothing was compared, since trades lists no order %s", where)
     logger.info(
         "reconcile: %d REST orders, SSE orders %s; %d only in REST, %d only in SSE, %d mismatched, "
         "missing orders %s, missing reports %s",
