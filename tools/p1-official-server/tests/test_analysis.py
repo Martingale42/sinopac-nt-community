@@ -301,7 +301,7 @@ def test_deals_accumulate_qty(tmp_path: Path, fields: EventFields) -> None:
 
     views = orders_from_sse({"a": [path]}, fields)
 
-    assert views["a"]["t1"] == OrderView(key="t1", status="Filled", filled_qty=Decimal(3))
+    assert views["a"].orders["t1"] == OrderView(key="t1", status="Filled", filled_qty=Decimal(3))
 
 
 def test_stats_peak_second_and_gaps(
@@ -345,6 +345,8 @@ def test_stats_peak_second_and_gaps(
         (None, False, None, 0, 1, "Unknown"),  # deals seen, order events missed
         (None, False, 2, 0, 0, "Unknown"),  # quantity known but no New seen
         (True, False, 0, 0, 0, "Submitted"),  # a zero quantity alone never reads Filled
+        (None, True, 2, 2, 0, "Unknown"),  # a Cancel seen without its New
+        (None, False, 2, 0, 2, "Unknown"),  # deals seen without the New
     ],
 )
 def test_derive_status_rules(
@@ -371,7 +373,7 @@ def test_partial_fill_then_cancel_is_cancelled(tmp_path: Path, fields: EventFiel
 
     views = orders_from_sse({"a": [path]}, fields)
 
-    assert views["a"]["t1"] == OrderView(key="t1", status="Cancelled", filled_qty=Decimal(1))
+    assert views["a"].orders["t1"] == OrderView(key="t1", status="Cancelled", filled_qty=Decimal(1))
 
 
 def test_rejected_update_qty_does_not_change_size(tmp_path: Path, fields: EventFields) -> None:
@@ -384,7 +386,78 @@ def test_rejected_update_qty_does_not_change_size(tmp_path: Path, fields: EventF
 
     views = orders_from_sse({"a": [path]}, fields)
 
-    assert views["a"]["t1"] == OrderView(key="t1", status="PartFilled", filled_qty=Decimal(1))
+    assert views["a"].orders["t1"] == OrderView(key="t1", status="PartFilled", filled_qty=Decimal(1))
+
+
+def test_client_missing_reports_fails(
+    write_config: WriteConfig, monkeypatch: pytest.MonkeyPatch, results_root: Path
+) -> None:
+    new = _order("t1", event_id="e1")
+    update_price = _order("t1", "UpdatePrice", event_id="e2")
+    cancel = _order("t1", "Cancel", event_id="e3", cancel_qty=2)
+    _write_sse(results_root / SSE_RUN, "a", "order_event", _order_frames("a", [new, update_price, cancel]))
+    _write_sse(results_root / SSE_RUN, "b", "order_event", _order_frames("b", [cancel]))
+    _write_jsonl(results_root / REST_RUN / "rest.jsonl", [_trades_record([_trade("t1", "Cancelled", 0)])])
+
+    exit_code, report = _run_cli_reconcile(write_config, monkeypatch, results_root)
+
+    assert exit_code == 2
+    assert report["missing_events_by_client"] == {"a": [], "b": ["e1", "e2"]}
+    assert report["mismatched"] == [
+        {
+            "client": "b",
+            "key": "t1",
+            "sse": {"status": "Unknown", "filled_qty": "0"},
+            "rest": {"status": "Cancelled", "filled_qty": "0"},
+        }
+    ]
+    assert report["only_in_rest"] == []
+
+
+# Candidate shapes of New(2) -> UpdatePrice -> UpdateQty to 1 -> Cancel,
+# as (UpdateQty's order.quantity, its cancel_quantity, Cancel's
+# order.quantity, its cancel_quantity).
+@pytest.mark.parametrize(
+    ("update_qty_size", "update_qty_cancel", "cancel_size", "cancel_cancel", "expected"),
+    [
+        (1, 1, 1, 2, "Cancelled"),  # the assumed shape: reduced size, cumulative cancel_quantity
+        (2, 1, 2, 2, "Cancelled"),  # placed size kept, cumulative cancel_quantity
+        (2, 1, 2, 1, "Submitted"),  # placed size kept, per-operation cancel_quantity: a known gap
+    ],
+)
+def test_lifecycle_case_under_candidate_shapes(
+    tmp_path: Path,
+    fields: EventFields,
+    update_qty_size: int,
+    update_qty_cancel: int,
+    cancel_size: int,
+    cancel_cancel: int,
+    expected: str,
+) -> None:
+    events = [
+        _order("t1", event_id="e1", quantity=2),
+        _order("t1", "UpdatePrice", event_id="e2", quantity=2),
+        _order("t1", "UpdateQty", event_id="e3", quantity=update_qty_size, cancel_qty=update_qty_cancel),
+        _order("t1", "Cancel", event_id="e4", quantity=cancel_size, cancel_qty=cancel_cancel),
+    ]
+    path = _write_sse(tmp_path, "a", "order_event", _order_frames("a", events))
+
+    views = orders_from_sse({"a": [path]}, fields)
+
+    assert views["a"].orders["t1"] == OrderView(key="t1", status=expected, filled_qty=Decimal(0))
+
+
+def test_reduced_order_filling_its_remainder_is_filled(tmp_path: Path, fields: EventFields) -> None:
+    events = [
+        _order("t1", event_id="e1", quantity=2),
+        _order("t1", "UpdateQty", event_id="e2", quantity=1, cancel_qty=1),
+        _deal("t1", 1, event_id="e3"),
+    ]
+    path = _write_sse(tmp_path, "a", "order_event", _order_frames("a", events))
+
+    views = orders_from_sse({"a": [path]}, fields)
+
+    assert views["a"].orders["t1"] == OrderView(key="t1", status="Filled", filled_qty=Decimal(1))
 
 
 def test_rejected_new_matches_prefixed_rest_status(tmp_path: Path, fields: EventFields) -> None:
@@ -405,7 +478,7 @@ def test_event_on_two_streams_counted_once(tmp_path: Path, fields: EventFields) 
 
     views = orders_from_sse({"a": paths}, fields)
 
-    assert views["a"]["t1"] == OrderView(key="t1", status="PartFilled", filled_qty=Decimal(1))
+    assert views["a"].orders["t1"] == OrderView(key="t1", status="PartFilled", filled_qty=Decimal(1))
 
 
 def test_truncated_last_line_skipped_with_warning(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:

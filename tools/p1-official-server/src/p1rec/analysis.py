@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import functools
+import hashlib
 import json
 import logging
 import math
@@ -18,7 +19,7 @@ import statistics
 from array import array
 from collections import Counter
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from fractions import Fraction
@@ -106,6 +107,17 @@ class Mismatch:
 
 
 @dataclass(frozen=True)
+class ClientOrders:
+    """What one client's order event reports say about each order it saw."""
+
+    orders: dict[str, OrderView]
+
+    # Identities of the reports behind orders: the event_id, or a digest of
+    # the data text for a report without one.
+    event_ids: frozenset[str]
+
+
+@dataclass(frozen=True)
 class ReconcileReport:
     """How the orders every client saw on SSE compare with the REST trades list."""
 
@@ -120,10 +132,14 @@ class ReconcileReport:
     missing_by_client: dict[str, list[str]]
     per_client_keys: dict[str, list[str]]
 
+    # Report identities some client saw and this one did not
+    missing_events_by_client: dict[str, list[str]]
+
     @property
     def clean(self) -> bool:
-        """Return whether SSE and REST agree on every order."""
-        return not (self.only_in_rest or self.only_in_sse or self.mismatched)
+        """Return whether every client saw every report and SSE and REST agree on every order."""
+        missed_events = any(self.missing_events_by_client.values())
+        return not (self.only_in_rest or self.only_in_sse or self.mismatched or missed_events)
 
     def to_json(self) -> dict[str, object]:
         """Return the report as the reconcile.json document, quantities as decimal strings."""
@@ -140,6 +156,7 @@ class ReconcileReport:
                 for item in self.mismatched
             ],
             "missing_by_client": self.missing_by_client,
+            "missing_events_by_client": self.missing_events_by_client,
             "per_client_keys": self.per_client_keys,
         }
 
@@ -280,22 +297,30 @@ def derive_status(
                 string.
     Formula:    The first rule that holds wins:
                 Failed      if a New operation was rejected;
-                Unknown     if order_qty is None;
+                Unknown     if no accepted New was seen, or order_qty is None;
                 Filled      if filled_qty > 0 and filled_qty >= order_qty;
                 Cancelled   if cancel_ok and cancel_qty >= order_qty - filled_qty;
                 PartFilled  if filled_qty > 0;
-                Submitted   if new_ok;
-                Unknown     otherwise.
+                Submitted   otherwise.
     Domain:     new_ok is None when no New event was seen, else whether it
                 was accepted; cancel_ok is whether any Cancel was
                 accepted; order_qty is the latest non-zero order size an
                 accepted operation reported, None if none did; cancel_qty
                 is the largest cancel_quantity an accepted operation
-                reported, which the server keeps cumulative; filled_qty is
-                the sum of deal quantities.
+                reported; filled_qty is the sum of deal quantities.
                 Quantities are non-negative and in the events' own units;
                 an overfill also reads Filled, and the filled quantity
-                compared with REST still shows it.
+                compared with REST still shows it. Without the accepted
+                New the rest of an order's history is incomplete, so no
+                status is claimed for it.
+                calibrate: these rules rest on assumptions about events not
+                yet recorded, each of which shows up as a mismatch if wrong:
+                cancel_quantity is cumulative over an order's operations,
+                not per operation; after an accepted UpdateQty,
+                order.quantity reports the reduced size, so a reduced order
+                that fills its remainder reads Filled; an IOC or FOK order
+                that expires arrives as an accepted Cancel; and a Reject
+                operation leaves the status unchanged.
     Returns:    One of Failed, Filled, Cancelled, PartFilled, Submitted or
                 Unknown. All but Unknown are REST Status values; Unknown
                 never matches REST, so an order the events cannot place is
@@ -303,7 +328,7 @@ def derive_status(
     """
     if new_ok is False:
         return STATUS_FAILED
-    if order_qty is None:
+    if not new_ok or order_qty is None:
         return STATUS_UNKNOWN
     if filled_qty > 0 and filled_qty >= order_qty:
         return STATUS_FILLED
@@ -311,9 +336,7 @@ def derive_status(
         return STATUS_CANCELLED
     if filled_qty > 0:
         return STATUS_PART_FILLED
-    if new_ok:
-        return STATUS_SUBMITTED
-    return STATUS_UNKNOWN
+    return STATUS_SUBMITTED
 
 
 @dataclass
@@ -325,6 +348,7 @@ class _OrderProgress:
     order_qty: Decimal | None = None
     cancel_qty: Decimal = Decimal(0)
     filled_qty: Decimal = Decimal(0)
+    identities: set[str] = field(default_factory=set)
 
     def view(self, key: str) -> OrderView:
         status = derive_status(
@@ -345,6 +369,7 @@ class _Report:
     seq: int
     is_deal: bool
     body: Mapping[str, object]
+    identity: str
     where: str
 
 
@@ -367,7 +392,9 @@ def _reports(paths: Sequence[Path], fields: EventFields) -> list[_Report]:
                 continue
             is_deal, body = parsed
             identity = _report_identity(body, frame, fields)
-            report = _Report(recv_ts_ns=recv_ts_ns, seq=seq, is_deal=is_deal, body=body, where=where)
+            report = _Report(
+                recv_ts_ns=recv_ts_ns, seq=seq, is_deal=is_deal, body=body, identity=identity, where=where
+            )
             seq += 1
             kept = by_identity.get(identity)
             if kept is None or recv_ts_ns < kept.recv_ts_ns:
@@ -407,8 +434,8 @@ def _report_identity(body: Mapping[str, object], frame: SseFrame, fields: EventF
     except JsonPointerError:
         event_id = None
     if isinstance(event_id, str) and event_id:
-        return f"id:{event_id}"
-    return f"data:{frame.data}"
+        return event_id
+    return "sha256:" + hashlib.sha256((frame.data or "").encode("utf-8")).hexdigest()
 
 
 def _apply_report(orders: dict[str, _OrderProgress], report: _Report, fields: EventFields) -> None:
@@ -433,7 +460,9 @@ def _apply_report(orders: dict[str, _OrderProgress], report: _Report, fields: Ev
         if report.is_deal:
             key = _pointer_str(report.body, fields.deal_key)
             quantity = _to_decimal(resolve_pointer(report.body, fields.deal_qty))
-            orders.setdefault(key, _OrderProgress()).filled_qty += quantity
+            deal_progress = orders.setdefault(key, _OrderProgress())
+            deal_progress.filled_qty += quantity
+            deal_progress.identities.add(report.identity)
             return
 
         key = _pointer_str(report.body, fields.order_key)
@@ -446,6 +475,7 @@ def _apply_report(orders: dict[str, _OrderProgress], report: _Report, fields: Ev
         return
 
     progress = orders.setdefault(key, _OrderProgress())
+    progress.identities.add(report.identity)
     if accepted and order_qty is not None and order_qty > 0:
         progress.order_qty = order_qty
     if accepted and cancel_qty is not None:
@@ -460,19 +490,22 @@ def _apply_report(orders: dict[str, _OrderProgress], report: _Report, fields: Ev
         logger.warning("%s: op_type %r of order %s does not change its derived status", report.where, op_type, key)
 
 
-def orders_from_sse(paths: Mapping[str, Sequence[Path]], fields: EventFields) -> dict[str, dict[str, OrderView]]:
-    """Return, for each client, every order it saw keyed by order key with its derived view.
+def orders_from_sse(paths: Mapping[str, Sequence[Path]], fields: EventFields) -> dict[str, ClientOrders]:
+    """Return, for each client, every order it saw keyed by order key, and the reports behind them.
 
     paths maps a client to all of its SSE files. Reports are read from
     frames named fields.order_event_name, deduplicated per client, and
     folded in arrival order; see derive_status for how the status follows.
     """
-    result: dict[str, dict[str, OrderView]] = {}
+    result: dict[str, ClientOrders] = {}
     for client, client_paths in paths.items():
         orders: dict[str, _OrderProgress] = {}
         for report in _reports(client_paths, fields):
             _apply_report(orders, report, fields)
-        result[client] = {key: progress.view(key) for key, progress in orders.items()}
+        result[client] = ClientOrders(
+            orders={key: progress.view(key) for key, progress in orders.items()},
+            event_ids=frozenset(identity for progress in orders.values() for identity in progress.identities),
+        )
     return result
 
 
@@ -507,24 +540,28 @@ def orders_from_rest(payload: object, fields: EventFields) -> dict[str, OrderVie
     return orders
 
 
-def reconcile(sse: Mapping[str, dict[str, OrderView]], rest: dict[str, OrderView]) -> ReconcileReport:
-    """Compare every client's orders with REST.
+def reconcile(sse: Mapping[str, ClientOrders], rest: dict[str, OrderView]) -> ReconcileReport:
+    """Compare every client's orders and reports with REST and with each other.
 
-    Every client must see every REST order, since each client is a
-    consumer that would otherwise miss a report: an order is only in REST
-    when at least one client missed it (every REST order, when there is no
-    client at all), and missing_by_client says which. An order is only in
-    SSE when some client saw it but REST does not list it. Each client
-    that saw an order REST also lists must agree on both status and filled
-    quantity, and every client that does not adds a Mismatch.
+    Every client must see every REST order and every report, since each
+    client is a consumer that would otherwise miss one: an order is only
+    in REST when at least one client missed it (every REST order, when
+    there is no client at all), and missing_by_client says which; a report
+    some client saw and another did not is listed under the one that
+    missed it in missing_events_by_client. An order is only in SSE when
+    some client saw it but REST does not list it. Each client that saw an
+    order REST also lists must agree on both status and filled quantity,
+    and every client that does not adds a Mismatch.
     """
-    seen = {key for views in sse.values() for key in views}
-    missing_by_client = {client: sorted(rest.keys() - sse[client].keys()) for client in sorted(sse)}
+    clients = sorted(sse)
+    seen = {key for client in clients for key in sse[client].orders}
+    all_events = frozenset().union(*(sse[client].event_ids for client in clients))
+    missing_by_client = {client: sorted(rest.keys() - sse[client].orders.keys()) for client in clients}
     missed = {key for keys in missing_by_client.values() for key in keys} if sse else set(rest)
     mismatched = [
         Mismatch(client=client, sse=view, rest=rest[key])
-        for client in sorted(sse)
-        for key, view in sorted(sse[client].items())
+        for client in clients
+        for key, view in sorted(sse[client].orders.items())
         if key in rest
         and (
             normalize_status(view.status) != normalize_status(rest[key].status)
@@ -536,7 +573,8 @@ def reconcile(sse: Mapping[str, dict[str, OrderView]], rest: dict[str, OrderView
         only_in_sse=sorted(seen - rest.keys()),
         mismatched=mismatched,
         missing_by_client=missing_by_client,
-        per_client_keys={client: sorted(sse[client]) for client in sorted(sse)},
+        per_client_keys={client: sorted(sse[client].orders) for client in clients},
+        missing_events_by_client={client: sorted(all_events - sse[client].event_ids) for client in clients},
     )
 
 
@@ -925,11 +963,12 @@ def run_reconcile(
     document: dict[str, object] = {"sse_run": sse_run, "rest_run": rest_run, **report.to_json()}
     _write_json(run_dir / "reconcile.json", document)
     logger.info(
-        "reconcile: %d only in REST, %d only in SSE, %d mismatched, missing by client %s",
+        "reconcile: %d only in REST, %d only in SSE, %d mismatched, missing orders %s, missing reports %s",
         len(report.only_in_rest),
         len(report.only_in_sse),
         len(report.mismatched),
         ", ".join(f"{client}={len(keys)}" for client, keys in report.missing_by_client.items()),
+        ", ".join(f"{client}={len(ids)}" for client, ids in report.missing_events_by_client.items()),
     )
     return EXIT_OK if report.clean else EXIT_CHECK_FAILED
 
