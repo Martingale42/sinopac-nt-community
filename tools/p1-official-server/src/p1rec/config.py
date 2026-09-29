@@ -285,6 +285,16 @@ def _optional_table(data: Mapping[str, Any], key: str) -> Mapping[str, Any]:
     return value
 
 
+def _require_endpoint_method(known_endpoints: Mapping[str, Any], op: str, method: str, key: str) -> None:
+    """Raise ConfigError, naming key, unless known_endpoints[op] exists with the given HTTP method."""
+    if op not in known_endpoints:
+        raise ConfigError(f"config key {key} names unknown endpoint: {op!r}")
+    endpoint_table = known_endpoints[op]
+    endpoint_method = endpoint_table.get("method") if isinstance(endpoint_table, Mapping) else None
+    if endpoint_method != method:
+        raise ConfigError(f"config key {key} must name a {method} endpoint, but {op!r} is {endpoint_method!r}")
+
+
 _DEFAULT_INTERLOCK_ENDPOINT_OP = "mode"
 
 
@@ -297,18 +307,13 @@ def _parse_interlock(data: Mapping[str, Any], config_dir: Path) -> InterlockConf
     pointer = _get_pointer(data, "interlock.pointer")
 
     known_endpoints = _lookup(data, "endpoints")
-    if not isinstance(known_endpoints, Mapping) or endpoint_op not in known_endpoints:
+    if not isinstance(known_endpoints, Mapping):
         raise ConfigError(f"config key interlock.endpoint_op names unknown endpoint: {endpoint_op!r}")
 
     # A POST that reports simulation mode as a side effect would still be
     # a mutation the interlock must not itself trigger, so only a GET may
     # back the check.
-    endpoint_table = known_endpoints[endpoint_op]
-    endpoint_method = endpoint_table.get("method") if isinstance(endpoint_table, Mapping) else None
-    if endpoint_method != "GET":
-        raise ConfigError(
-            f"config key interlock.endpoint_op must name a GET endpoint, but {endpoint_op!r} is {endpoint_method!r}"
-        )
+    _require_endpoint_method(known_endpoints, endpoint_op, "GET", "interlock.endpoint_op")
 
     return InterlockConfig(endpoint_op=endpoint_op, pointer=pointer)
 
@@ -351,6 +356,7 @@ def _parse_history(data: Mapping[str, Any], config_dir: Path) -> HistoryConfig:
     known_endpoints = _lookup(data, "endpoints")
     if not isinstance(known_endpoints, Mapping):
         raise ConfigError("config key endpoints must be a table")
+
     # run_history always reads usage itself, not through a configurable
     # op name, so this checks the fixed "usage" entry directly rather
     # than a dotted key someone could point elsewhere.
@@ -360,6 +366,8 @@ def _parse_history(data: Mapping[str, Any], config_dir: Path) -> HistoryConfig:
     raw_queries = table.get("query", [])
     if not isinstance(raw_queries, list):
         raise ConfigError("config key history.query must be an array of tables")
+    if not raw_queries:
+        raise ConfigError("config key history.query must not be empty")
 
     queries = tuple(
         _parse_history_query(item, index, known_endpoints) for index, item in enumerate(raw_queries)
@@ -388,16 +396,6 @@ def _parse_history_query(item: Any, index: int, known_endpoints: Mapping[str, An
         raise ConfigError(f"config key {key}.body must be a JSON object")
 
     return HistoryQuery(op=op, body=body)
-
-
-def _require_endpoint_method(known_endpoints: Mapping[str, Any], op: str, method: str, key: str) -> None:
-    """Raise ConfigError, naming key, unless known_endpoints[op] exists with the given HTTP method."""
-    if op not in known_endpoints:
-        raise ConfigError(f"config key {key} names unknown endpoint: {op!r}")
-    endpoint_table = known_endpoints[op]
-    endpoint_method = endpoint_table.get("method") if isinstance(endpoint_table, Mapping) else None
-    if endpoint_method != method:
-        raise ConfigError(f"config key {key} must name a {method} endpoint, but {op!r} is {endpoint_method!r}")
 
 
 def _parse_scrub(data: Mapping[str, Any], config_dir: Path) -> ScrubConfig:

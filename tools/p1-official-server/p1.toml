@@ -126,8 +126,8 @@ pointer = "/simulation"
 
 # History queries for `p1rec history` (docs/official-server-contract.md
 # section 1): ticks, kbars and snapshots take their request in a JSON
-# body, not query parameters; usage_bytes_pointer names UsageOut's
-# cumulative byte counter, read before and after each query below.
+# body, not query parameters, usage_bytes_pointer names UsageOut's
+# cumulative byte counter read before and after each query below, and
 # KBarsRequest's start/end are dates only (`shioaji data kbars --help`:
 # kbars are stored per day), not a time-of-day range.
 #

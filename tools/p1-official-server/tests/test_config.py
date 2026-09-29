@@ -263,6 +263,16 @@ def test_history_usage_bytes_pointer_required(write_config: WriteConfig) -> None
         load_config(config_path)
 
 
+def test_history_query_must_not_be_empty(write_config: WriteConfig) -> None:
+    # Keep [history] and usage_bytes_pointer, drop every [[history.query]]
+    # line, so the array itself is what's missing.
+    lines = MINIMAL_CONFIG_LINES[: MINIMAL_CONFIG_LINES.index("[[history.query]]")]
+    config_path = write_config(lines)
+
+    with pytest.raises(ConfigError, match=r"history\.query"):
+        load_config(config_path)
+
+
 def test_history_query_op_must_name_known_endpoint(write_config: WriteConfig) -> None:
     # "kbars" is a valid op, but MINIMAL_CONFIG_LINES defines no
     # [endpoints.kbars], so the query cannot be sent.
