@@ -59,7 +59,7 @@ P1 是 spike，只回答一個問題：**NT adapter 能不能直接接官方 ser
 
 **模式連鎖檢查**：錄製器在啟動時與每張單送出前向官方 server 查詢目前模式，不是 Simulation 就中止並記 ERROR；啟動官方 server 的指令固定不帶 `--production`。
 
-**連線額度**：永豐每人上限 5 條連線。官方 server 一個實例佔 2 條（Task 1 以 usage 量得），舊 gateway 登入時 1 條；總數維持不超過 5，因此 harness 第二實例只在額度足夠時啟動。
+**連線額度**：永豐每人上限 5 條連線。官方 server 一個實例佔 1 條（Task 1 與複查以 usage 量得），舊 gateway 登入時 1 條；總數維持不超過 5，因此 harness 第二實例只在額度足夠時啟動。
 
 **IP 白名單**：永豐 API key 綁定對外 IP 白名單，對外 IP 改變時登入回 400 `ip: ... not allow`。官方 server 必須在白名單內的主機上執行；`preflight` 登入失敗時先比對目前對外 IP 與白名單，此錯誤類別在 log sweep 中須有明確處置。
 

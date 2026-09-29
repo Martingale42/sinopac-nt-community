@@ -24,7 +24,7 @@
 - A3：下單、改單、刪單與各種查詢都是 JSON over HTTP。
 - A4：規格顯示委託與成交回報會出現在 SSE 上。
 
-**Task 1 結果（2026-09-29）：** A1–A4 皆成立（A4 為規格層級）。探勘同時發現：SSE 依資料類型分成多條端點、訂閱為 server 全域且沒有 connection 識別、心跳是 `event:heartbeat` 事件、frame 不帶 `id:`、歷史查詢為 POST 本體、官方 server 一個實例佔 2 條連線；Task 3、5、6、8、9、13 已依此修訂。事實與證據見 `docs/official-server-contract.md` §2。
+**Task 1 結果（2026-09-29）：** A1–A4 皆成立（A4 為規格層級）。探勘同時發現：SSE 依資料類型分成多條端點、訂閱為 server 全域且沒有 connection 識別、心跳是 `event:heartbeat` 事件、frame 不帶 `id:`、歷史查詢為 POST 本體、官方 server 一個實例佔 1 條連線；Task 3、5、6、8、9、13 已依此修訂。事實與證據見 `docs/official-server-contract.md` §2。
 
 **長度說明：** 本計畫約為設計文件的 3.5 倍，超出兩倍的預算。原因是設計 §5 只定下錄製器的方向與子命令，錄製器的內部規格（Task 2–11）由本計畫承擔；每個子命令都對應設計中的一條要求，因此沒有刪減。
 
@@ -827,7 +827,7 @@ git commit -m "Calibrate recorder settings from the first live session"
 **Behaviour:**
 
 - 10:30 的排程動作自動執行；之後確認 client a 的 2330 tick 仍持續進來。
-- 11:00：先查 soak 實例的 `usage`；`connections` 加 2（一個官方實例的量測值）超過 5 時，不開 harness 實例，F2 只以文件與模擬模式預設值作答並在契約文件註明。未超過時，以另一份 env（`SJ_HTTP_ADDR=127.0.0.1:18081`、`SJ_AGENT_HARNESS=all`、獨立的 `SJ_HOME_PATH`）啟動第二個官方 server 實例；執行 `p1rec orders --tag harness --only harness_probe --base-url http://127.0.0.1:18081`，錄下回應後停止該實例。soak 實例不受影響。
+- 11:00：先查 soak 實例的 `usage`；`connections` 加 1（一個官方實例的量測值）超過 5 時，不開 harness 實例，F2 只以文件與模擬模式預設值作答並在契約文件註明。未超過時，以另一份 env（`SJ_HTTP_ADDR=127.0.0.1:18081`、`SJ_AGENT_HARNESS=all`、獨立的 `SJ_HOME_PATH`）啟動第二個官方 server 實例；執行 `p1rec orders --tag harness --only harness_probe --base-url http://127.0.0.1:18081`，錄下回應後停止該實例。soak 實例不受影響。
 - 12:00（重啟排在當日主動測試的最後）：停止並重啟 soak 實例，`stream` 會記下斷線與重連；重啟後執行 `p1rec reconcile --sse-run <stream run_id>`。
 - 對帳回 2 時不重試，保留 `reconcile.json` 作為 go/no-go 證據。
 - 此後到下週二 09:30 不再觸碰 soak 實例。
@@ -835,7 +835,7 @@ git commit -m "Calibrate recorder settings from the first live session"
 **Numbers:**
 
 - `18081`：Task 1 確認未被佔用。
-- 一個官方實例佔 2 條連線：Task 1 登入後 `usage.connections` 的量測值；上限 5 條：設計 §4。
+- 一個官方實例佔 1 條連線：Task 1 與複查時 `usage.connections` 的量測值（兩次皆與舊 gateway 同時登入，合計 2）；上限 5 條：設計 §4。
 - 各時間點：週五交易時段內，重啟排在最後（設計 §9.1 第 8 步、§9.2）。
 
 **Verification:**
