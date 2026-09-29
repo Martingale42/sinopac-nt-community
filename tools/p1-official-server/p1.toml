@@ -208,7 +208,9 @@ account_id_keys = ["subaccount"]
 map_path = "../../results/p1/scrub-map.json"
 selection = "fixtures.toml"
 contract_doc = "../../docs/official-server-contract.md"
-extra_scan_paths = ["fixtures.toml"]
+
+# Everything else the live tasks commit, checked by scrub --scan-only too
+extra_scan_paths = ["fixtures.toml", "p1.toml", "scenarios.toml", "../../docs", "../../ROADMAP.md"]
 
 # Order reports and stream timing, from the order_event and tick frames
 # recorded in simulation mode on 2026-09-29. Report pointers are relative

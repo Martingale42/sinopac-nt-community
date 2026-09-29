@@ -29,8 +29,10 @@ from p1rec.scrub import (
     UNDECODABLE_B64,
     Leak,
     ScrubError,
+    _discovery,
     _export,
     _matching,
+    _run,
     build_map,
     categories,
     discover,
@@ -1023,3 +1025,17 @@ def test_real_p1_toml_scrub_section() -> None:
     assert cfg.fixtures_root.parent.name == "official"
     assert all(path.exists() for path in cfg.scrub.extra_scan_paths)
     assert scrub.load_selection(cfg.scrub.selection) == []
+
+
+def test_committed_docs_and_config_scan_clean() -> None:
+    tool_dir = Path(__file__).resolve().parent.parent
+    repo_root = tool_dir.parent.parent
+    cfg = load_config(tool_dir / "p1.toml")
+    targets = _run._scan_targets(cfg)
+    committed = [repo_root / "docs", repo_root / "ROADMAP.md", tool_dir / "p1.toml", tool_dir / "scenarios.toml"]
+    assert {path.resolve() for path in committed} <= {target.resolve() for target in targets}
+
+    # No real original is known here, so this checks the fields the scan reports by key alone
+    mapping = build_map(SECRETS, {}, {})
+
+    assert scan(targets, mapping, _discovery.key_categories(cfg)) == []

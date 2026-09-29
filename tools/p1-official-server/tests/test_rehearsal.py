@@ -79,6 +79,7 @@ _OWN_VALUES = frozenset(
         "fixtures_root",
         "scrub.map_path",
         "scrub.contract_doc",
+        "scrub.extra_scan_paths",
         # Scaled to the stub's pace
         "http_timeout_s",
         "events.gap_threshold_s",
