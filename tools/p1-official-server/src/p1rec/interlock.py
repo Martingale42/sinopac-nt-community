@@ -9,6 +9,7 @@ check itself, its exception, and a network-free self-test.
 
 from __future__ import annotations
 
+import json
 import logging
 import tempfile
 from dataclasses import dataclass
@@ -40,31 +41,54 @@ class InterlockError(RuntimeError):
     """Raised when the official server is not confirmed to be in simulation mode."""
 
 
+def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """object_pairs_hook that raises ValueError if a JSON object repeats a key.
+
+    A repeated key is ambiguous about which value the server meant, and
+    json.loads otherwise silently keeps the last one, which would make the
+    interlock trust whichever value happened to be written last.
+    """
+    seen: dict[str, object] = {}
+    for key, value in pairs:
+        if key in seen:
+            raise ValueError(f"duplicate key {key!r} in JSON object")
+        seen[key] = value
+    return seen
+
+
 def assert_simulation(client: CapturingClient, cfg: P1Config) -> None:
     """Raise InterlockError unless the official server reports simulation mode.
 
     Queries cfg.interlock.endpoint_op through client and requires a 2xx,
     JSON response whose value at cfg.interlock.pointer is exactly the JSON
-    boolean true. Every other outcome, including a non-2xx status, a
-    non-JSON body, a missing pointer, false, or a non-boolean value, is
-    treated as not-simulation and aborts.
+    boolean true. Every other outcome aborts: a non-2xx status, a request
+    that raises (a transport error or anything else), a body that is not
+    valid JSON (including one with a duplicate key, or one whose nesting
+    triggers a RecursionError), a missing pointer, false, or a non-boolean
+    value. This function never lets simulation mode be simply unproven; an
+    unproven check is always treated the same as a confirmed production
+    server, since both must abort.
     """
     op = cfg.interlock.endpoint_op
     endpoint = cfg.endpoints[op]
 
-    response = client.request(op, endpoint)
+    try:
+        response = client.request(op, endpoint)
+    except Exception as exc:
+        _abort(f"{op} request failed: {exc}", cause=exc)
+
     if not 200 <= response.status < 300:
         _abort(f"{op} returned HTTP {response.status}, expected 2xx")
 
     try:
-        body = response.json()
-    except ValueError as exc:
-        _abort(f"{op} response is not valid JSON: {exc}")
+        body = json.loads(response.body, object_pairs_hook=_reject_duplicate_keys)
+    except Exception as exc:
+        _abort(f"{op} response is not valid JSON: {exc}", cause=exc)
 
     try:
         value = resolve_pointer(body, cfg.interlock.pointer)
     except JsonPointerError as exc:
-        _abort(f"{op} response has no value at {cfg.interlock.pointer!r}: {exc}")
+        _abort(f"{op} response has no value at {cfg.interlock.pointer!r}: {exc}", cause=exc)
 
     # Python bools are also ints (1 == True), so only an identity check
     # rejects a non-boolean truthy value such as 1 or "true".
@@ -74,20 +98,25 @@ def assert_simulation(client: CapturingClient, cfg: P1Config) -> None:
     logger.info("interlock check passed: %s%s is true", op, cfg.interlock.pointer)
 
 
-def _abort(reason: str) -> NoReturn:
+def _abort(reason: str, cause: BaseException | None = None) -> NoReturn:
     logger.error("interlock check failed: %s", reason)
-    raise InterlockError(reason)
+    raise InterlockError(reason) from cause
 
 
 _SELF_TEST_BASE_URL = "http://p1rec.self-test.invalid"
 _SELF_TEST_OP = "mode"
+
+# _canned_client's transport answers in-process from a fixed body, so this
+# value is never actually waited on; it only satisfies CapturingClient's
+# required timeout_s parameter.
+_SELF_TEST_TIMEOUT_S = 1.0
 
 
 def _self_test_config() -> P1Config:
     """Build the P1Config self_test() checks against, independent of any p1.toml."""
     return P1Config(
         base_url=_SELF_TEST_BASE_URL,
-        http_timeout_s=1.0,
+        http_timeout_s=_SELF_TEST_TIMEOUT_S,
         results_root=Path("."),
         fixtures_root=Path("."),
         secret_env={},
@@ -138,7 +167,7 @@ def _canned_client(rest_log: Path, status: int, body: bytes) -> CapturingClient:
     original = capture.make_http_client
     capture.make_http_client = _make
     try:
-        return CapturingClient(_SELF_TEST_BASE_URL, "self-test", rest_log, timeout_s=1.0)
+        return CapturingClient(_SELF_TEST_BASE_URL, "self-test", rest_log, timeout_s=_SELF_TEST_TIMEOUT_S)
     finally:
         capture.make_http_client = original
 
@@ -149,7 +178,9 @@ def self_test() -> int:
     Returns 0 only if the four non-simulation responses (production, a
     response missing the simulation field, an HTTP 500, and a non-JSON
     body) each raise InterlockError and the simulation response passes;
-    returns 3 if any case behaves unexpectedly.
+    returns 3 if any case behaves unexpectedly, including a case that
+    raises something other than InterlockError, which is logged rather
+    than left to propagate out of the self-test subcommand.
     """
     cfg = _self_test_config()
     all_ok = True
@@ -157,14 +188,22 @@ def self_test() -> int:
     with tempfile.TemporaryDirectory(prefix="p1rec-self-test-") as tmp_dir:
         rest_log = Path(tmp_dir) / "rest.jsonl"
         for case in _CANNED_CASES:
-            client = _canned_client(rest_log, case.status, case.body)
             try:
-                assert_simulation(client, cfg)
-                passed = True
-            except InterlockError:
+                client = _canned_client(rest_log, case.status, case.body)
+                try:
+                    assert_simulation(client, cfg)
+                    passed = True
+                except InterlockError:
+                    passed = False
+                finally:
+                    client.close()
+            except Exception as exc:
+                # A case must never crash self_test() itself, since that
+                # would propagate past the "no network" subcommand and be
+                # reported as an ordinary failure instead of an interlock
+                # self-check result.
+                logger.error("self-test case %s raised an unexpected exception: %s", case.name, exc)
                 passed = False
-            finally:
-                client.close()
 
             ok = passed == case.should_pass
             all_ok = all_ok and ok

@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from p1rec.jsonpointer import is_valid_pointer_syntax
+
 
 class ConfigError(ValueError):
     """Raised when p1.toml is missing a required key or has the wrong type."""
@@ -265,6 +267,13 @@ def _parse_interlock(data: Mapping[str, Any], config_dir: Path) -> InterlockConf
     else:
         endpoint_op = _DEFAULT_INTERLOCK_ENDPOINT_OP
     pointer = _get_str(data, "interlock.pointer")
+    if not is_valid_pointer_syntax(pointer):
+        raise ConfigError(f"config key interlock.pointer is not a valid JSON pointer: {pointer!r}")
+    if pointer == "":
+        raise ConfigError(
+            "config key interlock.pointer must not be the empty pointer "
+            "(it would compare the whole document, not one field)"
+        )
 
     known_endpoints = _lookup(data, "endpoints")
     if not isinstance(known_endpoints, Mapping) or endpoint_op not in known_endpoints:

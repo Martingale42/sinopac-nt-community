@@ -187,6 +187,27 @@ def test_interlock_unknown_endpoint_op_rejected(write_config: WriteConfig) -> No
         load_config(config_path)
 
 
+def test_interlock_pointer_must_start_with_slash(write_config: WriteConfig) -> None:
+    lines = [
+        'pointer = "simulation"' if line == 'pointer = "/simulation"' else line for line in MINIMAL_CONFIG_LINES
+    ]
+    config_path = write_config(lines)
+
+    with pytest.raises(ConfigError, match=r"interlock\.pointer"):
+        load_config(config_path)
+
+
+def test_interlock_pointer_rejects_empty_string(write_config: WriteConfig) -> None:
+    # The empty pointer resolves to the whole response document, which
+    # would never compare equal to JSON true, so it is rejected up front
+    # rather than left to fail confusingly at check time.
+    lines = ['pointer = ""' if line == 'pointer = "/simulation"' else line for line in MINIMAL_CONFIG_LINES]
+    config_path = write_config(lines)
+
+    with pytest.raises(ConfigError, match=r"interlock\.pointer"):
+        load_config(config_path)
+
+
 def test_missing_secret_env(write_config: WriteConfig, monkeypatch: pytest.MonkeyPatch) -> None:
     config_path = write_config()
     cfg = load_config(config_path)
