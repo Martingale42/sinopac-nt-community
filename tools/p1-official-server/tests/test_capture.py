@@ -14,7 +14,7 @@ import httpx
 import pytest
 
 from p1rec import capture
-from p1rec.capture import CapturedResponse, CapturingClient
+from p1rec.capture import CapturedResponse, CapturingClient, make_http_client
 from p1rec.config import Endpoint
 
 BASE_URL = "http://127.0.0.1:8080"
@@ -33,7 +33,7 @@ def _use_transport(monkeypatch: pytest.MonkeyPatch, handler: Handler) -> None:
     monkeypatch.setattr(capture, "make_http_client", _make)
 
 
-def _lines(path: Path) -> list[dict[str, object]]:
+def _lines(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
@@ -100,6 +100,39 @@ def test_transport_error_recorded_then_raised(tmp_path: Path, monkeypatch: pytes
     assert line["sent_ts_ns"] <= line["error_ts_ns"]
     assert "status" not in line
     assert "recv_ts_ns" not in line
+
+
+def test_interrupt_recorded_then_raised(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise KeyboardInterrupt
+
+    _use_transport(monkeypatch, handler)
+    rest_log = tmp_path / "rest.jsonl"
+
+    with pytest.raises(KeyboardInterrupt):
+        CapturingClient(BASE_URL, "a", rest_log, timeout_s=35.0).request("place_stock", PLACE, json_body={})
+
+    [line] = _lines(rest_log)
+    assert line["op"] == "place_stock"
+    assert line["error"] == "KeyboardInterrupt"
+    assert line["sent_ts_ns"] <= line["error_ts_ns"]
+    assert "status" not in line
+
+
+def test_context_manager_closes_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _use_transport(monkeypatch, lambda request: httpx.Response(200, content=b"ok"))
+
+    with CapturingClient(BASE_URL, "a", tmp_path / "rest.jsonl", timeout_s=35.0) as client:
+        assert client.request("mode", MODE).status == 200
+
+    with pytest.raises(RuntimeError, match="closed"):
+        client.request("mode", MODE)
+
+
+def test_make_http_client_asks_for_identity_encoding() -> None:
+    with make_http_client(BASE_URL, httpx.Timeout(1.0)) as client:
+        assert client.headers["accept-encoding"] == "identity"
+        assert client.trust_env is False
 
 
 def test_path_vars_and_params_build_url(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

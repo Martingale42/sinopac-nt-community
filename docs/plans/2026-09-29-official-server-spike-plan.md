@@ -427,7 +427,7 @@ git commit -m "Add scenario model, price references and funds preflight"
 - 訂閱是 server 全域（契約文件 §1）：所有 recorder 首次連上後，依序送出 `startup_requests`（例如每個帳戶的 `subscribe_trade`），再對 `instruments` 的每個商品與報價類型送出一次訂閱（本體由 `subscribe_body` 代入 `{code}`、`{exchange}`、`{security_type}`、`{quote_type}`、`{intraday_odd}`）。
 - 之後只有「主 recorder」（第一個 client 的第一條串流）重連時，才重送 `startup_requests` 與目前有效的全部訂閱，並記一次 INFO；其他 recorder 重連不重送。訂閱失敗記 ERROR 並繼續其餘訂閱。
 - `[[stream.action]]` 在指定時間送出 `subscribe` 或 `unsubscribe` 並更新有效訂閱集合；啟動時已過期的動作記 WARN 並跳過。
-- 到 `--until` 或收到 SIGINT／SIGTERM 時，所有 client 寫出 `stopped` 後以 0 結束。對每個 recorder 的 join 最多等 `http_timeout_s`；逾時仍未結束的 recorder（例如卡在等待 response header）記 WARN 並列出名稱，結束碼仍為 0。
+- 到 `--until` 或收到 SIGINT／SIGTERM 時，所有 client 寫出 `stopped` 後以 0 結束。對每個 recorder 的 join 最多等 `sse.SSE_READ_TIMEOUT_S + retry_s`（讀取逾時為三個心跳間隔，契約文件 §2；recorder 的等待從它發出連線起算，stop 可能晚於連線發出，因此加一個 `retry_s` 作為餘裕）；逾時仍未結束的 recorder（例如卡在等待 response header）記 WARN 並列出名稱，結束碼仍為 0。
 
 **Interface:**
 
@@ -706,6 +706,7 @@ git commit -m "Measure history queries and their quota cost"
 - 替換對照的來源：`secret_env` 的全部密鑰（含 API key 前 10 字元與對外 IP）、以 `account_id_pointers` 從 `accounts` 回應找出的帳號、以 `ca_pointers` 從 `ca_status` 回應找出的憑證內容。
 - 佔位字串依「類別 + 首次出現順序」決定（例如 `ACCOUNT_1`）；同一原始值永遠得到同一佔位字串；對照表存 `results/p1/scrub-map.json`（不進版控），重跑時沿用。
 - 替換由長到短，嵌在較長字串中的值（例如 clientname 內的 key 前綴）也要替換。
+- 原始值的每種寫法都要處理：原文、JSON 跳脫後的形式（含 `\uXXXX`），以及 `*_b64` 欄位解碼後的內容；帳戶物件的 `username` 也屬於要替換的值。
 - `p1rec scrub` 依 `fixtures.toml` 從 `results/` 取出指定檔案與行，替換後寫入 `test_data/official/1.7.6/`，並產生 `MANIFEST.toml`（每筆：檔名、來源 run_id、來源檔、行號、錄製時間、商品、對應的 §6 項目）。
 - `p1rec scrub --scan-only` 掃描 `test_data/official/` 與 `docs/official-server-contract.md`：發現任何原始值時列出「檔案:行號:類別」（不印原始值）並回 2，否則回 0。
 
@@ -793,7 +794,7 @@ git commit -m "Rehearse the full recorder pipeline against a stub server"
 **Behaviour:**
 
 - 排程：選證交所行事曆上週四至下週二皆為營業日（週末除外）的第一週；10/8 那週不行（10/9 補假，依設計 §9.2 推論，排程時查證）。
-- 07:30 前：校時狀態（`timedatectl` 與 `chronyc tracking` 或等效指令）存入 `results/p1/<日期>-ntp.txt`；填入 `futures_margin_twd`；啟動官方 server 並依 Task 1 記下的方式把 log 導向 `results/p1/<日期>-server.log`；`p1rec self-test-interlock` 回 0；`p1rec preflight` 回 0，回 2 即停止並交由使用者取得模擬資金。
+- 07:30 前：校時狀態（`timedatectl` 與 `chronyc tracking` 或等效指令）存入 `results/p1/<日期>-ntp.txt`；填入 `futures_margin_twd`；啟動官方 server 並依 Task 1 記下的方式把 log 導向 `results/p1/<日期>-server/server.log`（放在自己的 run 目錄內，Task 15 才能以 `fixtures.toml` 挑選）；`p1rec self-test-interlock` 回 0；`p1rec preflight` 回 0，回 2 即停止並交由使用者取得模擬資金。
 - 08:00 前：`p1rec stream --clients a,b --until <下週二 09:30 +08:00>` 於 tmux 啟動，即為 soak 起點；預先排入週五 10:30 取消 2330 tick 訂閱的動作（§6 D2：訂閱為全域，看兩個 client 是否同時停止收到 2330）。
 - 09:00 後：`p1rec orders --only <第一個生命週期案例>`，量出延遲後填入 `step_wait_s`、`fill_poll_s`、`fill_timeout_s`，再以 `p1rec orders` 跑其餘案例；從第一批真實事件填入 `EventFields`。
 - 14:00 後：`p1rec history`；`p1rec stats --sse-run <stream run_id>` 取心跳最大間隔，設定 `gap_threshold_s`。

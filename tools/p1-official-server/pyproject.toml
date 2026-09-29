@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Black-box recorder for the official shioaji server 1.7.6 (P1 spike)"
 requires-python = ">=3.12"
 authors = [{ name = "Martingale42", email = "wcmc9527@gmail.com" }]
-dependencies = ["httpx>=0.27"]
+dependencies = ["httpx>=0.27,<1"]
 
 # Installed by `uv run`/`uv sync` by default so `uv run pytest` finds pytest.
 [dependency-groups]
