@@ -59,6 +59,7 @@ P1 spike 的產出文件（設計：`docs/plans/2026-09-29-official-server-spike
 - 訂閱與取消訂閱回 `{"success": true, "message": …, "subscription": …}`。
 - 期貨 API 測試（2026-09-29 18:31–18:40，模擬模式）：`subscribe_trade` 後 `order_event` 送出拒單、New、Cancel 三個事件，成功事件的 `op_code` 為 `00`，拒單為 `88`；事件格式為 `{"state": "FuturesOrder", "data": {"FuturesOrder": {...}}}`，內層鍵等於 `state`，委託事件本身不帶狀態字串；登入加一筆期貨下單與刪單後，重新登入時 `F` 的 `signed` 由 `false` 變為 `true`。
 - 夜盤以合約檔的 `limit_down` 買進 TMF 被拒（op_code `88`，「價格超過漲跌幅範圍」），以 `reference × 0.95` 買進則被接受。推論（未查證）：合約檔的漲跌停只適用期交所日盤，夜盤依當日日盤結算另計；該筆 18:33 下單時，日盤收盤 48193 × 0.9 ≈ 43374 已高於合約檔的 `limit_down` 43003。錄製器的期貨劇本單因此只在日盤下。
+- 被交易所拒絕的委託不會在下單回應中顯示：期貨 API 測試中超出漲跌幅的那筆，`place_order` 回 HTTP 200、狀態 `PendingSubmit`，拒絕（op_code `88`）只出現在隨後的 `order_event` 與 `trades` 的 `Failed` 狀態。同步回 4xx 的是規則檢查失敗（舊 gateway 對應 422，`docs/sinopac.md`）。
 - `place_order` 的 `account` 須帶 `/auth/accounts` 回傳的完整帳戶物件；只帶帳號時 `account_type` 預設為 `S`。
 - 重啟 server 會沿用 `SJ_HOME_PATH` 下 token pool 的快取 token，不會重新登入；要強制重新登入須先 `shioaji utils token clean --slot <n>`。
 - server log 的 `Subscribed trade events for account …` 一行含帳號明文，引用 server log 前須去識別化。
