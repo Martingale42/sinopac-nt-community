@@ -389,3 +389,55 @@ intraday_odd = false
 # Scheduled subscription changes go in [[stream.action]] tables: at (a time
 # with a UTC offset), op (subscribe or unsubscribe), code and quote_type. An
 # action applies to every instrument entry with that code.
+
+# Order scenarios for `p1rec orders` (openapi.json PlaceOrderRequest,
+# UpdatePriceRequest, UpdateQtyRequest, CancelOrderRequest and Trade). In
+# each body template, a string value that is exactly "{name}" is replaced
+# by a typed value: price and quantity become JSON numbers, account the
+# full account object from accounts, and order_lot, octype or custom_field
+# null where they do not apply. An odd-lot order's quantity is in shares,
+# since order_lot IntradayOdd marks it; board-lot stock uses Common.
+[orders]
+
+# Trade.order.id, which cancel_order accepted as trade_id in the futures
+# API test (docs/official-server-contract.md section 2).
+trade_id_pointer = "/order/id"
+
+# OrderStatusInfo.status and deal_quantity within a Trade. An order the
+# exchange rejects shows Failed only in a later trades response
+# (docs/official-server-contract.md section 2). A Failed order with a null
+# deal quantity counts as unfilled, a Cancelled one as possibly filled.
+# calibrate: confirm Filled and the deal quantity on the first order that
+# fills, and whether a Cancelled order ever reports a null deal quantity.
+filled_pointer = "/status/status"
+deal_quantity_pointer = "/status/deal_quantity"
+
+# Initial values only. calibrate: set from the submit-to-report latency the
+# first lifecycle case measures, before the remaining cases run.
+step_wait_s = 3
+fill_poll_s = 2
+fill_timeout_s = 60
+
+# ContractRequest.exchange per scenario market; every stock the scenarios
+# trade is listed on TWSE.
+[orders.exchange]
+stock = "TSE"
+odd = "TSE"
+futures = "TAIFEX"
+
+[orders.body_templates]
+place_stock = '''
+{"contract": {"security_type": "{security_type}", "exchange": "{exchange}", "code": "{code}"},
+ "stock_order": {"action": "{action}", "price": "{price}", "quantity": "{quantity}",
+                 "price_type": "{price_type}", "order_type": "{order_type}", "order_lot": "{order_lot}",
+                 "custom_field": "{custom_field}", "account": "{account}"}}
+'''
+place_futures = '''
+{"contract": {"security_type": "{security_type}", "exchange": "{exchange}", "code": "{code}"},
+ "futures_order": {"action": "{action}", "price": "{price}", "quantity": "{quantity}",
+                   "price_type": "{price_type}", "order_type": "{order_type}", "octype": "{octype}",
+                   "custom_field": "{custom_field}", "account": "{account}"}}
+'''
+update_price = '{"trade_id": "{trade_id}", "price": "{price}"}'
+update_qty = '{"trade_id": "{trade_id}", "quantity": "{quantity}"}'
+cancel = '{"trade_id": "{trade_id}"}'

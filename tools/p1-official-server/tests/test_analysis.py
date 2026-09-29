@@ -719,7 +719,8 @@ def _live_transport(simulation: bool, trades: object, seen: list[httpx.Request])
 
 
 def _live_cfg_lines() -> list[str]:
-    return [*MINIMAL_CONFIG_LINES, "", "[endpoints.trades]", 'method = "POST"', 'path = "/api/v1/order/trades"']
+    # MINIMAL_CONFIG_LINES already declares the trades endpoint live reconcile queries
+    return list(MINIMAL_CONFIG_LINES)
 
 
 def test_last_trades_payload_rejects_non_2xx(tmp_path: Path) -> None:

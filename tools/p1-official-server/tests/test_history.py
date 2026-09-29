@@ -10,7 +10,7 @@ from typing import NotRequired, TypedDict, cast
 
 import httpx
 import pytest
-from helpers import SECRET_ENV_VARS, UNUSED_EVENT_FIELDS, WriteConfig
+from helpers import SECRET_ENV_VARS, UNUSED_EVENT_FIELDS, UNUSED_ORDERS_CONFIG, WriteConfig
 
 from p1rec import capture
 from p1rec.cli import main
@@ -21,7 +21,6 @@ from p1rec.config import (
     HistoryConfig,
     HistoryQuery,
     InterlockConfig,
-    OrdersConfig,
     P1Config,
     ScrubConfig,
     StreamConfig,
@@ -67,7 +66,7 @@ def _build_cfg(tmp_path: Path, queries: tuple[HistoryQuery, ...]) -> P1Config:
             futures_margin_twd={},
         ),
         stream=StreamConfig(),
-        orders=OrdersConfig(),
+        orders=UNUSED_ORDERS_CONFIG,
         events=UNUSED_EVENT_FIELDS,
         history=HistoryConfig(queries=queries, usage_bytes_pointer="/bytes"),
         scrub=ScrubConfig(

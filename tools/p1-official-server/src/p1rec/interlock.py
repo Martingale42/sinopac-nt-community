@@ -191,7 +191,16 @@ def _self_test_cfg(interlock: InterlockConfig) -> P1Config:
             futures_margin_twd={},
         ),
         stream=StreamConfig(),
-        orders=OrdersConfig(),
+        orders=OrdersConfig(
+            body_templates={},
+            exchange={},
+            trade_id_pointer="",
+            filled_pointer="",
+            deal_quantity_pointer="",
+            step_wait_s=0.0,
+            fill_poll_s=0.0,
+            fill_timeout_s=0.0,
+        ),
         events=_UNUSED_EVENT_FIELDS,
         history=HistoryConfig(queries=(), usage_bytes_pointer="/bytes"),
         scrub=ScrubConfig(

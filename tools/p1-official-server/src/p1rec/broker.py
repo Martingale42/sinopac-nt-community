@@ -14,7 +14,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from decimal import Decimal
 
 from p1rec.capture import CapturedResponse, CapturingClient
-from p1rec.config import P1Config
+from p1rec.config import ACCOUNT_IDENTIFIER_KEYS, P1Config
 from p1rec.jsonpointer import JsonPointerError, resolve_pointer
 from p1rec.prices import ContractLimits, check_limits, format_decimal, tick_size
 from p1rec.redact import add_redaction_values
@@ -26,9 +26,6 @@ ACCOUNT_TYPE_FOR_MARKET: Mapping[Market, str] = {Market.STOCK: "S", Market.ODD: 
 # AccountRequest's fields (openapi.json), copied from the live account
 # object so no account identifier ever has to live in p1.toml.
 _ACCOUNT_REQUEST_KEYS = ("account_type", "broker_id", "account_id", "person_id")
-
-# Account fields that identify the holder (openapi.json Account)
-_ACCOUNT_IDENTIFIER_KEYS = ("account_id", "person_id", "username")
 
 # AccountBalance.errmsg (openapi.json); Margin and TradingLimits carry no
 # error field, so a 2xx body from them is taken at face value.
@@ -164,7 +161,7 @@ def _account_identifiers(accounts: Iterable[Mapping[str, object]]) -> list[str]:
     return [
         value
         for account in accounts
-        for key in _ACCOUNT_IDENTIFIER_KEYS
+        for key in sorted(ACCOUNT_IDENTIFIER_KEYS)
         if isinstance(value := account.get(key), str) and value
     ]
 

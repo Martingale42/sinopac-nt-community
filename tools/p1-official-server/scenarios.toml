@@ -1,0 +1,432 @@
+# Order scenarios for `p1rec orders`, run in this order one case at a
+# time, and the cases whose funds `p1rec preflight` checks. Every price is
+# a reference to the contract's limits on the day, and a far_below price
+# rests without filling.
+#
+# calibrate: TMFJ6 is the near-month TMF contract until it expires on
+# 2026-10-21; roll it, here and in p1.toml, the day before a live run.
+
+# Limit buys far below the market, never filled: a ROD rests until cancelled,
+# an IOC or FOK expires at once.
+[[case]]
+id = "far_stock_2890_lmt_rod"
+market = "stock"
+code = "2890"
+action = "Buy"
+price_ref = "far_below"
+price_type = "LMT"
+order_type = "ROD"
+quantity = 1
+expect_fill = false
+steps = ["place", "cancel"]
+
+[[case]]
+id = "far_stock_2890_lmt_ioc"
+market = "stock"
+code = "2890"
+action = "Buy"
+price_ref = "far_below"
+price_type = "LMT"
+order_type = "IOC"
+quantity = 1
+expect_fill = false
+steps = ["place"]
+
+[[case]]
+id = "far_stock_2890_lmt_fok"
+market = "stock"
+code = "2890"
+action = "Buy"
+price_ref = "far_below"
+price_type = "LMT"
+order_type = "FOK"
+quantity = 1
+expect_fill = false
+steps = ["place"]
+
+[[case]]
+id = "far_odd_00981a_lmt_rod"
+market = "odd"
+code = "00981A"
+action = "Buy"
+price_ref = "far_below"
+price_type = "LMT"
+order_type = "ROD"
+quantity = 1
+expect_fill = false
+steps = ["place", "cancel"]
+
+[[case]]
+id = "far_odd_00981a_lmt_ioc"
+market = "odd"
+code = "00981A"
+action = "Buy"
+price_ref = "far_below"
+price_type = "LMT"
+order_type = "IOC"
+quantity = 1
+expect_fill = false
+steps = ["place"]
+
+[[case]]
+id = "far_odd_00981a_lmt_fok"
+market = "odd"
+code = "00981A"
+action = "Buy"
+price_ref = "far_below"
+price_type = "LMT"
+order_type = "FOK"
+quantity = 1
+expect_fill = false
+steps = ["place"]
+
+[[case]]
+id = "far_futures_tmf_lmt_rod"
+market = "futures"
+code = "TMFJ6"
+action = "Buy"
+price_ref = "far_below"
+price_type = "LMT"
+order_type = "ROD"
+quantity = 1
+expect_fill = false
+steps = ["place", "cancel"]
+
+[[case]]
+id = "far_futures_tmf_lmt_ioc"
+market = "futures"
+code = "TMFJ6"
+action = "Buy"
+price_ref = "far_below"
+price_type = "LMT"
+order_type = "IOC"
+quantity = 1
+expect_fill = false
+steps = ["place"]
+
+[[case]]
+id = "far_futures_tmf_lmt_fok"
+market = "futures"
+code = "TMFJ6"
+action = "Buy"
+price_ref = "far_below"
+price_type = "LMT"
+order_type = "FOK"
+quantity = 1
+expect_fill = false
+steps = ["place"]
+
+# Lifecycle: 2 units, since a quantity can only be reduced and 1 must remain
+# for the cancel; each price stays far below the market.
+[[case]]
+id = "lifecycle_stock_2890"
+market = "stock"
+code = "2890"
+action = "Buy"
+price_ref = "far_below"
+price_type = "LMT"
+order_type = "ROD"
+quantity = 2
+expect_fill = false
+steps = ["place", "update_price:far_below_plus_tick", "update_qty:1", "cancel"]
+
+[[case]]
+id = "lifecycle_futures_tmf"
+market = "futures"
+code = "TMFJ6"
+action = "Buy"
+price_ref = "far_below"
+price_type = "LMT"
+order_type = "ROD"
+quantity = 2
+expect_fill = false
+steps = ["place", "update_price:far_below_plus_tick", "update_qty:1", "cancel"]
+
+# Market-type buys of the smallest unit, each closed as soon as it fills:
+# every price type and order type pair, legal or not, since the server's
+# rejection of an illegal pair is corpus too.
+[[case]]
+id = "market_stock_2890_mkt_rod"
+market = "stock"
+code = "2890"
+action = "Buy"
+price_ref = "limit_up"
+price_type = "MKT"
+order_type = "ROD"
+quantity = 1
+expect_fill = true
+steps = ["place"]
+
+[[case]]
+id = "market_stock_2890_mkt_ioc"
+market = "stock"
+code = "2890"
+action = "Buy"
+price_ref = "limit_up"
+price_type = "MKT"
+order_type = "IOC"
+quantity = 1
+expect_fill = true
+steps = ["place"]
+
+[[case]]
+id = "market_stock_2890_mkt_fok"
+market = "stock"
+code = "2890"
+action = "Buy"
+price_ref = "limit_up"
+price_type = "MKT"
+order_type = "FOK"
+quantity = 1
+expect_fill = true
+steps = ["place"]
+
+[[case]]
+id = "market_stock_2890_mkp_rod"
+market = "stock"
+code = "2890"
+action = "Buy"
+price_ref = "limit_up"
+price_type = "MKP"
+order_type = "ROD"
+quantity = 1
+expect_fill = true
+steps = ["place"]
+
+[[case]]
+id = "market_stock_2890_mkp_ioc"
+market = "stock"
+code = "2890"
+action = "Buy"
+price_ref = "limit_up"
+price_type = "MKP"
+order_type = "IOC"
+quantity = 1
+expect_fill = true
+steps = ["place"]
+
+[[case]]
+id = "market_stock_2890_mkp_fok"
+market = "stock"
+code = "2890"
+action = "Buy"
+price_ref = "limit_up"
+price_type = "MKP"
+order_type = "FOK"
+quantity = 1
+expect_fill = true
+steps = ["place"]
+
+[[case]]
+id = "market_odd_00981a_mkt_rod"
+market = "odd"
+code = "00981A"
+action = "Buy"
+price_ref = "limit_up"
+price_type = "MKT"
+order_type = "ROD"
+quantity = 1
+expect_fill = true
+steps = ["place"]
+
+[[case]]
+id = "market_odd_00981a_mkt_ioc"
+market = "odd"
+code = "00981A"
+action = "Buy"
+price_ref = "limit_up"
+price_type = "MKT"
+order_type = "IOC"
+quantity = 1
+expect_fill = true
+steps = ["place"]
+
+[[case]]
+id = "market_odd_00981a_mkt_fok"
+market = "odd"
+code = "00981A"
+action = "Buy"
+price_ref = "limit_up"
+price_type = "MKT"
+order_type = "FOK"
+quantity = 1
+expect_fill = true
+steps = ["place"]
+
+[[case]]
+id = "market_odd_00981a_mkp_rod"
+market = "odd"
+code = "00981A"
+action = "Buy"
+price_ref = "limit_up"
+price_type = "MKP"
+order_type = "ROD"
+quantity = 1
+expect_fill = true
+steps = ["place"]
+
+[[case]]
+id = "market_odd_00981a_mkp_ioc"
+market = "odd"
+code = "00981A"
+action = "Buy"
+price_ref = "limit_up"
+price_type = "MKP"
+order_type = "IOC"
+quantity = 1
+expect_fill = true
+steps = ["place"]
+
+[[case]]
+id = "market_odd_00981a_mkp_fok"
+market = "odd"
+code = "00981A"
+action = "Buy"
+price_ref = "limit_up"
+price_type = "MKP"
+order_type = "FOK"
+quantity = 1
+expect_fill = true
+steps = ["place"]
+
+[[case]]
+id = "market_futures_tmf_mkt_rod"
+market = "futures"
+code = "TMFJ6"
+action = "Buy"
+price_ref = "limit_up"
+price_type = "MKT"
+order_type = "ROD"
+quantity = 1
+expect_fill = true
+steps = ["place"]
+
+[[case]]
+id = "market_futures_tmf_mkt_ioc"
+market = "futures"
+code = "TMFJ6"
+action = "Buy"
+price_ref = "limit_up"
+price_type = "MKT"
+order_type = "IOC"
+quantity = 1
+expect_fill = true
+steps = ["place"]
+
+[[case]]
+id = "market_futures_tmf_mkt_fok"
+market = "futures"
+code = "TMFJ6"
+action = "Buy"
+price_ref = "limit_up"
+price_type = "MKT"
+order_type = "FOK"
+quantity = 1
+expect_fill = true
+steps = ["place"]
+
+[[case]]
+id = "market_futures_tmf_mkp_rod"
+market = "futures"
+code = "TMFJ6"
+action = "Buy"
+price_ref = "limit_up"
+price_type = "MKP"
+order_type = "ROD"
+quantity = 1
+expect_fill = true
+steps = ["place"]
+
+[[case]]
+id = "market_futures_tmf_mkp_ioc"
+market = "futures"
+code = "TMFJ6"
+action = "Buy"
+price_ref = "limit_up"
+price_type = "MKP"
+order_type = "IOC"
+quantity = 1
+expect_fill = true
+steps = ["place"]
+
+[[case]]
+id = "market_futures_tmf_mkp_fok"
+market = "futures"
+code = "TMFJ6"
+action = "Buy"
+price_ref = "limit_up"
+price_type = "MKP"
+order_type = "FOK"
+quantity = 1
+expect_fill = true
+steps = ["place"]
+
+# More lots than the largest stock funds figure pays for, at limit_down, for the
+# insufficient-funds rejection; cancelled should the simulator accept it.
+[[case]]
+id = "exceed_funds_stock_2890"
+market = "stock"
+code = "2890"
+action = "Buy"
+price_ref = "limit_down"
+price_type = "LMT"
+order_type = "ROD"
+quantity = "exceed_funds"
+expect_fill = false
+steps = ["place", "cancel"]
+
+# custom_field round trips: 6 and 7 base62 characters spanning the character set's
+# edges (Z, z, 9, a, A, 0), then the order tag candidate of 1 node character and a
+# 5-character hash (docs/adr/0004-order-tag-reserves-node-id.md).
+[[case]]
+id = "custom_field_base62_6"
+market = "stock"
+code = "2890"
+action = "Buy"
+price_ref = "far_below"
+price_type = "LMT"
+order_type = "ROD"
+quantity = 1
+custom_field = "Zz9aA0"
+expect_fill = false
+steps = ["place", "cancel"]
+
+[[case]]
+id = "custom_field_base62_7"
+market = "stock"
+code = "2890"
+action = "Buy"
+price_ref = "far_below"
+price_type = "LMT"
+order_type = "ROD"
+quantity = 1
+custom_field = "Zz9aA0b"
+expect_fill = false
+steps = ["place", "cancel"]
+
+[[case]]
+id = "custom_field_node_hash"
+market = "stock"
+code = "2890"
+action = "Buy"
+price_ref = "far_below"
+price_type = "LMT"
+order_type = "ROD"
+quantity = 1
+custom_field = "0k3Xq9"
+expect_fill = false
+steps = ["place", "cancel"]
+
+# Also run alone, with --only, against an instance started with
+# SJ_AGENT_HARNESS=all, to record its response to an unapproved order.
+[[case]]
+id = "harness_probe"
+market = "stock"
+code = "2890"
+action = "Buy"
+price_ref = "far_below"
+price_type = "LMT"
+order_type = "ROD"
+quantity = 1
+expect_fill = false
+steps = ["place", "cancel"]

@@ -29,7 +29,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
-from helpers import MINIMAL_CONFIG_LINES, SECRET_ENV_VARS, UNUSED_EVENT_FIELDS, WriteConfig
+from helpers import MINIMAL_CONFIG_LINES, SECRET_ENV_VARS, UNUSED_EVENT_FIELDS, UNUSED_ORDERS_CONFIG, WriteConfig
 
 from p1rec import capture, cli, sse, stream
 from p1rec.capture import CapturingClient
@@ -41,7 +41,6 @@ from p1rec.config import (
     HistoryConfig,
     Instrument,
     InterlockConfig,
-    OrdersConfig,
     P1Config,
     ScrubConfig,
     StartupRequest,
@@ -182,7 +181,7 @@ def _cfg(
             instruments=INSTRUMENTS,
             actions=actions,
         ),
-        orders=OrdersConfig(),
+        orders=UNUSED_ORDERS_CONFIG,
         events=UNUSED_EVENT_FIELDS,
         history=HistoryConfig(queries=(), usage_bytes_pointer="/bytes"),
         scrub=ScrubConfig(
@@ -1075,9 +1074,11 @@ def test_stream_section_loads(write_config: WriteConfig) -> None:
     ],
 )
 def test_stream_section_rejected(write_config: WriteConfig, old: str, new: str, key: str) -> None:
-    text = "\n".join([*MINIMAL_CONFIG_LINES, *STREAM_CONFIG_LINES])
-    assert old in text
-    lines = text.replace(old, new, 1).split("\n")
+    # Only the stream lines are edited, since MINIMAL_CONFIG_LINES' order
+    # templates hold some of the same text.
+    stream_text = "\n".join(STREAM_CONFIG_LINES)
+    assert old in stream_text
+    lines = [*MINIMAL_CONFIG_LINES, *stream_text.replace(old, new, 1).split("\n")]
 
     with pytest.raises(ConfigError, match=key):
         load_config(write_config(lines))
