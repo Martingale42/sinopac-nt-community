@@ -79,13 +79,13 @@ docs/official-server-contract.md
 - 契約文件 §3 預先列出設計 §6 A–G 的每一項，一律標「未作答」，由後續任務逐項填答。
 - 另記：`mode` 回應中代表模擬模式的 JSON 指標；HTTP 端是否要求任何驗證；SSE 連線是否帶 connection id 與其來源；可訂閱的報價類型（含盤中零股）；合約更新事件的取得方式；`ca_status` 的回應（CA 是否已啟用）；`SJ_AGENT_HARNESS` 若可見則記預設值。
 - 逐條檢查 A1–A4，任一不成立即停止。
-- 確認 `127.0.0.1:8081` 未被佔用；結束時 `shioaji server stop`。
+- 確認 `127.0.0.1:18081` 未被佔用；結束時 `shioaji server stop`。
 
 **Tests:** 不適用（探勘）。
 
 **Numbers:**
 
-- `8081`：Task 13 第二實例的埠號，來源是本任務確認未被佔用。
+- `18081`：Task 13 第二實例的埠號。`8081` 已被本機其他程序佔用（2026-09-29 查證），改用經本任務確認未被佔用的 `18081`。
 
 **Verification:**
 
@@ -814,14 +814,14 @@ git commit -m "Calibrate recorder settings from the first live session"
 **Behaviour:**
 
 - 10:30 的排程動作自動執行；之後確認 client a 的 2330 tick 仍持續進來。
-- 11:00：以另一份 env（`SJ_HTTP_ADDR=127.0.0.1:8081`、`SJ_AGENT_HARNESS=all`、獨立的 `SJ_HOME_PATH`）啟動第二個官方 server 實例；執行 `p1rec orders --tag harness --only harness_probe --base-url http://127.0.0.1:8081`，錄下回應後停止該實例。soak 實例不受影響。
+- 11:00：以另一份 env（`SJ_HTTP_ADDR=127.0.0.1:18081`、`SJ_AGENT_HARNESS=all`、獨立的 `SJ_HOME_PATH`）啟動第二個官方 server 實例；執行 `p1rec orders --tag harness --only harness_probe --base-url http://127.0.0.1:18081`，錄下回應後停止該實例。soak 實例不受影響。
 - 12:00（重啟排在當日主動測試的最後）：停止並重啟 soak 實例，`stream` 會記下斷線與重連；重啟後執行 `p1rec reconcile --sse-run <stream run_id>`。
 - 對帳回 2 時不重試，保留 `reconcile.json` 作為 go/no-go 證據。
 - 此後到下週二 09:30 不再觸碰 soak 實例。
 
 **Numbers:**
 
-- `8081`：Task 1 確認未被佔用。
+- `18081`：Task 1 確認未被佔用。
 - 各時間點：週五交易時段內，重啟排在最後（設計 §9.1 第 8 步、§9.2）。
 
 **Verification:**
