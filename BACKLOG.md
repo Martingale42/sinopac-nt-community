@@ -26,6 +26,7 @@
 | P1REC-14 | open | 短值保護寫死 `ACCOUNT_ID`／`USERNAME` 類別名，但類別由 `p1.toml` 指標的最後一段決定，改名即失效 | `scrub/_map.py` | final review（safety） |
 | P1REC-15 | open | 外洩掃描漏掉以 JSON 數字寫出的前導零帳號，以及 `*_b64` 欄位以外的 base64 token | `scrub/_matching.py` | final review（safety） |
 | P1REC-16 | open | `account_id_keys` 只列 `subaccount`；加入 `account_id`、`person_id`、`username` 作為縱深防護，先確認文件不會誤報 | `p1.toml` `[scrub]` | final review（safety） |
+| P1REC-24 | open | 沒給 `--trading-day` 且 `trades` 為空時，各 client 的 SSE 委託不計入任何欄位；改記未依日期過濾的數量，或計入 `excluded_other_days` | `reconcile.py` `run_reconcile` | final review（fb 複核） |
 
 ## P1REC — P2（整理；不改行為）
 
@@ -38,3 +39,4 @@
 | P1REC-21 | open | pyright 在 `exc_value` 可能為 None 處報兩個 `reportArgumentType` | `redact.py` excepthook | final review（safety） |
 | P1REC-22 | open | `scrub/_export.py` 重複定義 `records.py` 已有的時間常數與 `_iso_utc` | `scrub/_export.py` | final review（safety） |
 | P1REC-23 | open | 部分註解帶數字或歷史、少句點或位置不當 | `p1.toml`、`scrub/_matching.py`、`orders.py` `_Runner.run_case` | final review（safety） |
+| P1REC-25 | open | `p1rec` 沒有自己的 ruff 設定，套用根目錄給 adapter 的規則會報 101 項（多為 FURB157、UP017）；訂定此工具的規則集後修正或豁免 | `tools/p1-official-server/pyproject.toml` | final review（lint） |
