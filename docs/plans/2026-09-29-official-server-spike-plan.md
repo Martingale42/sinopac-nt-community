@@ -534,63 +534,78 @@ git commit -m "Stream quotes to several recorded SSE clients"
 
 **Files:**
 - Create: `src/p1rec/orders.py`、`tools/p1-official-server/scenarios.toml`
-- Modify: `src/p1rec/config.py`、`src/p1rec/cli.py`
-- Test: `tests/test_orders.py`
+- Modify: `src/p1rec/config.py`、`src/p1rec/cli.py`、`src/p1rec/interlock.py`（自我測試的設定）、`p1.toml`
+- Test: `tests/test_orders.py`；`tests/helpers.py` 的最小設定加上 `[orders]`
 
 **Behaviour:**
 
-- `p1rec orders [--only <id,...>] [--base-url <url>]` 依 `scenarios.toml` 順序執行；`--base-url` 覆蓋 `base_url`。
-- 期貨案例只在期交所日盤（08:45–13:45，台北時間）執行：合約檔的漲跌停價只對日盤有效，夜盤的漲跌幅以當日一般交易時段結算價為基準（推論自期貨 API 測試，契約文件 §2），在日盤以外遇到期貨案例一律拒絕並記 ERROR，不送任何請求。
-- 每個 `place`、`update_price`、`update_qty`、`cancel`、`close` 呼叫前執行連鎖檢查；中止時以 3 結束，不再送任何請求。
-- `account` 欄位帶 `accounts` 回傳的完整帳戶物件：股票與零股用 `S`、期貨用 `F`（只帶帳號時 `account_type` 預設為 `S`，契約文件 §2）。
-- 請求本體由 `body_templates` 代入 `{code}`、`{action}`、`{price}`、`{quantity}`、`{price_type}`、`{order_type}`、`{custom_field}`、`{trade_id}`；股票與零股用 `place_stock`，期貨用 `place_futures`。
-- 價格由 `resolve_price` 算出；`quantity = "exceed_funds"` 時張數為「可用股票餘額 ÷（1000 × 跌停價）」無條件進位再加 1，價格固定為跌停價，被接受也不會成交。
-- 步驟之間等待 `step_wait_s`。
-- `expect_fill` 案例：每 `fill_poll_s` 查 `trades` 直到成交或超過 `fill_timeout_s`；成交後送出反向、以漲停或跌停價構成的可成交限價單 `close`，同樣等到成交。逾時未成交時記 CRITICAL（含案例 id 與「可能留有部位，需人工檢查」），不送其他平倉單，以 2 結束。
-- 前一個 `close` 確認成交前，不開始下一個 `expect_fill` 案例。
-- 被拒的請求照樣記錄並繼續下一個案例；拒單本身是要錄的語料。
+- `p1rec orders [--only <id,...>] [--base-url <url>]` 依 `scenarios.toml` 順序逐筆執行，前一筆（含其刪單或平倉）結束才開始下一筆；`--base-url` 覆蓋 `base_url`；`--only` 含未知 id 時在送出任何請求前拋 `ConfigError`。
+- 載入時檢查：不預期成交的 ROD 案例須以 `cancel` 結束（否則掛單會跨進下一筆，而資金 preflight 以單一案例計）；`exceed_funds` 只能用於股票且 `price_ref = "limit_down"`。
+- 期貨案例只在期交所日盤（08:45–13:45，台北時間）執行：合約檔的漲跌停價只對日盤有效，夜盤的漲跌幅以當日一般交易時段結算價為基準（推論自期貨 API 測試，契約文件 §2）。案例須在日盤內開始，且最長執行時間（每步 `step_wait_s`，會成交的案例再加兩次 `fill_timeout_s + fill_poll_s`）在 13:45 前結束；否則記 ERROR、該案例不送任何請求（連模式查詢都不送），其餘案例照跑，結束碼為 2。
+- 每個 `place`、`update_price`、`update_qty`、`cancel`、`close` 呼叫前，以同一個 client 執行連鎖檢查；中止時不再送任何請求、`InterlockError` 往上拋（CLI 以 3 結束）；已送出委託的案例另記 CRITICAL（可能留有委託或部位）。
+- 每筆案例下單前查 `accounts`（同時把帳戶識別加入 log 遮蔽）與該商品的合約；步驟之間不再查詢，步驟間隔只有 `step_wait_s`。`account` 欄位帶 `accounts` 回傳的完整帳戶物件：股票與零股用 `S`、期貨用 `F`（只帶帳號時 `account_type` 預設為 `S`，契約文件 §2）。
+- 請求本體由 `body_templates` 以結構代入產生：範本是 JSON，字串值恰為 `{name}` 者換成型別值（價格、數量為 JSON 數字，`account` 為帳戶物件，不適用或未設定的 `order_lot`、`octype`、`custom_field` 為 null）。佔位名稱：`code`、`exchange`、`security_type`、`action`、`price`、`quantity`、`price_type`、`order_type`、`order_lot`、`octype`、`custom_field`、`account`、`trade_id`。載入時檢查每個範本的佔位（下單範本須帶齊案例會變動的欄位與 `account`），任何深度出現 `account_id`、`person_id`、`username` 鍵即拒絕載入。股票與零股用 `place_stock`（`order_lot` 分別為 `Common`、`IntradayOdd`，零股數量即股數），期貨用 `place_futures`（`octype = "Auto"`，期貨 API 測試送出並被接受）。
+- 價格由 `resolve_price` 算出；`quantity = "exceed_funds"` 時張數為「股票資金來源中的最大值 ÷（1000 × 跌停價）」無條件進位再加 1，最大值取比對用的來源與每個 `stock_report_only` 來源，確保超過模擬器實際檢查的那一個；任一來源查詢失敗即視為無法準備。
+- 步驟之後（含最後一步）等待 `step_wait_s`。`update_qty` 送出減少量（推論自 shioaji `update_order` 的 `qty`；2 單位減 1 時等於剩餘量，兩種解讀下生命週期案例皆成立）。
+- 被拒的請求（非 2xx，或 2xx 但狀態為 `Failed`）照樣記錄，拒單本身是語料：被拒的 `place` 略過該案例其餘步驟並繼續下一個案例；被拒的 `update_*` 照跑後續步驟（讓 `cancel` 仍送出）；被拒的 `cancel` 之後查一次 `trades`：已無成交地結束則照常、已成交記 CRITICAL、仍可能掛著則記 ERROR，後兩者結束碼為 2。
+- `expect_fill` 案例：每 `fill_poll_s` 查 `trades`（`AccountRequest` + `refresh: true`）直到該委託成交、無成交地結束（`Failed` 或 `Cancelled` 且成交量為 0：期貨 API 測試中交易所拒單時下單回應仍為 200 `PendingSubmit`，`Failed` 只出現在之後的 `trades`）或超過 `fill_timeout_s`。成交後送出反向、以跌停（平多）或漲停（平空）價構成的可成交 LMT ROD 單 `close`，同樣等到成交。逾時、部分成交後結束、平倉被拒或未成交時記 CRITICAL（含案例 id 與「possible residual position, check manually」），不送其他平倉單，之後的 `expect_fill` 案例一律略過，以 2 結束。
+- 下單請求拿不到回應（連線中斷、逾時）時記 CRITICAL（委託狀態未知），停止整個劇本，以 1 結束。
+- 無法準備的案例（帳戶、合約或資金查詢失敗）記 ERROR、不送任何請求，結束碼為 2。
+- 不論成敗都寫 `orders.json`：每個案例的 `id`、`trade_id`、`close_trade_id`、`steps`（每步的 `step`、`op`、HTTP `status`、`accepted`）與 `outcome`，鍵序固定，不含帳戶識別。
+- 結束碼：全部案例跑完（含拒單）為 0；有部位或掛單可能殘留、期貨案例在日盤外被拒、案例無法準備時為 2；連鎖檢查中止為 3；下單無回應為 1。
 
 **Interface:**
 
 ```python
 @dataclass(frozen=True)
 class OrdersConfig:
-    body_templates: dict[str, str]  # 邏輯操作 -> JSON 範本，取自 Task 1
-    trade_id_pointer: str           # 下單回應中委託識別的 JSON 指標
-    filled_pointer: str             # trades 回應中判定已成交的 JSON 指標
+    body_templates: dict[str, str]  # place_stock、place_futures、update_price、update_qty、cancel -> JSON 範本
+    exchange: dict[str, str]        # 市場（stock、odd、futures）-> ContractRequest.exchange
+    trade_id_pointer: str           # Trade 中委託識別的 JSON 指標（下單回應與 trades 元素共用）
+    filled_pointer: str             # Trade 中委託狀態的 JSON 指標（Filled、Failed）
+    deal_quantity_pointer: str      # Trade 中已成交數量的 JSON 指標
     step_wait_s: float
     fill_poll_s: float
-    fill_timeout_s: float
+    fill_timeout_s: float           # 須大於 fill_poll_s
 
-def run_orders(cfg: P1Config, cases: Sequence[Case], run_dir: Path,
-               only: set[str] | None) -> int: ...
+def run_orders(cfg: P1Config, cases: Sequence[Case], run_dir: Path, only: set[str] | None, *,
+               transport: httpx.BaseTransport | None = None, clock: Clock | None = None) -> int: ...
+def exceed_funds_lots(max_available_twd: Decimal, limit_down: Decimal) -> int: ...
+def fits_futures_day_session(start: datetime, budget_s: float) -> bool: ...
 ```
 
 `scenarios.toml` 內容（設計 §4、§6 C）：
 
 | 群組 | 商品 | 案例 |
 |---|---|---|
-| 遠價 LMT | 2890、00981A（零股）、TMF | LMT × ROD／IOC／FOK，`far_below`，不成交 |
+| 遠價 LMT | 2890、00981A（零股）、TMF | LMT × ROD／IOC／FOK，`far_below`，不成交；ROD 之後 `cancel` |
 | 生命週期 | 2890、TMF | 2 單位、`far_below`；`update_price:far_below_plus_tick` → `update_qty:1` → `cancel` |
-| 市價類 | 2890（整股 1 張）、00981A（零股 1 股）、TMF（1 口） | MKT、MKP × ROD／IOC／FOK，`expect_fill = true`，逐筆開倉即平倉 |
-| 資金不足 | 2890 | `exceed_funds`、LMT ROD，之後 `cancel` |
+| 市價類 | 2890（整股 1 張）、00981A（零股 1 股）、TMF（1 口） | MKT、MKP × ROD／IOC／FOK，`limit_up`，`expect_fill = true`，逐筆開倉即平倉；不合法組合由 server 拒單，照錄 |
+| 資金不足 | 2890 | `exceed_funds`、`limit_down`、LMT ROD，之後 `cancel` |
 | 委託標記 | 2890 | 遠價 LMT ROD；`custom_field` 分別為 6 字元 base62、7 字元 base62、ADR-0004 候選格式（1 字元 node + 5 字元雜湊）；之後 `cancel` |
 | harness 探測 | 2890 | id `harness_probe`，遠價 LMT ROD，之後 `cancel` |
 
+TMF 用 `TMFJ6`（`calibrate:` Task 12 前一個交易日換成近月代號）。
+
 **Tests:**
 
-- `test_interlock_before_every_mutation` — 假 server 第二次查詢模式時回 Production，劇本在第二個請求前中止並回 3。
-- `test_exceed_funds_quantity` — 餘額 100000、跌停 20 時張數為 6。
+- `test_interlock_before_every_mutation` — 假 server 第二次查詢模式時回 Production，劇本在第二個請求前中止並拋 `InterlockError`，已送單的案例記 CRITICAL；`test_cli_interlock_abort_exits_3` — CLI 以 3 結束。
+- `test_every_mutation_follows_its_own_mode_query` — 模式查詢數等於異動請求數，且每個異動請求緊接在一次模式查詢之後。
+- `test_exceed_funds_quantity` — 餘額 100000、跌停 20 時張數為 6；`test_exceed_funds_sized_from_largest_funds_source` — 取各股票資金來源的最大值。
 - `test_fill_then_close_sequence` — 成交後送出反向平倉；下一個 `expect_fill` 案例在平倉成交後才開始。
-- `test_fill_timeout_logs_critical_and_exits_2` — 逾時時不送平倉、記 CRITICAL、回 2。
-- `test_rejection_recorded_and_continues` — 422 被記錄，下一個案例照常執行。
-- `test_only_filter` — `--only harness_probe` 只執行該案例。
+- `test_fill_timeout_logs_critical_and_exits_2` — 逾時時不送平倉、記 CRITICAL、略過後續 `expect_fill` 案例、回 2。
+- `test_order_ending_unfilled_needs_no_close` — `trades` 顯示 `Failed` 時不平倉、不記 CRITICAL，下一個案例照常成交平倉。
+- `test_rejection_recorded_and_continues` — 422 被記錄，下一個案例照常執行；`test_rejected_place_skips_remaining_steps`；`test_rejected_cancel_of_resting_order_exits_2`；`test_no_response_to_a_mutation_stops_the_run`；`test_unprepared_case_sends_nothing_and_exits_2`。
+- `test_futures_day_session_bounds`、`test_futures_refused_outside_day_session_sends_nothing`、`test_futures_fill_case_refused_when_it_could_outlast_the_session`。
+- `test_rod_case_without_cancel_rejected_before_any_request`、`test_only_filter`（`--only harness_probe` 只執行該案例）、`test_unknown_only_id_rejected_before_any_request`。
+- `test_place_bodies_carry_typed_values_and_full_account`、`test_render_template_substitutes_typed_values`、`test_template_naming_account_identifier_rejected`、`test_template_placeholders_validated`、`test_orders_json_content`。
 
 **Numbers:**
 
 - 生命週期案例用 2 單位：台灣市場的改量只能減少，至少 2 單位才能減 1 後仍保有委託以測刪單。
 - 市價類案例用 1 張、1 股、1 口：各市場的最小交易單位，資金需求最低。
-- `step_wait_s`、`fill_poll_s`、`fill_timeout_s`：`calibrate:` Task 12 第一個生命週期案例量出「送出到回報出現」的延遲後設定，量測值記入契約文件。
+- 期交所日盤 08:45–13:45（台北時間）：設計 §4。
+- `step_wait_s`、`fill_poll_s`、`fill_timeout_s`：`p1.toml` 為初值，`calibrate:` Task 12 第一個生命週期案例量出「送出到回報出現」的延遲後設定，量測值記入契約文件。
 - 1000 股／張：同 Task 5。
 
 **Verification:**

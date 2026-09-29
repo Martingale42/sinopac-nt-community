@@ -12,6 +12,7 @@ implemented yet and returns 1.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import logging
 import re
 import sys
@@ -20,13 +21,16 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import NoReturn
+from urllib.parse import urlsplit
 
 from p1rec.config import ConfigError, P1Config, load_config, read_secrets
 from p1rec.history import run_history
 from p1rec.interlock import EXIT_INTERLOCK_ABORT, InterlockError, self_test
+from p1rec.orders import run_orders
 from p1rec.preflight import run_preflight
 from p1rec.redact import redaction_values, setup_logging
 from p1rec.rundir import new_run
+from p1rec.scenarios import load_scenarios
 
 Handler = Callable[[argparse.Namespace, P1Config, Path], int]
 ArgumentHook = Callable[[argparse.ArgumentParser], None]
@@ -69,6 +73,38 @@ def _add_scenarios_argument(sub: argparse.ArgumentParser) -> None:
     )
 
 
+def _parse_only(value: str) -> set[str]:
+    """Parse --only's comma-separated case ids, rejecting an empty id."""
+    ids = [part.strip() for part in value.split(",")]
+    if not all(ids):
+        raise argparse.ArgumentTypeError(f"invalid --only {value!r}: expected comma-separated case ids")
+    return set(ids)
+
+
+def _parse_base_url(value: str) -> str:
+    """Accept an http or https URL with a host, such as http://127.0.0.1:18081."""
+    parts = urlsplit(value)
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        raise argparse.ArgumentTypeError(f"invalid --base-url {value!r}: expected http://host:port")
+    return value
+
+
+def _add_orders_arguments(sub: argparse.ArgumentParser) -> None:
+    _add_scenarios_argument(sub)
+    sub.add_argument(
+        "--only",
+        type=_parse_only,
+        default=None,
+        help="comma-separated case ids to run, still in scenarios.toml order (default: every case)",
+    )
+    sub.add_argument(
+        "--base-url",
+        type=_parse_base_url,
+        default=None,
+        help="official server to send this run to, overriding base_url in p1.toml",
+    )
+
+
 def _not_implemented(args: argparse.Namespace, _cfg: P1Config, _run_dir: Path) -> int:
     logging.getLogger("p1rec.cli").error("%s: not implemented yet", args.command)
     return 1
@@ -84,6 +120,13 @@ def _history(_args: argparse.Namespace, cfg: P1Config, run_dir: Path) -> int:
 
 def _preflight(args: argparse.Namespace, cfg: P1Config, run_dir: Path) -> int:
     return run_preflight(cfg, Path(args.scenarios), run_dir)
+
+
+def _orders(args: argparse.Namespace, cfg: P1Config, run_dir: Path) -> int:
+    if args.base_url is not None:
+        logging.getLogger("p1rec.cli").info("orders: base_url %s from --base-url", args.base_url)
+        cfg = dataclasses.replace(cfg, base_url=args.base_url)
+    return run_orders(cfg, load_scenarios(Path(args.scenarios)), run_dir, args.only)
 
 
 @dataclass(frozen=True)
@@ -104,7 +147,7 @@ _SUBCOMMANDS: dict[str, Subcommand] = {
     ),
     "preflight": Subcommand(add_arguments=_add_scenarios_argument, handler=_preflight),
     "stream": Subcommand(add_arguments=_no_extra_arguments, handler=_not_implemented),
-    "orders": Subcommand(add_arguments=_add_scenarios_argument, handler=_not_implemented),
+    "orders": Subcommand(add_arguments=_add_orders_arguments, handler=_orders),
     "reconcile": Subcommand(add_arguments=_no_extra_arguments, handler=_not_implemented),
     "stats": Subcommand(add_arguments=_no_extra_arguments, handler=_not_implemented),
     "history": Subcommand(add_arguments=_no_extra_arguments, handler=_history),

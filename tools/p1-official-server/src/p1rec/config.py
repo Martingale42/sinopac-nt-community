@@ -11,10 +11,11 @@ touching load_config itself.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import tomllib
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -79,7 +80,25 @@ class StreamConfig:
 
 @dataclass(frozen=True)
 class OrdersConfig:
-    """Placeholder, filled in once order-scenario fields are defined."""
+    # Logical operation (place_stock, place_futures, update_price,
+    # update_qty, cancel) -> JSON body template; a string value that is
+    # exactly "{name}" is replaced by a typed value when sent.
+    body_templates: dict[str, str]
+
+    # Market (stock, odd, futures) -> ContractRequest.exchange
+    exchange: dict[str, str]
+
+    # JSON pointers into one Trade, the place response and each element of
+    # the trades response alike: the order id that update_price, update_qty
+    # and cancel take as trade_id, the order status ("Filled" once filled,
+    # "Failed" when rejected), and the quantity filled so far.
+    trade_id_pointer: str
+    filled_pointer: str
+    deal_quantity_pointer: str
+
+    step_wait_s: float
+    fill_poll_s: float
+    fill_timeout_s: float
 
 
 @dataclass(frozen=True)
@@ -415,9 +434,135 @@ def _parse_stream(data: Mapping[str, Any], config_dir: Path) -> StreamConfig:
     return StreamConfig()
 
 
+# Placeholders each order template must use, and those it may use besides.
+# A place template must carry every field a case varies, so a value typed
+# into the template can never silently override the scenario, and the
+# account placeholder, since the server takes an account given by number
+# alone to be a stock account.
+_PLACE_REQUIRED = frozenset(
+    {"code", "action", "price", "quantity", "price_type", "order_type", "custom_field", "account"}
+)
+_PLACE_OPTIONAL = frozenset({"exchange", "security_type"})
+_ORDER_TEMPLATE_PLACEHOLDERS: Mapping[str, tuple[frozenset[str], frozenset[str]]] = {
+    "place_stock": (_PLACE_REQUIRED | {"order_lot"}, _PLACE_OPTIONAL),
+    "place_futures": (_PLACE_REQUIRED, _PLACE_OPTIONAL | {"octype"}),
+    "update_price": (frozenset({"trade_id", "price"}), frozenset()),
+    "update_qty": (frozenset({"trade_id", "quantity"}), frozenset()),
+    "cancel": (frozenset({"trade_id"}), frozenset()),
+}
+
+# Account fields that identify the holder, which only ever come from the
+# live accounts response, never from p1.toml.
+_ACCOUNT_IDENTIFIER_KEYS = frozenset({"account_id", "person_id", "username"})
+
+# scenarios.Market's values; config.py cannot import scenarios, which imports it
+ORDER_MARKETS = ("stock", "odd", "futures")
+
+# A "{name}" placeholder in an order body template
+TEMPLATE_PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
 def _parse_orders(data: Mapping[str, Any], config_dir: Path) -> OrdersConfig:
     _optional_table(data, "orders")
-    return OrdersConfig()
+    known_endpoints = _lookup(data, "endpoints")
+    if not isinstance(known_endpoints, Mapping):
+        raise ConfigError("config key endpoints must be a table")
+
+    raw_templates = _lookup(data, "orders.body_templates")
+    if not isinstance(raw_templates, Mapping):
+        raise ConfigError("config key orders.body_templates must be a table")
+    unknown = sorted(set(raw_templates) - set(_ORDER_TEMPLATE_PLACEHOLDERS))
+    if unknown:
+        raise ConfigError(f"config key orders.body_templates has unknown operations: {', '.join(unknown)}")
+    templates: dict[str, str] = {}
+    for op, (required, optional) in _ORDER_TEMPLATE_PLACEHOLDERS.items():
+        key = f"orders.body_templates.{op}"
+        _require_endpoint_method(known_endpoints, op, "POST", key)
+        templates[op] = _get_order_template(data, key, required, optional)
+
+    # The fill poll reads trades with the account in a JSON body
+    _require_endpoint_method(known_endpoints, "trades", "POST", "endpoints.trades")
+
+    raw_exchange = _lookup(data, "orders.exchange")
+    if not isinstance(raw_exchange, Mapping) or sorted(raw_exchange) != sorted(ORDER_MARKETS):
+        raise ConfigError(
+            f"config key orders.exchange must be a table with exactly the keys {', '.join(ORDER_MARKETS)}"
+        )
+    exchange = {market: _get_str(data, f"orders.exchange.{market}") for market in ORDER_MARKETS}
+
+    step_wait_s = _get_positive_number(data, "orders.step_wait_s")
+    fill_poll_s = _get_positive_number(data, "orders.fill_poll_s")
+    fill_timeout_s = _get_positive_number(data, "orders.fill_timeout_s")
+    if fill_timeout_s <= fill_poll_s:
+        raise ConfigError("config key orders.fill_timeout_s must be greater than orders.fill_poll_s")
+
+    return OrdersConfig(
+        body_templates=templates,
+        exchange=exchange,
+        trade_id_pointer=_get_pointer(data, "orders.trade_id_pointer"),
+        filled_pointer=_get_pointer(data, "orders.filled_pointer"),
+        deal_quantity_pointer=_get_pointer(data, "orders.deal_quantity_pointer"),
+        step_wait_s=step_wait_s,
+        fill_poll_s=fill_poll_s,
+        fill_timeout_s=fill_timeout_s,
+    )
+
+
+def _get_positive_number(data: Mapping[str, Any], dotted_key: str) -> float:
+    value = _get_number(data, dotted_key)
+    if not math.isfinite(value) or value <= 0:
+        raise ConfigError(f"config key {dotted_key} must be a positive number")
+    return value
+
+
+def _get_order_template(
+    data: Mapping[str, Any], dotted_key: str, required: frozenset[str], optional: frozenset[str]
+) -> str:
+    """Read one order body template and check its placeholders and keys.
+
+    Raises ConfigError naming dotted_key unless the template is a JSON
+    object whose placeholders are all whole string values, include every
+    name in required and nothing outside required and optional, and whose
+    keys, at any depth, never name an account identifier.
+    """
+    template = _get_str(data, dotted_key)
+    try:
+        doc = json.loads(template)
+    except json.JSONDecodeError as exc:
+        raise ConfigError(f"config key {dotted_key} is not valid JSON: {exc}") from exc
+    if not isinstance(doc, dict):
+        raise ConfigError(f"config key {dotted_key} must be a JSON object")
+
+    used: set[str] = set()
+    for key, value in _walk_json(doc):
+        if key in _ACCOUNT_IDENTIFIER_KEYS:
+            raise ConfigError(
+                f"config key {dotted_key} names account field {key!r}; the account comes from the live "
+                'accounts response through "{account}", never from p1.toml'
+            )
+        if not isinstance(value, str) or not TEMPLATE_PLACEHOLDER_RE.search(value):
+            continue
+        whole = TEMPLATE_PLACEHOLDER_RE.fullmatch(value)
+        if whole is None:
+            raise ConfigError(f"config key {dotted_key}: placeholder in {value!r} must be the whole string value")
+        used.add(whole.group(1))
+
+    if unknown := sorted(used - required - optional):
+        raise ConfigError(f"config key {dotted_key} uses unknown placeholders: {', '.join(unknown)}")
+    if missing := sorted(required - used):
+        raise ConfigError(f"config key {dotted_key} lacks placeholders: {', '.join(missing)}")
+    return template
+
+
+def _walk_json(node: object, key: str | None = None) -> Iterator[tuple[str | None, object]]:
+    """Yield (key, value) for node and every value nested in it; key is None outside an object."""
+    yield key, node
+    if isinstance(node, dict):
+        for child_key, child in node.items():
+            yield from _walk_json(child, child_key)
+    elif isinstance(node, list):
+        for child in node:
+            yield from _walk_json(child)
 
 
 def _parse_events(data: Mapping[str, Any], config_dir: Path) -> EventFields:

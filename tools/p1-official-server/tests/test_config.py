@@ -6,7 +6,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from helpers import MINIMAL_CONFIG_LINES, WriteConfig
+from helpers import MINIMAL_CONFIG_LINES, PLACE_FUTURES_TEMPLATE, PLACE_STOCK_TEMPLATE, WriteConfig
 
 from p1rec.config import (
     ConfigError,
@@ -48,6 +48,11 @@ def test_load_config_success(tmp_path: Path, write_config: WriteConfig) -> None:
         "usage": Endpoint(method="GET", path="/api/v1/auth/usage"),
         "ticks": Endpoint(method="POST", path="/api/v1/data/ticks"),
         "trading_limits": Endpoint(method="POST", path="/api/v1/portfolio/trading_limits"),
+        "place_futures": Endpoint(method="POST", path="/api/v1/order/place_order"),
+        "update_price": Endpoint(method="POST", path="/api/v1/order/update_price"),
+        "update_qty": Endpoint(method="POST", path="/api/v1/order/update_qty"),
+        "cancel": Endpoint(method="POST", path="/api/v1/order/cancel_order"),
+        "trades": Endpoint(method="POST", path="/api/v1/order/trades"),
     }
     assert cfg.interlock == InterlockConfig(endpoint_op="mode", pointer="/simulation")
     assert cfg.contracts == ContractFields(
@@ -65,9 +70,24 @@ def test_load_config_success(tmp_path: Path, write_config: WriteConfig) -> None:
         futures_available_pointer="/available_margin",
         futures_margin_twd={},
     )
+    assert cfg.orders == OrdersConfig(
+        body_templates={
+            "place_stock": PLACE_STOCK_TEMPLATE,
+            "place_futures": PLACE_FUTURES_TEMPLATE,
+            "update_price": '{"trade_id": "{trade_id}", "price": "{price}"}',
+            "update_qty": '{"trade_id": "{trade_id}", "quantity": "{quantity}"}',
+            "cancel": '{"trade_id": "{trade_id}"}',
+        },
+        exchange={"stock": "TSE", "odd": "TSE", "futures": "TAIFEX"},
+        trade_id_pointer="/order/id",
+        filled_pointer="/status/status",
+        deal_quantity_pointer="/status/deal_quantity",
+        step_wait_s=3.0,
+        fill_poll_s=2.0,
+        fill_timeout_s=60.0,
+    )
     # These remaining placeholder types only need to construct and load here
     assert cfg.stream == StreamConfig()
-    assert cfg.orders == OrdersConfig()
     assert cfg.events == EventFields()
     assert cfg.history == HistoryConfig(
         queries=(

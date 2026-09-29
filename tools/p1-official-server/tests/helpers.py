@@ -10,9 +10,37 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
+from p1rec.config import OrdersConfig
+
 # Shape of the write_config fixture in conftest.py: an optional list of
 # TOML lines in, the written file's path out.
 WriteConfig = Callable[..., Path]
+
+# Order body templates shaped like the live p1.toml's, on one line each
+PLACE_STOCK_TEMPLATE = (
+    '{"contract": {"security_type": "{security_type}", "exchange": "{exchange}", "code": "{code}"}, '
+    '"stock_order": {"action": "{action}", "price": "{price}", "quantity": "{quantity}", '
+    '"price_type": "{price_type}", "order_type": "{order_type}", "order_lot": "{order_lot}", '
+    '"custom_field": "{custom_field}", "account": "{account}"}}'
+)
+PLACE_FUTURES_TEMPLATE = (
+    '{"contract": {"security_type": "{security_type}", "exchange": "{exchange}", "code": "{code}"}, '
+    '"futures_order": {"action": "{action}", "price": "{price}", "quantity": "{quantity}", '
+    '"price_type": "{price_type}", "order_type": "{order_type}", "octype": "{octype}", '
+    '"custom_field": "{custom_field}", "account": "{account}"}}'
+)
+
+# An OrdersConfig for hand-built P1Configs whose test never runs orders
+UNUSED_ORDERS_CONFIG = OrdersConfig(
+    body_templates={},
+    exchange={},
+    trade_id_pointer="",
+    filled_pointer="",
+    deal_quantity_pointer="",
+    step_wait_s=0.0,
+    fill_poll_s=0.0,
+    fill_timeout_s=0.0,
+)
 
 # A minimal but complete p1.toml, shared by tests that need a valid config
 # to load and mutate, independent of the real p1.toml.
@@ -83,6 +111,48 @@ MINIMAL_CONFIG_LINES = [
     "[endpoints.trading_limits]",
     'method = "POST"',
     'path = "/api/v1/portfolio/trading_limits"',
+    # [orders]: one POST endpoint per body template plus trades, which the
+    # fill poll reads.
+    "",
+    "[endpoints.place_futures]",
+    'method = "POST"',
+    'path = "/api/v1/order/place_order"',
+    "",
+    "[endpoints.update_price]",
+    'method = "POST"',
+    'path = "/api/v1/order/update_price"',
+    "",
+    "[endpoints.update_qty]",
+    'method = "POST"',
+    'path = "/api/v1/order/update_qty"',
+    "",
+    "[endpoints.cancel]",
+    'method = "POST"',
+    'path = "/api/v1/order/cancel_order"',
+    "",
+    "[endpoints.trades]",
+    'method = "POST"',
+    'path = "/api/v1/order/trades"',
+    "",
+    "[orders]",
+    'trade_id_pointer = "/order/id"',
+    'filled_pointer = "/status/status"',
+    'deal_quantity_pointer = "/status/deal_quantity"',
+    "step_wait_s = 3",
+    "fill_poll_s = 2",
+    "fill_timeout_s = 60",
+    "",
+    "[orders.exchange]",
+    'stock = "TSE"',
+    'odd = "TSE"',
+    'futures = "TAIFEX"',
+    "",
+    "[orders.body_templates]",
+    f"place_stock = '{PLACE_STOCK_TEMPLATE}'",
+    f"place_futures = '{PLACE_FUTURES_TEMPLATE}'",
+    """update_price = '{"trade_id": "{trade_id}", "price": "{price}"}'""",
+    """update_qty = '{"trade_id": "{trade_id}", "quantity": "{quantity}"}'""",
+    """cancel = '{"trade_id": "{trade_id}"}'""",
 ]
 
 SECRET_ENV_VARS = ("SJ_API_KEY", "SJ_SEC_KEY", "SJ_CA_PASSWD", "P1_PERSON_ID", "P1_EGRESS_IP")
