@@ -304,6 +304,45 @@ def test_no_client_misses_every_rest_order(trade_fields: TradeFields) -> None:
     assert report.missing_by_client == {}
 
 
+def test_empty_comparison_fails(
+    tmp_path: Path, write_config: WriteConfig, results_root: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    heartbeat = {"type": "heartbeat"}
+    for client in ("a", "b"):
+        _write_sse(results_root / SSE_RUN, client, "data", [_frame(client, "data", T0_NS, "heartbeat", heartbeat)])
+    _write_jsonl(results_root / REST_RUN / "rest.jsonl", [_trades_record([])])
+    cfg = load_config(write_config())
+    run_dir = tmp_path / "reconcile-run"
+    run_dir.mkdir()
+
+    with caplog.at_level(logging.ERROR, logger="p1rec.reconcile"):
+        exit_code = run_reconcile(cfg, SSE_RUN, REST_RUN, run_dir, trading_day=date(2026, 10, 2))
+
+    report = json.loads((run_dir / "reconcile.json").read_text(encoding="utf-8"))
+    assert exit_code == 2
+    assert report["clean"] is False
+    assert report["rest_order_count"] == 0
+    assert report["sse_order_count_by_client"] == {"a": 0, "b": 0}
+    assert "nothing was compared, since trades lists no order on 2026-10-02" in caplog.text
+
+
+def test_counts_recorded(write_config: WriteConfig, monkeypatch: pytest.MonkeyPatch, results_root: Path) -> None:
+    day_before = T0_S - SECONDS_PER_DAY
+    earlier = [_order("t0", event_id="e0", exchange_ts=day_before), _deal("t0", 2, event_id="d0", ts=day_before)]
+    _write_sse(results_root / SSE_RUN, "a", "order_event", _order_frames("a", [*earlier, *_EVENTS]))
+    _write_sse(results_root / SSE_RUN, "b", "order_event", _order_frames("b", _EVENTS))
+    trades = [*_MATCHING_TRADES, _trade("t0", "Filled", 2, order_ts=day_before)]
+    _write_jsonl(results_root / REST_RUN / "rest.jsonl", [_trades_record(trades)])
+
+    exit_code, report = _run_cli_reconcile(write_config, monkeypatch, results_root, "--trading-day", "2026-10-01")
+
+    # The day before's order is left out of both counts
+    assert exit_code == 0
+    assert report["clean"] is True
+    assert report["rest_order_count"] == 3
+    assert report["sse_order_count_by_client"] == {"a": 3, "b": 3}
+
+
 def test_deals_accumulate_qty(tmp_path: Path, fields: EventFields) -> None:
     events = [
         _order("t1", event_id="e1", quantity=3),

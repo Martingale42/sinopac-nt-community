@@ -581,6 +581,7 @@ def test_full_pipeline_against_stub(rehearsal: _Rehearsal, monkeypatch: pytest.M
     _expect(rehearsal.p1rec("reconcile", "--sse-run", stream_run.name), 0)
     reconciled = _json(rehearsal.run_dir("reconcile") / "reconcile.json")
     assert reconciled["trading_day"] == rehearsal.session_start.date().isoformat()
+    assert reconciled["rest_order_count"] > 0
     assert reconciled["only_in_rest"] == []
     assert reconciled["only_in_sse"] == []
     assert reconciled["mismatched"] == []

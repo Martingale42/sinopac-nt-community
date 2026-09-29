@@ -121,6 +121,10 @@ class RestOrders:
 class ReconcileReport:
     """How the orders every client saw on SSE compare with the REST trades list."""
 
+    # How many distinct orders REST lists, and each client saw, on the day compared
+    rest_order_count: int
+    sse_order_count_by_client: dict[str, int]
+
     # REST orders at least one client missed, and orders some client saw
     # that REST does not list.
     only_in_rest: list[str]
@@ -142,13 +146,21 @@ class ReconcileReport:
 
     @property
     def clean(self) -> bool:
-        """Return whether every client saw every report and SSE and REST agree on every order."""
+        """Return whether REST lists an order, every client saw every report, and SSE and REST agree on every order.
+
+        With no REST order nothing was compared, so a server that lost the
+        day's orders, and clients that never saw them, cannot pass.
+        """
         missed_events = any(self.missing_events_by_client.values())
-        return not (self.only_in_rest or self.only_in_sse or self.mismatched or missed_events)
+        compared = self.rest_order_count > 0
+        return compared and not (self.only_in_rest or self.only_in_sse or self.mismatched or missed_events)
 
     def to_json(self) -> dict[str, object]:
         """Return the report as the reconcile.json document, quantities as decimal strings."""
         return {
+            "clean": self.clean,
+            "rest_order_count": self.rest_order_count,
+            "sse_order_count_by_client": self.sse_order_count_by_client,
             "only_in_rest": self.only_in_rest,
             "only_in_sse": self.only_in_sse,
             "mismatched": [
@@ -592,6 +604,8 @@ def reconcile(sse: Mapping[str, ClientOrders], rest_orders: RestOrders) -> Recon
         )
     ]
     return ReconcileReport(
+        rest_order_count=len(rest),
+        sse_order_count_by_client={client: len(sse[client].orders) for client in clients},
         only_in_rest=sorted(missed),
         only_in_sse=sorted(seen - rest.keys()),
         mismatched=mismatched,
@@ -656,7 +670,7 @@ def run_reconcile(
     trading_day: date | None = None,
     transport: httpx.BaseTransport | None = None,
 ) -> int:
-    """Write run_dir/reconcile.json and return 0 if SSE and REST agree, 2 if not.
+    """Write run_dir/reconcile.json and return 0 if SSE and REST agree, 2 if not or if nothing was compared.
 
     Without rest_run, the trades list is fetched live after the
     simulation-mode check, and recorded in run_dir; with it, the last
@@ -666,8 +680,9 @@ def run_reconcile(
     only the orders of trading_day take part: an Asia/Taipei calendar
     date, not a TAIFEX trading day, so a night-session order counts on the
     date it was placed. It defaults to the date of the snapshot's order
-    times. InterlockError propagates; any other failure to analyse is
-    logged and returns 1.
+    times. When REST lists no order on that date, nothing was compared,
+    which is logged as an ERROR and returns 2. InterlockError propagates;
+    any other failure to analyse is logged and returns 1.
     """
     try:
         sse_dir = resolve_run_dir(cfg.results_root, sse_run)
@@ -690,8 +705,13 @@ def run_reconcile(
         **report.to_json(),
     }
     write_json(run_dir / "reconcile.json", document)
+    if report.rest_order_count == 0:
+        logger.error("reconcile: nothing was compared, since trades lists no order on %s", day.isoformat())
     logger.info(
-        "reconcile: %d only in REST, %d only in SSE, %d mismatched, missing orders %s, missing reports %s",
+        "reconcile: %d REST orders, SSE orders %s; %d only in REST, %d only in SSE, %d mismatched, "
+        "missing orders %s, missing reports %s",
+        report.rest_order_count,
+        ", ".join(f"{client}={count}" for client, count in report.sse_order_count_by_client.items()),
         len(report.only_in_rest),
         len(report.only_in_sse),
         len(report.mismatched),
