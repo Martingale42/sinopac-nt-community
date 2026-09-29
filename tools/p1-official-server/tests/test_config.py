@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -46,11 +47,25 @@ def test_load_config_success(tmp_path: Path, write_config: WriteConfig) -> None:
         "place_stock": Endpoint(method="POST", path="/api/v1/order/place_order"),
         "usage": Endpoint(method="GET", path="/api/v1/auth/usage"),
         "ticks": Endpoint(method="POST", path="/api/v1/data/ticks"),
+        "trading_limits": Endpoint(method="POST", path="/api/v1/portfolio/trading_limits"),
     }
     assert cfg.interlock == InterlockConfig(endpoint_op="mode", pointer="/simulation")
+    assert cfg.contracts == ContractFields(
+        code="/code",
+        limit_up="/limit_up",
+        limit_down="/limit_down",
+        reference="/reference",
+        futures_tick="/tick",
+        etf_codes=("0050",),
+    )
+    assert cfg.funds == FundsConfig(
+        stock_available_op="trading_limits",
+        stock_available_pointer="/trading_available",
+        stock_report_only={},
+        futures_available_pointer="/available_margin",
+        futures_margin_twd={},
+    )
     # These remaining placeholder types only need to construct and load here
-    assert cfg.contracts == ContractFields()
-    assert cfg.funds == FundsConfig()
     assert cfg.stream == StreamConfig()
     assert cfg.orders == OrdersConfig()
     assert cfg.events == EventFields()
@@ -264,9 +279,10 @@ def test_history_usage_bytes_pointer_required(write_config: WriteConfig) -> None
 
 
 def test_history_query_must_not_be_empty(write_config: WriteConfig) -> None:
-    # Keep [history] and usage_bytes_pointer, drop every [[history.query]]
-    # line, so the array itself is what's missing.
-    lines = MINIMAL_CONFIG_LINES[: MINIMAL_CONFIG_LINES.index("[[history.query]]")]
+    # Keep [history] and usage_bytes_pointer, drop the one [[history.query]]
+    # table (header, op and body), so the array itself is what's missing.
+    start = MINIMAL_CONFIG_LINES.index("[[history.query]]")
+    lines = MINIMAL_CONFIG_LINES[:start] + MINIMAL_CONFIG_LINES[start + 3 :]
     config_path = write_config(lines)
 
     with pytest.raises(ConfigError, match=r"history\.query"):
@@ -365,3 +381,73 @@ def test_read_secrets_success(write_config: WriteConfig, monkeypatch: pytest.Mon
         "person_id": "A123456789",
         "egress_ip": "203.0.113.1",
     }
+
+
+def _with_margins(*entries: str) -> list[str]:
+    """Return MINIMAL_CONFIG_LINES with entries placed in [funds.futures_margin_twd]."""
+    lines = list(MINIMAL_CONFIG_LINES)
+    at = lines.index("[funds.futures_margin_twd]") + 1
+    lines[at:at] = list(entries)
+    return lines
+
+
+def test_futures_margins_accept_integer_and_decimal_string(write_config: WriteConfig) -> None:
+    cfg = load_config(write_config(_with_margins("TMFJ6 = 12000", 'TXFJ6 = "184000.5"')))
+
+    assert cfg.funds.futures_margin_twd == {"TMFJ6": Decimal("12000"), "TXFJ6": Decimal("184000.5")}
+
+
+@pytest.mark.parametrize("entry", ["TMFJ6 = 12000.5", "TMFJ6 = 0", 'TMFJ6 = "abc"', "TMFJ6 = true"])
+def test_futures_margin_rejects_float_and_non_positive(write_config: WriteConfig, entry: str) -> None:
+    with pytest.raises(ConfigError, match=r"funds\.futures_margin_twd\.TMFJ6"):
+        load_config(write_config(_with_margins(entry)))
+
+
+def test_funds_pointer_validated(write_config: WriteConfig) -> None:
+    lines = [
+        'stock_available_pointer = "acc_balance"' if line.startswith("stock_available_pointer") else line
+        for line in MINIMAL_CONFIG_LINES
+    ]
+
+    with pytest.raises(ConfigError, match=r"funds\.stock_available_pointer"):
+        load_config(write_config(lines))
+
+
+def test_contracts_etf_codes_must_be_strings(write_config: WriteConfig) -> None:
+    lines = ["etf_codes = [50]" if line.startswith("etf_codes") else line for line in MINIMAL_CONFIG_LINES]
+
+    with pytest.raises(ConfigError, match=r"contracts\.etf_codes"):
+        load_config(write_config(lines))
+
+
+def test_missing_contracts_section_names_key(write_config: WriteConfig) -> None:
+    start = MINIMAL_CONFIG_LINES.index("[contracts]")
+    end = MINIMAL_CONFIG_LINES.index("[funds]")
+    lines = MINIMAL_CONFIG_LINES[:start] + MINIMAL_CONFIG_LINES[end:]
+
+    with pytest.raises(ConfigError, match=r"contracts\."):
+        load_config(write_config(lines))
+
+
+def _with_funds_line(key: str, line: str) -> list[str]:
+    return [line if entry.startswith(f"{key} =") else entry for entry in MINIMAL_CONFIG_LINES]
+
+
+@pytest.mark.parametrize("op", ["mode", "no_such_op"])
+def test_stock_available_op_must_be_post_endpoint(write_config: WriteConfig, op: str) -> None:
+    lines = _with_funds_line("stock_available_op", f'stock_available_op = "{op}"')
+
+    with pytest.raises(ConfigError, match=r"funds\.stock_available_op must name a POST endpoint"):
+        load_config(write_config(lines))
+
+
+def test_stock_report_only_entries_validated(write_config: WriteConfig) -> None:
+    at = MINIMAL_CONFIG_LINES.index("[funds.stock_report_only]") + 1
+
+    unknown = [*MINIMAL_CONFIG_LINES[:at], 'balance = "/acc_balance"', *MINIMAL_CONFIG_LINES[at:]]
+    with pytest.raises(ConfigError, match=r"funds\.stock_report_only\.balance must name a POST endpoint"):
+        load_config(write_config(unknown))
+
+    repeated = [*MINIMAL_CONFIG_LINES[:at], 'trading_limits = "/trading_available"', *MINIMAL_CONFIG_LINES[at:]]
+    with pytest.raises(ConfigError, match=r"repeats funds\.stock_available_op"):
+        load_config(write_config(repeated))

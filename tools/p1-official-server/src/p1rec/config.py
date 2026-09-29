@@ -16,6 +16,7 @@ import re
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Literal
 
@@ -40,12 +41,35 @@ class InterlockConfig:
 
 @dataclass(frozen=True)
 class ContractFields:
-    """Placeholder, filled in once contract fixture field names are defined."""
+    """JSON pointers into one contract record, and the codes that use ETF ticks.
+
+    The same pointers serve contracts_stock's single record and each
+    element of contracts_futures' array, since both are ContractInfoRecord.
+    """
+
+    code: str
+    limit_up: str
+    limit_down: str
+    reference: str
+    futures_tick: str  # Checked against p1rec's own futures tick when present
+    etf_codes: tuple[str, ...]
 
 
 @dataclass(frozen=True)
 class FundsConfig:
-    """Placeholder, filled in once funds calibration fields are defined."""
+    # The stock funds query compared against the requirement: a POST
+    # operation taking an AccountRequest, and a pointer into its response.
+    stock_available_op: str
+    stock_available_pointer: str
+
+    # Further stock funds queries, operation -> pointer, run and reported
+    # alongside the compared one but never compared.
+    stock_report_only: dict[str, str]
+
+    futures_available_pointer: str  # Into the margin response
+
+    # Contract code -> initial margin per contract in TWD
+    futures_margin_twd: dict[str, Decimal]
 
 
 @dataclass(frozen=True)
@@ -320,12 +344,70 @@ def _parse_interlock(data: Mapping[str, Any], config_dir: Path) -> InterlockConf
 
 def _parse_contracts(data: Mapping[str, Any], config_dir: Path) -> ContractFields:
     _optional_table(data, "contracts")
-    return ContractFields()
+    etf_codes = _lookup(data, "contracts.etf_codes")
+    if not isinstance(etf_codes, list) or not all(isinstance(code, str) and code for code in etf_codes):
+        raise ConfigError("config key contracts.etf_codes must be an array of non-empty strings")
+    return ContractFields(
+        code=_get_pointer(data, "contracts.code"),
+        limit_up=_get_pointer(data, "contracts.limit_up"),
+        limit_down=_get_pointer(data, "contracts.limit_down"),
+        reference=_get_pointer(data, "contracts.reference"),
+        futures_tick=_get_pointer(data, "contracts.futures_tick"),
+        etf_codes=tuple(etf_codes),
+    )
 
 
 def _parse_funds(data: Mapping[str, Any], config_dir: Path) -> FundsConfig:
-    _optional_table(data, "funds")
-    return FundsConfig()
+    funds = _optional_table(data, "funds")
+    endpoints = _lookup(data, "endpoints")
+
+    def post_op(dotted_key: str, op: str) -> str:
+        # Funds queries send the account in a JSON body, so only a POST fits
+        endpoint = endpoints.get(op) if isinstance(endpoints, Mapping) else None
+        method = endpoint.get("method") if isinstance(endpoint, Mapping) else None
+        if method != "POST":
+            raise ConfigError(f"config key {dotted_key} must name a POST endpoint, but {op!r} is {method!r}")
+        return op
+
+    stock_available_op = post_op("funds.stock_available_op", _get_str(data, "funds.stock_available_op"))
+
+    report_only: dict[str, str] = {}
+    raw_report_only = funds.get("stock_report_only", {})
+    if not isinstance(raw_report_only, Mapping):
+        raise ConfigError("config key funds.stock_report_only must be a table")
+    for op in raw_report_only:
+        dotted_key = f"funds.stock_report_only.{op}"
+        if op == stock_available_op:
+            raise ConfigError(f"config key {dotted_key} repeats funds.stock_available_op")
+        report_only[post_op(dotted_key, op)] = _get_pointer(data, dotted_key)
+
+    raw_margins = _lookup(data, "funds.futures_margin_twd")
+    if not isinstance(raw_margins, Mapping):
+        raise ConfigError("config key funds.futures_margin_twd must be a table")
+
+    margins: dict[str, Decimal] = {}
+    for code, value in raw_margins.items():
+        dotted_key = f"funds.futures_margin_twd.{code}"
+
+        # A TOML float would carry binary rounding into the funds check,
+        # so only an integer or a decimal string is accepted.
+        if isinstance(value, bool) or not isinstance(value, (int, str)):
+            raise ConfigError(f"config key {dotted_key} must be an integer or a decimal string")
+        try:
+            margin = Decimal(value)
+        except InvalidOperation:
+            raise ConfigError(f"config key {dotted_key} is not a decimal number: {value!r}") from None
+        if not margin.is_finite() or margin <= 0:
+            raise ConfigError(f"config key {dotted_key} must be a positive number")
+        margins[code] = margin
+
+    return FundsConfig(
+        stock_available_op=stock_available_op,
+        stock_available_pointer=_get_pointer(data, "funds.stock_available_pointer"),
+        stock_report_only=report_only,
+        futures_available_pointer=_get_pointer(data, "funds.futures_available_pointer"),
+        futures_margin_twd=margins,
+    )
 
 
 def _parse_stream(data: Mapping[str, Any], config_dir: Path) -> StreamConfig:

@@ -11,6 +11,12 @@ It also installs sys.excepthook and threading.excepthook, so an exception
 that escapes every try/except, in the main thread or a worker thread, is
 logged, and therefore redacted, instead of printed raw by the
 interpreter's default handler.
+
+Identifiers only learned at run time, such as account ids in a live
+response, are added to the active formatter through add_redaction_values.
+httpx and httpcore are held at WARNING, since their INFO lines carry full
+request URLs, query strings included, and rest.jsonl already records every
+request.
 """
 
 from __future__ import annotations
@@ -34,6 +40,12 @@ API_KEY_PREFIX_LEN = 10
 # pytest's log-capturing handler, alone.
 _installed_handlers: list[logging.Handler] = []
 
+# The formatter the latest setup_logging installed, which
+# add_redaction_values extends.
+_active_formatter: RedactingFormatter | None = None
+
+_QUIET_THIRD_PARTY_LOGGERS = ("httpx", "httpcore")
+
 
 def redaction_values(secrets: Mapping[str, str]) -> list[str]:
     """Return every non-empty secret value, plus the api_key clientname prefix."""
@@ -54,18 +66,47 @@ class RedactingFormatter(logging.Formatter):
 
     def __init__(self, secrets: Iterable[str], fmt: str) -> None:
         super().__init__(fmt)
+        self._lock = threading.Lock()
+        self._secrets = _longest_first(secrets)
 
-        # Longest first, so a full secret is replaced before a shorter
-        # substring of it (such as its prefix) could partially match and
-        # leave the rest exposed, and empty values are dropped since
-        # replacing an empty string would match everywhere.
-        self._secrets = sorted({s for s in secrets if s}, key=len, reverse=True)
+    def add_secrets(self, values: Iterable[str]) -> None:
+        """Redact values too in every line formatted from now on.
+
+        Safe to call while other threads are logging: format() reads the
+        whole tuple of secrets once per line, and the tuple is replaced,
+        never mutated.
+        """
+        with self._lock:
+            self._secrets = _longest_first((*self._secrets, *values))
 
     def format(self, record: logging.LogRecord) -> str:
         formatted = super().format(record)
         for secret in self._secrets:
             formatted = formatted.replace(secret, "***")
         return formatted
+
+
+def _longest_first(values: Iterable[str]) -> tuple[str, ...]:
+    """Return the distinct non-empty values, longest first.
+
+    Longest first, so a full secret is replaced before a shorter substring
+    of it (such as its prefix) could partially match and leave the rest
+    exposed, and empty values are dropped since replacing an empty string
+    would match everywhere.
+    """
+    return tuple(sorted({value for value in values if value}, key=len, reverse=True))
+
+
+def add_redaction_values(values: Iterable[str]) -> None:
+    """Redact values in every line the handlers from setup_logging write from now on.
+
+    Does nothing before setup_logging has run, since no p1rec handler
+    exists yet to write a line; a later setup_logging starts again from
+    its own secrets.
+    """
+    formatter = _active_formatter
+    if formatter is not None:
+        formatter.add_secrets(values)
 
 
 class _SafeHandlerMixin:
@@ -143,10 +184,15 @@ def setup_logging(run_dir: Path, secrets: Iterable[str], level: str) -> None:
 
     Also installs sys.excepthook and threading.excepthook so an exception
     that escapes every try/except is logged, and therefore redacted,
-    rather than printed raw.
+    rather than printed raw, and holds httpx and httpcore at WARNING so
+    request URLs stay out of the log.
     """
+    global _active_formatter
+
     root = logging.getLogger()
     root.setLevel(level)
+    for name in _QUIET_THIRD_PARTY_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
 
     for handler in _installed_handlers:
         root.removeHandler(handler)
@@ -154,6 +200,7 @@ def setup_logging(run_dir: Path, secrets: Iterable[str], level: str) -> None:
     _installed_handlers.clear()
 
     formatter = RedactingFormatter(secrets, _LOG_FORMAT)
+    _active_formatter = formatter
 
     file_handler = _RedactingFileHandler(run_dir / "recorder.log", encoding="utf-8")
     file_handler.setFormatter(formatter)

@@ -59,6 +59,30 @@ MINIMAL_CONFIG_LINES = [
     "[[history.query]]",
     'op = "ticks"',
     'body = \'{"contract": {"security_type": "STK", "exchange": "TSE", "code": "2330"}, "date": "2026-09-29"}\'',
+
+    # [contracts] and [funds]: contract limit and available-funds pointers,
+    # with the POST endpoint funds.stock_available_op names.
+    "",
+    "[contracts]",
+    'code = "/code"',
+    'limit_up = "/limit_up"',
+    'limit_down = "/limit_down"',
+    'reference = "/reference"',
+    'futures_tick = "/tick"',
+    'etf_codes = ["0050"]',
+    "",
+    "[funds]",
+    'stock_available_op = "trading_limits"',
+    'stock_available_pointer = "/trading_available"',
+    'futures_available_pointer = "/available_margin"',
+    "",
+    "[funds.stock_report_only]",
+    "",
+    "[funds.futures_margin_twd]",
+    "",
+    "[endpoints.trading_limits]",
+    'method = "POST"',
+    'path = "/api/v1/portfolio/trading_limits"',
 ]
 
 SECRET_ENV_VARS = ("SJ_API_KEY", "SJ_SEC_KEY", "SJ_CA_PASSWD", "P1_PERSON_ID", "P1_EGRESS_IP")

@@ -141,6 +141,8 @@ def _self_test_cfg(interlock: InterlockConfig) -> P1Config:
     enough to reach the wrong resource is therefore not exercised here;
     it still fails closed at runtime, since the pointer then finds
     nothing to resolve and assert_simulation aborts.
+
+    Sections the interlock never reads carry empty values.
     """
     return P1Config(
         base_url=_SELF_TEST_BASE_URL,
@@ -150,8 +152,16 @@ def _self_test_cfg(interlock: InterlockConfig) -> P1Config:
         secret_env={},
         endpoints={interlock.endpoint_op: Endpoint(method="GET", path="/api/v1/info")},
         interlock=interlock,
-        contracts=ContractFields(),
-        funds=FundsConfig(),
+        contracts=ContractFields(
+            code="", limit_up="", limit_down="", reference="", futures_tick="", etf_codes=()
+        ),
+        funds=FundsConfig(
+            stock_available_op="",
+            stock_available_pointer="",
+            stock_report_only={},
+            futures_available_pointer="",
+            futures_margin_twd={},
+        ),
         stream=StreamConfig(),
         orders=OrdersConfig(),
         events=EventFields(),

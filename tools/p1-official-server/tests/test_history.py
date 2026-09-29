@@ -57,8 +57,16 @@ def _build_cfg(tmp_path: Path, queries: tuple[HistoryQuery, ...]) -> P1Config:
             "snapshots": Endpoint(method="POST", path="/api/v1/data/snapshots"),
         },
         interlock=InterlockConfig(endpoint_op="mode", pointer="/simulation"),
-        contracts=ContractFields(),
-        funds=FundsConfig(),
+        contracts=ContractFields(
+            code="", limit_up="", limit_down="", reference="", futures_tick="", etf_codes=()
+        ),
+        funds=FundsConfig(
+            stock_available_op="",
+            stock_available_pointer="",
+            stock_report_only={},
+            futures_available_pointer="",
+            futures_margin_twd={},
+        ),
         stream=StreamConfig(),
         orders=OrdersConfig(),
         events=EventFields(),
