@@ -4,9 +4,9 @@ Each test starts tests/stub_server.py on a free loopback port and copies
 tests/data/p1.toml, pointed at it, into a scratch git repository, since
 scrub refuses to run unless git ignores results_root. The full pipeline
 then runs as a live day would: self-test-interlock, preflight, stream in
-the background, orders, every SSE connection dropped and refused for a
-while, history, stream stopped, reconcile, stats, a scrub export of two
-fixtures and a scan. Every subcommand runs as a subprocess of the p1rec
+the background, orders, stream's scheduled unsubscribe, every SSE
+connection dropped and refused for a while, history, stream stopped,
+reconcile, stats, a scrub export of two fixtures and a scan. Every subcommand runs as a subprocess of the p1rec
 console script with made-up secrets in its environment, except orders.
 
 orders runs in this process through p1rec.cli.main instead, with the
@@ -18,9 +18,10 @@ wall time alone; its sleeps and elapsed time are real. stream has to be a
 subprocess regardless, since it blocks its stop signals and refuses to
 start while any other thread, such as the stub's, is running.
 
-The rehearsal config must keep the live p1.toml's tables, keys and body
-template placeholders, values aside, so that what passes here is the
-configuration a live run loads; a drift test holds the two together.
+The rehearsal config must match the live p1.toml in every table, key,
+template and value, except the values _OWN_VALUES lets it tune for the
+stub, so that what passes here is the configuration a live run loads; a
+drift test holds the two together.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ import copy
 import functools
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -46,33 +48,72 @@ from stub_server import (
     STUB_PERSON_ID,
     STUB_STOCK_ACCOUNT,
     SUBSCRIBE_TRADE_PATH,
+    TAIPEI,
+    UNSUBSCRIBE_PATH,
     StubBroker,
     StubServer,
     session_anchor,
 )
 
 from p1rec import cli, orders
-from p1rec.config import PLACEHOLDER_RE, P1Config, load_config
+from p1rec.config import PLACEHOLDER_RE, EventFields, P1Config, load_config
 from p1rec.interlock import EXIT_INTERLOCK_ABORT
 from p1rec.scenarios import load_scenarios
+from p1rec.sse import parse_frame
 
 _DATA_DIR = Path(__file__).resolve().parent / "data"
 _CONFIG_TEMPLATE = _DATA_DIR / "p1.toml"
 _SCENARIOS = _DATA_DIR / "scenarios.toml"
 _REAL_CONFIG = Path(__file__).resolve().parent.parent / "p1.toml"
 
-# Tables whose keys are data rather than structure: futures_margin_twd
-# names the contracts a run trades, and the live file leaves it empty until
-# it is calibrated for the run date.
+# Values the rehearsal config sets differently from the live p1.toml, each
+# named by its path with [] for any array index, while every other value
+# must match, so that calibrating a pointer, a template or an event field
+# in p1.toml forces the same change here.
+_OWN_VALUES = frozenset(
+    {
+        # Where the stub and the scratch repository are
+        "base_url",
+        "results_root",
+        "fixtures_root",
+        "scrub.map_path",
+        "scrub.contract_doc",
+        # Scaled to the stub's pace
+        "http_timeout_s",
+        "events.gap_threshold_s",
+        "stream.retry_s",
+        "stream.request_retry_s",
+        "orders.step_wait_s",
+        "orders.fill_poll_s",
+        "orders.fill_timeout_s",
+        # The recorded day's dates and instruments
+        "history.query[].body",
+        "contracts.etf_codes",
+    }
+)
+
+# Tables whose keys are data rather than structure, compared as tables
+# only, since futures_margin_twd names the contracts a run trades and the
+# live file leaves it empty until it is calibrated for the run date.
 _DATA_KEYED_TABLES = frozenset({"funds.futures_margin_twd"})
+
+# Arrays of tables compared by their elements' keys alone, since the
+# instruments to record, and when to change them, are chosen per run.
+_KEYS_ONLY_ARRAYS = frozenset({"stream.instrument", "stream.action"})
+
+# Arrays of tables either config may leave out, since the live file
+# schedules its actions for each run.
+_OPTIONAL_ARRAYS = frozenset({"stream.action"})
+
+_ARRAY_INDEX_RE = re.compile(r"\[\d+\]")
 
 # The console script uv installs beside the interpreter running the tests
 _P1REC = Path(sys.executable).with_name("p1rec")
 
 _CLIENTS = ("a", "b")
 
-# Made-up secrets. The person is the one the stub's accounts name, so scrub
-# meets it both in the environment and in recorded responses.
+# Made-up secrets, the person being the one the stub's accounts name, so
+# scrub meets it both in the environment and in recorded responses.
 _SECRETS = {
     "SJ_API_KEY": "FakeRehearsalApiKey0123456789",
     "SJ_SEC_KEY": "FakeRehearsalSecKey9876543210",
@@ -94,6 +135,11 @@ _STREAM_SAFETY_S = 120.0
 # How long the stub refuses streams after dropping them: several of the
 # rehearsal config's retry_s, and longer than its gap_threshold_s.
 _STREAM_DOWN_S = 1.5
+
+# When the rehearsal config's scheduled action falls after stream is
+# launched, late enough that stream has started, since an action already
+# due at startup is skipped, and soon enough to keep the rehearsal short.
+_ACTION_AFTER_S = 2.0
 
 # How each rehearsal case ends against the stub (tests/data/scenarios.toml)
 _EXPECTED_OUTCOMES = {
@@ -174,79 +220,106 @@ def _body_template(value: str) -> dict[str, Any] | None:
         document = json.loads(value)
     except ValueError:
         return None
-    if not isinstance(document, dict) or not _template_members(document, ""):
+    if not isinstance(document, dict):
         return None
-    return document
+    members = _template_members(document, "")
+    return document if any(kind.startswith("placeholder ") for kind in members.values()) else None
 
 
 def _template_members(node: object, pointer: str) -> dict[str, str]:
-    """Return each leaf of a JSON body template, as a JSON pointer, with the placeholder it holds."""
-    if isinstance(node, dict):
-        members: dict[str, str] = {}
+    """Return each leaf of a JSON body template, as a JSON pointer, with the placeholder or literal it holds."""
+    members: dict[str, str] = {}
+    if isinstance(node, dict) and node:
         for key, item in node.items():
             members.update(_template_members(item, f"{pointer}/{key}"))
-        return members
-    if isinstance(node, list):
-        members = {}
+    elif isinstance(node, list) and node:
         for index, item in enumerate(node):
             members.update(_template_members(item, f"{pointer}/{index}"))
-        return members
-    match = PLACEHOLDER_RE.fullmatch(node) if isinstance(node, str) else None
-    return {pointer: f"placeholder {match.group(0)}"} if match else {}
+    elif isinstance(node, str) and PLACEHOLDER_RE.fullmatch(node):
+        members[pointer] = f"placeholder {node}"
+    else:
+        members[pointer] = f"literal {json.dumps(node, ensure_ascii=False)}"
+    return members
 
 
-def _config_shape(node: dict[str, Any], prefix: str = "") -> dict[str, str]:
-    """Return every key path of a parsed p1.toml with the kind of thing it holds.
+def _generic(path: str) -> str:
+    """Return path with every array index written as [], as the allow-lists name paths."""
+    return _ARRAY_INDEX_RE.sub("[]", path)
 
-    An array of tables contributes the union of its elements' keys under
-    <path>[], since the two configs list different instruments and
-    queries. A JSON body template contributes each placeholder it holds
-    under <path>/<JSON pointer>, so templates that fill a field from
-    different placeholders differ, not only templates with different
-    placeholder sets.
-    """
+
+def _config_shape(table: dict[str, Any], prefix: str = "") -> dict[str, str]:
+    """Return every key path under a parsed p1.toml table with a description of what it holds."""
     shape: dict[str, str] = {}
-    for key, value in node.items():
-        path = f"{prefix}.{key}" if prefix else key
-        if isinstance(value, dict):
-            shape[path] = "table"
-            if path not in _DATA_KEYED_TABLES:
-                shape.update(_config_shape(value, path))
-        elif isinstance(value, list) and value and all(isinstance(item, dict) for item in value):
-            shape[path] = "array of tables"
-            for item in value:
-                shape.update(_config_shape(item, f"{path}[]"))
-        elif isinstance(value, str) and (template := _body_template(value)) is not None:
-            shape[path] = "body template"
-            shape.update({f"{path}{member}": kind for member, kind in _template_members(template, "").items()})
-        else:
-            shape[path] = "value"
+    for key, value in table.items():
+        shape.update(_value_shape(f"{prefix}.{key}" if prefix else key, value))
     return shape
 
 
-def _config_drift(real: dict[str, Any], rehearsal: dict[str, Any]) -> list[str]:
-    """Return one line per key path whose kind differs between the live and rehearsal configs, naming the path."""
-    real_shape, rehearsal_shape = _config_shape(real), _config_shape(rehearsal)
+def _value_shape(path: str, value: object) -> dict[str, str]:
+    """Describe what path holds and everything nested under it, values included unless _OWN_VALUES names them.
+
+    Arrays compare element by element, arrays of arrays too, except the
+    _KEYS_ONLY_ARRAYS, whose elements contribute only their keys, under
+    <path>[]. A JSON body template contributes each placeholder or literal
+    it holds under <path>/<JSON pointer>, so templates differ when they
+    fill a field differently, whatever their text layout.
+    """
+    generic = _generic(path)
+    if isinstance(value, dict):
+        nested = {} if generic in _DATA_KEYED_TABLES else _config_shape(value, path)
+        return {path: "table", **nested}
+    if isinstance(value, list):
+        tables = bool(value) and all(isinstance(item, dict) for item in value)
+        shape = {path: "array of tables" if tables else "array"}
+        if tables and generic in _KEYS_ONLY_ARRAYS:
+            shape.update({f"{path}[].{key}": "value" for item in value for key in item})
+        elif generic not in _OWN_VALUES:
+            for index, item in enumerate(value):
+                shape.update(_value_shape(f"{path}[{index}]", item))
+        return shape
+    if isinstance(value, str) and (template := _body_template(value)) is not None:
+        members = _template_members(template, "")
+        return {path: "body template", **{f"{path}{member}": kind for member, kind in members.items()}}
+    return {path: "value" if generic in _OWN_VALUES else f"value {value!r}"}
+
+
+def _config_drift(expected: dict[str, Any], actual: dict[str, Any]) -> list[str]:
+    """Return one line per key path where actual differs from expected, naming the path.
+
+    An _OPTIONAL_ARRAYS entry present in only one of them is left out.
+    """
+    want, got = _config_shape(expected), _config_shape(actual)
+    for optional in _OPTIONAL_ARRAYS:
+        if (optional in want) != (optional in got):
+            want = {path: kind for path, kind in want.items() if not _within(path, optional)}
+            got = {path: kind for path, kind in got.items() if not _within(path, optional)}
     return [
-        f"{path}: {real_shape.get(path, 'absent')} in p1.toml, "
-        f"{rehearsal_shape.get(path, 'absent')} in tests/data/p1.toml"
-        for path in sorted(real_shape.keys() | rehearsal_shape.keys())
-        if real_shape.get(path) != rehearsal_shape.get(path)
+        f"{path}: expected {want.get(path, 'absent')}, found {got.get(path, 'absent')}"
+        for path in sorted(want.keys() | got.keys())
+        if want.get(path) != got.get(path)
     ]
 
 
-def _config_text(base_url: str) -> str:
-    """Return tests/data/p1.toml with base_url pointing at the stub."""
+def _within(path: str, array: str) -> bool:
+    return path == array or path.startswith((f"{array}[", f"{array}."))
+
+
+def _config_text(base_url: str, action_at: datetime | None = None) -> str:
+    """Return tests/data/p1.toml with base_url pointing at the stub and, if given, its one action due at action_at."""
     lines = _CONFIG_TEMPLATE.read_text(encoding="utf-8").splitlines()
-    at = [index for index, line in enumerate(lines) if line.startswith("base_url = ")]
-    assert len(at) == 1
-    lines[at[0]] = f'base_url = "{base_url}"'
+    replacements = {"base_url = ": f'"{base_url}"'}
+    if action_at is not None:
+        replacements["at = "] = action_at.isoformat()
+    for prefix, value in replacements.items():
+        at = [index for index, line in enumerate(lines) if line.startswith(prefix)]
+        assert len(at) == 1, f"expected one {prefix!r} line in {_CONFIG_TEMPLATE}"
+        lines[at[0]] = f"{prefix}{value}"
     return "\n".join(lines) + "\n"
 
 
 @pytest.fixture
 def rehearsal(tmp_path: Path) -> Iterator[_Rehearsal]:
-    """A running stub, the rehearsal config pointed at it, and a scratch git repository around both."""
+    """Yield a running stub, the rehearsal config pointed at it, and a scratch git repository around both."""
     assert _P1REC.is_file(), f"no p1rec console script beside {sys.executable}; run the tests with uv run"
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     (tmp_path / ".gitignore").write_text("/results/\n", encoding="utf-8")
@@ -266,6 +339,10 @@ def _expect(result: subprocess.CompletedProcess[str], exit_code: int) -> None:
     assert result.returncode == exit_code, (
         f"p1rec {result.args[1]} exited {result.returncode}, expected {exit_code}:\n{result.stderr[-4000:]}"
     )
+
+
+def _instant(text: str) -> datetime:
+    return datetime.fromisoformat(text)
 
 
 def _json(path: Path) -> Any:
@@ -294,8 +371,12 @@ def _run_orders(rehearsal: _Rehearsal, monkeypatch: pytest.MonkeyPatch) -> int:
 
 
 @contextmanager
-def _streaming(rehearsal: _Rehearsal) -> Iterator[subprocess.Popen[bytes]]:
-    """Run `p1rec stream` for every client in the background, killing it if the block ends with it running."""
+def _streaming(rehearsal: _Rehearsal, action_at: datetime) -> Iterator[subprocess.Popen[bytes]]:
+    """Run `p1rec stream` for every client in the background with its action due at action_at.
+
+    The stream is killed if the block ends with it still running.
+    """
+    rehearsal.config.write_text(_config_text(rehearsal.stub.base_url, action_at), encoding="utf-8")
     until = (datetime.now(timezone.utc) + timedelta(seconds=_STREAM_SAFETY_S)).isoformat()
     command = [str(_P1REC), "stream", "--config", str(rehearsal.config), "--clients", ",".join(_CLIENTS)]
     with (rehearsal.root / "stream.stderr").open("wb") as stderr:
@@ -318,28 +399,56 @@ def _stream_log(rehearsal: _Rehearsal) -> str:
     return (rehearsal.root / "stream.stderr").read_text(encoding="utf-8", errors="replace")[-4000:]
 
 
-def _wait_until_streaming(rehearsal: _Rehearsal) -> None:
-    """Wait until every client's streams are open and stream has sent its startup requests and subscriptions."""
-    expected = {
+def _configured_subscriptions(rehearsal: _Rehearsal) -> set[tuple[str, str]]:
+    return {
         (instrument.code, quote_type)
         for instrument in rehearsal.cfg.stream.instruments
         for quote_type in instrument.quote_types
     }
-    broker = rehearsal.stub.broker
+
+
+def _wait_until_streaming(rehearsal: _Rehearsal) -> None:
+    """Wait until every client's streams are open and stream has sent its startup requests and subscriptions."""
+    expected = _configured_subscriptions(rehearsal)
     assert rehearsal.stub.hub.wait_for_streams(rehearsal.stream_count(), _WAIT_S), _stream_log(rehearsal)
-    assert broker.wait_until(
-        lambda stub: stub.subscriptions() == expected and stub.trade_subscribed() == {"S", "F"}, _WAIT_S
+    assert rehearsal.stub.broker.wait_until(
+        lambda stub: stub.trade_subscribed() == {"S", "F"}
+        and {(change.code, change.quote_type) for change in stub.subscription_log()} == expected,
+        _WAIT_S,
     ), _stream_log(rehearsal)
 
 
+def _orders_report(rehearsal: _Rehearsal) -> str:
+    """Return the orders run's case outcomes and the tail of its log, for an assertion message."""
+    run = rehearsal.run_dir("orders")
+    summary = run / "orders.json"
+    outcomes = {case["id"]: case["outcome"] for case in _json(summary)["cases"]} if summary.exists() else None
+    log = (run / "recorder.log").read_text(encoding="utf-8")
+    return f"outcomes: {outcomes}\n{log[-4000:]}"
+
+
+def _quote_times(path: Path, fields: EventFields) -> dict[str, list[datetime]]:
+    """Return the exchange time of every quote frame in an SSE recording, by instrument code."""
+    times: dict[str, list[datetime]] = {}
+    for record in _records(path):
+        if record["kind"] != "frame":
+            continue
+        data = parse_frame(record["raw"]).data
+        document = json.loads(data) if data else None
+        if isinstance(document, dict) and {"code", "date", "time"} <= document.keys():
+            stamp = datetime.strptime(f"{document['date']} {document['time']}", str(fields.exchange_ts_format))
+            times.setdefault(document["code"], []).append(stamp.replace(tzinfo=TAIPEI))
+    return times
+
+
 def _frame_since_connect(path: Path) -> bool:
-    """Return whether an SSE recording holds a frame after its last 200 connection, reading complete lines only."""
+    """Return whether an SSE recording holds a frame since it last connected, reading complete lines only."""
     seen = False
     for line in path.read_bytes().splitlines(keepends=True):
         if not line.endswith(b"\n"):
             break
         record = json.loads(line)
-        if record["kind"] == "connected" and record["status"] == 200:
+        if record["kind"] == "disconnected" or (record["kind"] == "connected" and record["status"] == 200):
             seen = False
         elif record["kind"] == "frame":
             seen = True
@@ -378,19 +487,30 @@ def test_rehearsal_config_matches_the_real_one() -> None:
 
 
 def test_config_drift_names_the_differing_key() -> None:
-    altered = copy.deepcopy(_toml(_CONFIG_TEMPLATE))
+    reference = _toml(_CONFIG_TEMPLATE)
+    altered = copy.deepcopy(reference)
     del altered["events"]["gap_threshold_s"]
-    altered["orders"]["body_templates"]["cancel"] = '{"trade_id": "{price}"}'
+    altered["events"]["order_key"] = "/order/seqno"
+    altered["orders"]["body_templates"]["cancel"] = '{"trade_id": "{trade_id}", "reason": "rehearsal"}'
+    altered["orders"]["body_templates"]["update_price"] = '{"trade_id": "{trade_id}", "price": "{quantity}"}'
+    altered["stream"]["startup_requests"][1][1] = "@account:H"
     altered["stream"]["instrument"][0]["lot"] = "odd"
 
-    drift = _config_drift(_toml(_REAL_CONFIG), altered)
+    # Neither a value the rehearsal tunes nor an optional array missing from one side is drift
+    altered["orders"]["step_wait_s"] = 9
+    del altered["stream"]["action"]
+
+    drift = _config_drift(reference, altered)
 
     assert [line.partition(": ")[0] for line in drift] == [
         "events.gap_threshold_s",
-        "orders.body_templates.cancel/trade_id",
+        "events.order_key",
+        "orders.body_templates.cancel/reason",
+        "orders.body_templates.update_price/price",
         "stream.instrument[].lot",
+        "stream.startup_requests[1][1]",
     ]
-    assert "placeholder {trade_id} in p1.toml, placeholder {price} in tests/data/p1.toml" in drift[1]
+    assert 'orders.body_templates.cancel/reason: expected absent, found literal "rehearsal"' in drift
 
 
 def test_full_pipeline_against_stub(rehearsal: _Rehearsal, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -399,9 +519,16 @@ def test_full_pipeline_against_stub(rehearsal: _Rehearsal, monkeypatch: pytest.M
     _expect(rehearsal.p1rec("preflight", "--scenarios", str(_SCENARIOS)), 0)
     assert _json(rehearsal.run_dir("preflight") / "preflight.json")["funds_ok"] is True
 
-    with _streaming(rehearsal) as stream:
+    [action] = rehearsal.cfg.stream.actions
+    action_at = datetime.now(timezone.utc) + timedelta(seconds=_ACTION_AFTER_S)
+    with _streaming(rehearsal, action_at) as stream:
         _wait_until_streaming(rehearsal)
-        assert _run_orders(rehearsal, monkeypatch) == 0
+        assert _run_orders(rehearsal, monkeypatch) == 0, _orders_report(rehearsal)
+
+        # The scheduled unsubscribe goes out before the drop, so the resend after the drop must leave it out
+        assert stub.broker.wait_until(
+            lambda broker: broker.count(UNSUBSCRIBE_PATH) == 1, _ACTION_AFTER_S + _WAIT_S
+        ), _stream_log(rehearsal)
 
         # Every report is already queued, and a drop delivers what each stream holds before it ends
         startup_sends = stub.broker.count(SUBSCRIBE_TRADE_PATH)
@@ -432,6 +559,23 @@ def test_full_pipeline_against_stub(rehearsal: _Rehearsal, monkeypatch: pytest.M
     assert len(sse_files) == rehearsal.stream_count()
     assert all(_records(path)[-1]["kind"] == "stopped" for path in sse_files)
 
+    # The scheduled unsubscribe came after its subscription and no earlier than it was due, and the
+    # resend after the drop left it out.
+    target = (action.code, action.quote_type)
+    changes = [change for change in stub.broker.subscription_log() if (change.code, change.quote_type) == target]
+    assert [change.verb for change in changes] == ["subscribe", "unsubscribe"]
+    unsubscribed_at = changes[1].at
+    assert unsubscribed_at >= action_at
+    assert stub.broker.subscriptions() == _configured_subscriptions(rehearsal) - {target}
+
+    # Subscriptions are server-global, so both clients stop receiving it while other quotes go on
+    others = {code for code, _ in _configured_subscriptions(rehearsal)} - {action.code}
+    for client in _CLIENTS:
+        quotes = _quote_times(stream_run / f"sse_{client}_data.jsonl", rehearsal.cfg.events)
+        assert quotes.get(action.code), client
+        assert max(quotes[action.code]) <= unsubscribed_at, client
+        assert all(max(quotes[code]) > unsubscribed_at for code in others), client
+
     _expect(rehearsal.p1rec("reconcile", "--sse-run", stream_run.name), 0)
     reconciled = _json(rehearsal.run_dir("reconcile") / "reconcile.json")
     assert reconciled["trading_day"] == rehearsal.session_start.date().isoformat()
@@ -446,12 +590,17 @@ def test_full_pipeline_against_stub(rehearsal: _Rehearsal, monkeypatch: pytest.M
     files = stats["files"]
     assert len(files) == rehearsal.stream_count()
     for name, file_stats in files.items():
-        # The drop, then refused reconnects, then the stream's return
-        outage = file_stats["outages"][0]
+        # The drop, the refused reconnects and the stream's return, and the silence around them
+        outages = file_stats["outages"]
+        assert len(outages) == 1, (name, outages)
+        outage = outages[0]
         assert outage["first_error"] == "stream ended by server", name
         assert outage["attempts"] > 1, name
         assert outage["reconnected_at"] is not None, name
-        assert file_stats["gaps"], name
+        dropped, returned = _instant(outage["disconnected_at"]), _instant(outage["reconnected_at"])
+        assert any(
+            _instant(gap["from"]) <= dropped and _instant(gap["to"]) >= returned for gap in file_stats["gaps"]
+        ), (name, file_stats["gaps"])
         assert file_stats["heartbeat_interval_s"] is not None, name
     for client in _CLIENTS:
         counts = files[f"sse_{client}_data.jsonl"]["event_counts"]
@@ -487,7 +636,7 @@ def test_mode_flip_stops_orders(rehearsal: _Rehearsal, monkeypatch: pytest.Monke
     broker = rehearsal.stub.broker
     broker.production_after_mutations = flip_after
 
-    assert _run_orders(rehearsal, monkeypatch) == EXIT_INTERLOCK_ABORT
+    assert _run_orders(rehearsal, monkeypatch) == EXIT_INTERLOCK_ABORT, _orders_report(rehearsal)
 
     assert broker.mutation_count() == flip_after
     orders_run = rehearsal.run_dir("orders")

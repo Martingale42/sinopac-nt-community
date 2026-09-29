@@ -3,8 +3,9 @@
 # scaled down so the whole pipeline runs in seconds.
 #
 # test_rehearsal.py copies it into a scratch git repository and replaces
-# base_url with the stub's address. As committed, base_url names the
-# discard port, which refuses connections, so this file alone reaches
+# base_url with the stub's address and the scheduled action's time with
+# one a few seconds into the stream run, while as committed base_url names
+# the discard port, which refuses connections, so this file alone reaches
 # nothing.
 
 base_url = "http://127.0.0.1:9"
@@ -235,6 +236,14 @@ exchange = "TAIFEX"
 security_type = "FUT"
 quote_types = ["Tick"]
 intraday_odd = false
+
+# Subscriptions are server-global, so once this runs both clients must stop
+# receiving TMFJ6 ticks while every other quote keeps flowing.
+[[stream.action]]
+at = 2026-09-29T10:30:00+08:00
+op = "unsubscribe"
+code = "TMFJ6"
+quote_type = "Tick"
 
 [orders]
 trade_id_pointer = "/order/id"

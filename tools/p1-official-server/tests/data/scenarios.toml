@@ -55,7 +55,7 @@ quantity = 1
 expect_fill = true
 steps = ["place"]
 
-# The stub, like a server enforcing odd-lot rules, takes odd lots as LMT only.
+# The stub, like a server enforcing odd-lot rules, takes odd lots as LMT only
 [[case]]
 id = "market_odd_00981a_mkt_ioc"
 market = "odd"

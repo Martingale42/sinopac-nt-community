@@ -51,6 +51,8 @@ from zoneinfo import ZoneInfo
 import httpx
 from mock_official import FakeServer, stock_record
 
+from p1rec.prices import SHARES_PER_BOARD_LOT
+
 logger = logging.getLogger(__name__)
 
 TAIPEI = ZoneInfo("Asia/Taipei")
@@ -80,6 +82,14 @@ HEARTBEAT_EVENT = "heartbeat"
 DEFAULT_HEARTBEAT_S = 0.2
 DEFAULT_QUOTE_INTERVAL_S = 0.25
 
+# How often serve_forever looks for a shutdown request, which bounds how
+# long closing the stub takes.
+_SHUTDOWN_POLL_S = 0.05
+
+# How long close waits for each of the stub's threads, which all end within
+# one quote interval or shutdown poll unless something is stuck.
+_JOIN_TIMEOUT_S = 5.0
+
 # Inside both the TAIFEX day session and the TWSE session, the trading
 # windows `p1rec orders` enforces, with hours to spare either side.
 SESSION_TIME = time_of_day(10, 0)
@@ -106,9 +116,6 @@ STUB_FUTURES_ACCOUNT: dict[str, object] = {
 # recorded in the futures API test (docs/official-server-contract.md section 2).
 _OP_CODE_OK = "00"
 _OP_CODE_REJECTED = "88"
-
-# TWSE board lot; an odd-lot quantity is in shares
-_SHARES_PER_LOT = 1000
 
 _WEB_ID = "137"
 _SUBMITTED = "Submitted"
@@ -291,6 +298,16 @@ class SseHub:
             handler.wfile.flush()
 
 
+@dataclass(frozen=True)
+class SubscriptionChange:
+    """One accepted subscribe or unsubscribe, with the Taipei time the stub took it."""
+
+    at: datetime
+    verb: str
+    code: str
+    quote_type: str
+
+
 @dataclass
 class _Order:
     """One order in the stub's book, with its fields as the place request sent them."""
@@ -371,6 +388,7 @@ class StubBroker(FakeServer):
     _counts: Counter[str] = field(init=False, default_factory=Counter, repr=False)
     _usage_bytes: int = field(init=False, default=0, repr=False)
     _serial: Counter[str] = field(init=False, default_factory=Counter, repr=False)
+    _subscription_log: list[SubscriptionChange] = field(init=False, default_factory=list, repr=False)
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         """Answer one request, count it, and switch to production once production_after_mutations is reached."""
@@ -419,34 +437,46 @@ class StubBroker(FakeServer):
         with self._cond:
             return self._cond.wait_for(lambda: predicate(self), timeout_s)
 
-    def publish_quotes(self) -> None:
-        """Publish one quote for every active subscription, stamped with the real Taipei time."""
-        now = datetime.now(TAIPEI)
+    def subscription_log(self) -> list[SubscriptionChange]:
+        """Return every subscribe and unsubscribe the stub has accepted, in order."""
         with self._cond:
-            subscriptions = list(self._subscriptions)
-        for code, _, security_type, quote_type, intraday_odd in subscriptions:
-            reference = self._reference(code, futures=security_type != "STK")
-            if reference is None:
-                continue
-            price = str(reference)
-            event = f"{_QUOTE_EVENT_PREFIX[quote_type]}_{'stk' if security_type == 'STK' else 'fop'}"
-            data: dict[str, object] = {
-                "code": code,
-                "date": now.strftime("%Y-%m-%d"),
-                "time": now.strftime("%H:%M:%S.%f"),
-                "simtrade": False,
-                "intraday_odd": intraday_odd,
-            }
-            if quote_type == "BidAsk":
-                data.update(
-                    bid_price=[price] * _BOOK_DEPTH,
-                    bid_volume=[1] * _BOOK_DEPTH,
-                    ask_price=[price] * _BOOK_DEPTH,
-                    ask_volume=[1] * _BOOK_DEPTH,
-                )
-            else:
-                data.update(open=price, high=price, low=price, close=price, volume=1, tick_type=1)
-            self.hub.publish(event, data)
+            return list(self._subscription_log)
+
+    def publish_quotes(self) -> None:
+        """Publish one quote for every active subscription, stamped with the real Taipei time.
+
+        Published under the lock that subscription changes take, so a quote
+        stamped after a change reflects it and every quote stamped before it
+        is queued ahead of the quotes that follow.
+        """
+        with self._cond:
+            now = datetime.now(TAIPEI)
+            for subscription in self._subscriptions:
+                self._publish_quote(subscription, now)
+
+    def _publish_quote(self, subscription: tuple[str, str, str, str, bool], now: datetime) -> None:
+        code, _, security_type, quote_type, intraday_odd = subscription
+        reference = self._reference(code, futures=security_type != "STK")
+        if reference is None:
+            return
+        price = str(reference)
+        data: dict[str, object] = {
+            "code": code,
+            "date": now.strftime("%Y-%m-%d"),
+            "time": now.strftime("%H:%M:%S.%f"),
+            "simtrade": False,
+            "intraday_odd": intraday_odd,
+        }
+        if quote_type == "BidAsk":
+            data.update(
+                bid_price=[price] * _BOOK_DEPTH,
+                bid_volume=[1] * _BOOK_DEPTH,
+                ask_price=[price] * _BOOK_DEPTH,
+                ask_volume=[1] * _BOOK_DEPTH,
+            )
+        else:
+            data.update(open=price, high=price, low=price, close=price, volume=1, tick_type=1)
+        self.hub.publish(f"{_QUOTE_EVENT_PREFIX[quote_type]}_{'stk' if security_type == 'STK' else 'fop'}", data)
 
     def _route(self, method: str, path: str) -> Callable[[Any], httpx.Response] | None:
         routes: dict[tuple[str, str], Callable[[Any], httpx.Response]] = {
@@ -536,6 +566,9 @@ class StubBroker(FakeServer):
             self._subscriptions[key] = None
         elif known:
             self._subscriptions.pop(key, None)
+        if known:
+            change = SubscriptionChange(datetime.now(TAIPEI), "subscribe" if active else "unsubscribe", key[0], key[3])
+            self._subscription_log.append(change)
         verb = "subscribed" if active else "unsubscribed"
         message = f"{verb} {key[0]} {key[3]}" if known else f"unknown contract {key[0]}"
         return httpx.Response(200, json={"success": known, "message": message, "subscription": body})
@@ -645,7 +678,7 @@ class StubBroker(FakeServer):
         if not order.is_stock or order.fields["action"] != "Buy":
             return False
         price = Decimal(str(order.fields["price"])) if order.fields["price_type"] == "LMT" else order.limit_up
-        shares = order.quantity * (1 if order.fields.get("order_lot") == "IntradayOdd" else _SHARES_PER_LOT)
+        shares = order.quantity * (1 if order.fields.get("order_lot") == "IntradayOdd" else SHARES_PER_BOARD_LOT)
         return shares * price > Decimal(str(self.trading_limits["trading_available"]))
 
     def _marketable(self, order: _Order) -> bool:
@@ -1003,7 +1036,12 @@ class StubServer:
         self._http = _HttpServer(self.broker)
         self._closed = threading.Event()
         self._threads = [
-            threading.Thread(target=self._http.serve_forever, name="stub-http", daemon=True),
+            threading.Thread(
+                target=self._http.serve_forever,
+                kwargs={"poll_interval": _SHUTDOWN_POLL_S},
+                name="stub-http",
+                daemon=True,
+            ),
             threading.Thread(target=self._publish_quotes, name="stub-quotes", daemon=True),
         ]
 
@@ -1029,12 +1067,16 @@ class StubServer:
         self.close()
 
     def close(self) -> None:
+        """Stop serving, end every stream, and wait a bounded time for the stub's own threads."""
         self._closed.set()
         self.broker.hub.close()
         self._http.shutdown()
         self._http.server_close()
         for thread in self._threads:
-            thread.join()
+            thread.join(_JOIN_TIMEOUT_S)
+        stuck = [thread.name for thread in self._threads if thread.is_alive()]
+        if stuck:
+            logger.warning("stub threads still running %gs after close: %s", _JOIN_TIMEOUT_S, ", ".join(stuck))
 
     def _publish_quotes(self) -> None:
         while not self._closed.wait(self._quote_interval_s):
