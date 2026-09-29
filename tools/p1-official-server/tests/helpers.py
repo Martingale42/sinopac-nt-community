@@ -36,6 +36,13 @@ MINIMAL_CONFIG_LINES = [
     "[endpoints.place_stock]",
     'method = "POST"',
     'path = "/api/v1/order/place_order"',
+    "",
+    "[scrub]",
+    'account_id_pointers = ["/account_id", "/username", "/person_id"]',
+    'ca_pointers = ["/person_id"]',
+    'map_path = "results/scrub-map.json"',
+    'selection = "fixtures.toml"',
+    "extra_scan_paths = []",
 ]
 
 SECRET_ENV_VARS = ("SJ_API_KEY", "SJ_SEC_KEY", "SJ_CA_PASSWD", "P1_PERSON_ID", "P1_EGRESS_IP")

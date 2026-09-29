@@ -24,6 +24,7 @@ from typing import NoReturn
 from p1rec.config import ConfigError, P1Config, load_config, read_secrets
 from p1rec.redact import redaction_values, setup_logging
 from p1rec.rundir import new_run
+from p1rec.scrub import run_scrub
 
 Handler = Callable[[argparse.Namespace, P1Config, Path], int]
 ArgumentHook = Callable[[argparse.ArgumentParser], None]
@@ -66,6 +67,18 @@ def _add_scenarios_argument(sub: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_scrub_arguments(sub: argparse.ArgumentParser) -> None:
+    sub.add_argument(
+        "--scan-only",
+        action="store_true",
+        help="only scan fixtures_root and scrub.extra_scan_paths for original values, exiting 2 on any",
+    )
+
+
+def _run_scrub(args: argparse.Namespace, cfg: P1Config, _run_dir: Path) -> int:
+    return run_scrub(cfg, scan_only=args.scan_only)
+
+
 def _not_implemented(args: argparse.Namespace, _cfg: P1Config, _run_dir: Path) -> int:
     logging.getLogger("p1rec.cli").error("%s: not implemented yet", args.command)
     return 1
@@ -93,7 +106,7 @@ _SUBCOMMANDS: dict[str, Subcommand] = {
     "reconcile": Subcommand(add_arguments=_no_extra_arguments, handler=_not_implemented),
     "stats": Subcommand(add_arguments=_no_extra_arguments, handler=_not_implemented),
     "history": Subcommand(add_arguments=_no_extra_arguments, handler=_not_implemented),
-    "scrub": Subcommand(add_arguments=_no_extra_arguments, handler=_not_implemented),
+    "scrub": Subcommand(add_arguments=_add_scrub_arguments, handler=_run_scrub),
 }
 
 

@@ -52,7 +52,13 @@ def test_load_config_success(tmp_path: Path, write_config: WriteConfig) -> None:
     assert cfg.orders == OrdersConfig()
     assert cfg.events == EventFields()
     assert cfg.history == HistoryConfig()
-    assert cfg.scrub == ScrubConfig()
+    assert cfg.scrub == ScrubConfig(
+        account_id_pointers=("/account_id", "/username", "/person_id"),
+        ca_pointers=("/person_id",),
+        map_path=(tmp_path / "results" / "scrub-map.json").resolve(),
+        selection=(tmp_path / "fixtures.toml").resolve(),
+        extra_scan_paths=(),
+    )
 
 
 def test_load_real_p1_toml() -> None:
@@ -110,14 +116,14 @@ def test_inline_secret_rejected_inside_array_of_tables(write_config: WriteConfig
 
 def test_inline_secret_rejected_for_person_id_and_egress_ip(write_config: WriteConfig) -> None:
     bogus_value = "A123456789"  # shaped like a Taiwanese national ID
-    lines = [*MINIMAL_CONFIG_LINES, "", "[scrub]", f'person_id = "{bogus_value}"']
+    lines = [*MINIMAL_CONFIG_LINES, "", "[notes]", f'person_id = "{bogus_value}"']
     config_path = write_config(lines)
 
     with pytest.raises(ConfigError) as exc_info:
         load_config(config_path)
 
     message = str(exc_info.value)
-    assert "scrub.person_id" in message
+    assert "notes.person_id" in message
     assert bogus_value not in message
 
 

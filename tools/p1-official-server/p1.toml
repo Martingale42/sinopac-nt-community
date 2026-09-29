@@ -116,3 +116,15 @@ path = "/api/v1/auth/ca_expiretime"
 [endpoints.harness_info]
 method = "GET"
 path = "/api/v1/agent/harness"
+
+# Identifiers to scrub besides the secrets above, found by applying each
+# pointer to every account in a recorded accounts response (an array) and
+# to a ca_status response, with the pointer's last token naming the
+# placeholder category (ACCOUNT_ID_1, USERNAME_1, ...), while broker_id, a
+# public branch code, is kept.
+[scrub]
+account_id_pointers = ["/account_id", "/username", "/person_id"]
+ca_pointers = ["/person_id"]
+map_path = "../../results/p1/scrub-map.json"
+selection = "fixtures.toml"
+extra_scan_paths = ["fixtures.toml", "../../test_data/official", "../../docs/official-server-contract.md"]
