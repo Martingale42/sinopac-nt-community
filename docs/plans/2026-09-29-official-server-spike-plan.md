@@ -24,6 +24,8 @@
 - A3：下單、改單、刪單與各種查詢都是 JSON over HTTP。
 - A4：規格顯示委託與成交回報會出現在 SSE 上。
 
+**Task 1 結果（2026-09-29）：** A1–A4 皆成立（A4 為規格層級）。探勘同時發現：SSE 依資料類型分成多條端點、訂閱為 server 全域且沒有 connection 識別、心跳是 `event:heartbeat` 事件、frame 不帶 `id:`、歷史查詢為 POST 本體、官方 server 一個實例佔 2 條連線；Task 3、5、6、8、9、13 已依此修訂。事實與證據見 `docs/official-server-contract.md` §2。
+
 **長度說明：** 本計畫約為設計文件的 3.5 倍，超出兩倍的預算。原因是設計 §5 只定下錄製器的方向與子命令，錄製器的內部規格（Task 2–11）由本計畫承擔；每個子命令都對應設計中的一條要求，因此沒有刪減。
 
 **工作目錄：** 離線任務的 `uv run` 指令都在 `tools/p1-official-server/` 下執行。
@@ -192,8 +194,7 @@ git commit -m "Add p1rec recorder skeleton with config and redacting logs"
 
 - 每個 REST 請求在 `rest.jsonl` 寫一行：`client`、`op`、`method`、`url`、`req_body`、`sent_ts_ns`、`recv_ts_ns`、`status`、`resp_headers`，以及 `resp_body`（UTF-8）或 `resp_body_b64`（無法解碼時）。錯誤狀態碼照記並回傳，不拋例外；連線錯誤記一行 `error` 後拋出。
 - SSE 以收到的位元組切分 frame（`\n\n` 與 `\r\n\r\n` 皆可），每個完整 frame 寫一行 `kind="frame"`，含 `raw` 與 `recv_ts_ns`；註解 frame 同樣記錄。
-- 連上寫 `kind="connected"`（含狀態碼），斷線寫 `kind="disconnected"`（含錯誤），隔 `retry_s` 重連；最後一個 frame 有 `id` 時重連帶 `Last-Event-ID`；停止時寫 `kind="stopped"`。
-- `connection_id_from` 為 `first_event:<指標>` 或 `header:<名稱>` 時，從對應來源取出 connection id 並公開給呼叫端。
+- 連上寫 `kind="connected"`（含狀態碼），斷線寫 `kind="disconnected"`（含錯誤），隔 `retry_s` 重連；最後一個 frame 有 `id` 時重連帶 `Last-Event-ID`（官方 1.7.6 的 frame 不帶 `id:`，此路徑只在量到 `id` 時生效）；停止時寫 `kind="stopped"`。每次連上後呼叫 `on_connected`。
 - `parse_frame` 只供分析，不改動已寫入的 `raw`。
 
 **Interface:**
@@ -224,9 +225,9 @@ def split_frames(buffer: str) -> tuple[list[str], str]: ...  # (完整 frame, �
 def parse_frame(raw: str) -> SseFrame: ...
 
 class SseRecorder(threading.Thread):
-    def __init__(self, base_url: str, client_name: str, connect: Endpoint, out: Path,
-                 retry_s: float, connection_id_from: str, stop: threading.Event,
-                 on_connected: Callable[[str | None], None]) -> None: ...
+    def __init__(self, base_url: str, client_name: str, stream_name: str, connect: Endpoint,
+                 out: Path, retry_s: float, stop: threading.Event,
+                 on_connected: Callable[[], None]) -> None: ...
     last_event_id: str | None
 ```
 
@@ -236,6 +237,7 @@ class SseRecorder(threading.Thread):
 - `test_split_frames_partial_tail` — 未完成的 frame 留在剩餘、不寫出。
 - `test_parse_multiline_data` — 多行 `data:` 以 `\n` 串接。
 - `test_comment_frame_recorded` — `: ping` 被記錄且 `is_comment=True`。
+- `test_heartbeat_event_recorded` — `event:heartbeat` 的 frame 原樣記錄，`parse_frame` 取出事件名稱 `heartbeat`。
 - `test_reconnect_sends_last_event_id` — `httpx.MockTransport` 模擬斷線，第二次連線標頭含上一個 `id`，且 `on_connected` 被呼叫兩次。
 - `test_rest_error_status_recorded_not_raised` — 500 寫入 `rest.jsonl` 並回傳。
 - `test_non_utf8_body_base64` — 非 UTF-8 回應寫入 `resp_body_b64`。
@@ -319,7 +321,8 @@ git commit -m "Abort unless the official server reports simulation mode"
 - 價格參照 `limit_down`、`limit_up`、`reference` 取自合約回應；`limit_down_plus_tick` 為跌停價加一個升降單位；升降單位依市場、價格區間與 `etf_codes` 查表。
 - `preflight`：連鎖檢查；查 `accounts`、`balance`、`margin`、`usage`、`ca_status`；查 `p1.toml` 所列全部商品的合約；計算資金需求並比對可用額度。
 - 資金需求以單一部位計（設計 §4）：股票為 `max(會成交股票案例的 張數 × 1000 × 漲停價)`，期貨為 `max(會成交期貨案例的 口數 × 該商品原始保證金)`。
-- 不足、或找不到可用額度欄位時記 ERROR、以 2 結束；不論成敗都寫 `preflight.json`，鍵為 `funds_ok`、`required`、`available`、`connections`、`limits`（商品 → 漲停、跌停、參考價）。
+- 不足、或找不到可用額度欄位時記 ERROR、以 2 結束；不論成敗都寫 `preflight.json`，鍵為 `funds_ok`、`required`、`available`、`connections`、`accounts`（帳戶類型 → `signed`）、`limits`（商品 → 漲停、跌停、參考價）。
+- 劇本含某市場的案例、而對應帳戶（股票與零股為 `S`，期貨為 `F`）的 `signed` 不是 `true` 時記 WARN，不中止；該市場的拒單照樣錄製。
 - 所有查詢的原始回應經 `CapturingClient` 落地，供 Task 15 挑選 fixture。
 
 **Interface:**
@@ -386,6 +389,7 @@ def run_preflight(cfg: P1Config, scenarios: Path, run_dir: Path) -> int: ...
 - `test_required_funds_single_position` — 兩筆會成交的股票案例取較大者，不加總。
 - `test_insufficient_exits_2_and_writes_json` — 回 2，`preflight.json` 存在且 `funds_ok` 為 `false`。
 - `test_missing_available_field_exits_2` — 找不到可用額度欄位時回 2。
+- `test_unsigned_futures_account_warns` — `F` 帳戶 `signed: false` 且劇本含期貨案例時記 WARN、結束碼仍為 0。
 
 **Numbers:**
 
@@ -417,33 +421,40 @@ git commit -m "Add scenario model, price references and funds preflight"
 
 **Behaviour:**
 
-- `p1rec stream --clients a,b --until <ISO 8601 含時區>`：連鎖檢查後每個 client 各開一個 `SseRecorder`，輸出 `sse_<client>.jsonl`。
-- 每次 `on_connected`（含重連）時，對 `instruments` 的每個商品與報價類型送出訂閱（本體由 `subscribe_body` 代入 `{code}`、`{quote_type}`、`{connection_id}`），再送出 `extra_subscribe_bodies`（例如合約更新事件）；重連後的重送記一次 INFO。訂閱失敗記 ERROR 並繼續其餘訂閱。
-- `[[stream.action]]` 在指定時間對指定 client 執行 `subscribe` 或 `unsubscribe`，並更新該 client 的有效訂閱集合；啟動時已過期的動作記 WARN 並跳過。
+- `p1rec stream --clients a,b --until <ISO 8601 含時區>`：連鎖檢查後，每個 client 對 `streams` 中的每條端點（例如綜合行情、`order_event`、`contract_event`）各開一個 `SseRecorder`，輸出 `sse_<client>_<串流名>.jsonl`。
+- 訂閱是 server 全域（契約文件 §1）：所有 recorder 首次連上後，依序送出 `startup_requests`（例如每個帳戶的 `subscribe_trade`），再對 `instruments` 的每個商品與報價類型送出一次訂閱（本體由 `subscribe_body` 代入 `{code}`、`{exchange}`、`{security_type}`、`{quote_type}`、`{intraday_odd}`）。
+- 之後只有「主 recorder」（第一個 client 的第一條串流）重連時，才重送 `startup_requests` 與目前有效的全部訂閱，並記一次 INFO；其他 recorder 重連不重送。訂閱失敗記 ERROR 並繼續其餘訂閱。
+- `[[stream.action]]` 在指定時間送出 `subscribe` 或 `unsubscribe` 並更新有效訂閱集合；啟動時已過期的動作記 WARN 並跳過。
 - 到 `--until` 或收到 SIGINT／SIGTERM 時，所有 client 寫出 `stopped` 後以 0 結束。
 
 **Interface:**
 
 ```python
 @dataclass(frozen=True)
+class Instrument:
+    code: str
+    exchange: str        # TSE | OTC | TAIFEX
+    security_type: str   # STK | FUT | OPT
+    quote_types: tuple[str, ...]  # Tick | BidAsk | Quote
+    intraday_odd: bool
+
+@dataclass(frozen=True)
 class StreamAction:
     at: datetime
-    client: str
     op: Literal["subscribe", "unsubscribe"]
     code: str
     quote_type: str
 
 @dataclass(frozen=True)
 class StreamConfig:
-    connect: Endpoint
+    streams: dict[str, Endpoint]        # 串流名 -> SSE 端點
     subscribe: Endpoint
     unsubscribe: Endpoint
     subscribe_body: str                 # JSON 範本
     unsubscribe_body: str
-    extra_subscribe_bodies: tuple[str, ...]
-    connection_id_from: str             # "none" | "first_event:<指標>" | "header:<名稱>"
+    startup_requests: tuple[tuple[str, str], ...]  # (邏輯操作, JSON 本體)
     retry_s: float
-    instruments: dict[str, list[str]]   # 報價類型 -> 商品代號
+    instruments: tuple[Instrument, ...]
     actions: tuple[StreamAction, ...]
 
 def run_stream(cfg: P1Config, clients: list[str], until: datetime, run_dir: Path) -> int: ...
@@ -451,11 +462,12 @@ def run_stream(cfg: P1Config, clients: list[str], until: datetime, run_dir: Path
 
 **Tests:**
 
-- `test_subscribes_every_instrument_per_client` — 對假 server 開兩個 client，各自送出全部訂閱與額外訂閱。
-- `test_resubscribe_after_reconnect` — 假 server 中途斷線，重連後同一組有效訂閱再送一次。
-- `test_scheduled_unsubscribe_only_hits_target_client` — 動作只對 client b 送出，且之後 b 重連時不再訂閱該商品。
+- `test_one_recorder_per_client_and_stream` — 兩個 client、三條串流時開出六個檔案。
+- `test_startup_then_subscriptions_sent_once` — 全部連上後 `startup_requests` 先送、每個訂閱只送一次，不隨 client 數倍增。
+- `test_leader_reconnect_resends` — 主 recorder 重連時重送全部有效訂閱；其他 recorder 重連時不送。
+- `test_scheduled_unsubscribe_updates_active_set` — 動作執行後，主 recorder 再重連時不再訂閱該商品。
 - `test_past_action_skipped_with_warning` — 過期動作不執行並記 WARN。
-- `test_until_stops_all_clients` — 到時間後兩個檔案最後一行皆為 `stopped`。
+- `test_until_stops_all_clients` — 到時間後每個檔案最後一行皆為 `stopped`。
 
 **Verification:**
 
@@ -558,7 +570,7 @@ git commit -m "Run simulated order scenarios behind the interlock"
 - `p1rec reconcile --sse-run <run_id> [--rest-run <run_id>]`：未給 `--rest-run` 時，連鎖檢查後即時查 `trades` 並落地；給了則用該 run 最後一次 `trades` 回應。
 - 依 `EventFields` 從各 client 的 SSE 檔挑出委託與成交事件，整理為「委託識別 → 最終狀態、累計成交量」。
 - `reconcile.json`：`only_in_rest`、`only_in_sse`、`mismatched`、`per_client_keys`（各 client 看到的委託識別，設計 §6 D）。前三者皆空時回 0，否則回 2。
-- `p1rec stats --sse-run <run_id>` 寫 `stats.json`：每個 client 各事件名稱的數量；每秒 frame 數最高的前 10 秒與其時間；註解 frame 間隔的最小、中位數、最大值；相鄰 frame 間隔超過 `gap_threshold_s` 的清單；`exchange_ts_pointer` 有設定時，收到時間減交易所時間的 p50、p99、最大值。
+- `p1rec stats --sse-run <run_id>` 寫 `stats.json`：每個 client 各事件名稱的數量；每秒 frame 數最高的前 10 秒與其時間；心跳事件（名稱為 `heartbeat_event`）間隔的最小、中位數、最大值；相鄰 frame 間隔超過 `gap_threshold_s` 的清單；`exchange_ts_pointer` 有設定時，收到時間減交易所時間的 p50、p99、最大值。
 
 **Interface:**
 
@@ -577,6 +589,7 @@ class EventFields:  # 事件名稱與 JSON 指標，取自 Task 12 的真實事�
     rest_filled_qty: str
     exchange_ts_pointer: str | None
     exchange_ts_format: str | None   # strptime 格式；時區固定為 Asia/Taipei
+    heartbeat_event: str             # 官方 1.7.6 為 "heartbeat"
     gap_threshold_s: float
 
 @dataclass(frozen=True)
@@ -610,7 +623,7 @@ def stream_stats(paths: Mapping[str, Path], fields: EventFields) -> dict[str, ob
 **Numbers:**
 
 - 尖峰取前 10 秒：報告篇幅上的選擇，用來看開盤尖峰的形狀。
-- `gap_threshold_s`：`calibrate:` 取 Task 12 首日量到的註解 frame 最大間隔的兩倍，寫入 `p1.toml`。
+- `gap_threshold_s`：`calibrate:` 取 Task 12 首日量到的心跳最大間隔的兩倍，寫入 `p1.toml`。
 - `EventFields` 其餘指標：`calibrate:` 由 Task 12 第一批真實事件決定，Task 13 對帳前寫入 `p1.toml`。
 
 **Verification:**
@@ -636,7 +649,7 @@ git commit -m "Reconcile SSE events against REST and summarise streams"
 
 **Behaviour:**
 
-- `p1rec history`：連鎖檢查後依 `[[history.query]]` 逐一執行 `ticks`、`kbars`、`snapshots` 查詢，每個查詢前後各查一次 `usage`。
+- `p1rec history`：連鎖檢查後依 `[[history.query]]` 逐一執行 `ticks`、`kbars`、`snapshots` 查詢（三者皆為 POST，請求放在 JSON 本體），每個查詢前後各查一次 `usage`。
 - `history.json` 每筆記：查詢參數、狀態碼、回應位元組數、查詢前後的額度用量與差值。額度欄位找不到時，差值記為 `null` 並記 WARN。
 - 任一查詢失敗記 ERROR 並繼續；只要有一筆失敗就以 2 結束。
 
@@ -646,12 +659,12 @@ git commit -m "Reconcile SSE events against REST and summarise streams"
 @dataclass(frozen=True)
 class HistoryQuery:
     op: Literal["ticks", "kbars", "snapshots"]
-    params: dict[str, str]
+    body: str  # JSON 本體，欄位依 TicksRequest／KBarsRequest／SnapshotRequest
 
 @dataclass(frozen=True)
 class HistoryConfig:
     queries: tuple[HistoryQuery, ...]
-    usage_bytes_pointer: str  # usage 回應中已用額度的 JSON 指標，取自 Task 1
+    usage_bytes_pointer: str  # 官方 1.7.6 為 "/bytes"（UsageOut）
 
 def run_history(cfg: P1Config, run_dir: Path) -> int: ...
 ```
@@ -778,9 +791,9 @@ git commit -m "Rehearse the full recorder pipeline against a stub server"
 
 - 排程：選證交所行事曆上週四至下週二皆為營業日（週末除外）的第一週；10/8 那週不行（10/9 補假，依設計 §9.2 推論，排程時查證）。
 - 07:30 前：校時狀態（`timedatectl` 與 `chronyc tracking` 或等效指令）存入 `results/p1/<日期>-ntp.txt`；填入 `futures_margin_twd`；啟動官方 server 並依 Task 1 記下的方式把 log 導向 `results/p1/<日期>-server.log`；`p1rec self-test-interlock` 回 0；`p1rec preflight` 回 0，回 2 即停止並交由使用者取得模擬資金。
-- 08:00 前：`p1rec stream --clients a,b --until <下週二 09:30 +08:00>` 於 tmux 啟動，即為 soak 起點；預先排入週五 10:30 client b 取消 2330 tick 訂閱的動作（§6 D）。
+- 08:00 前：`p1rec stream --clients a,b --until <下週二 09:30 +08:00>` 於 tmux 啟動，即為 soak 起點；預先排入週五 10:30 取消 2330 tick 訂閱的動作（§6 D2：訂閱為全域，看兩個 client 是否同時停止收到 2330）。
 - 09:00 後：`p1rec orders --only <第一個生命週期案例>`，量出延遲後填入 `step_wait_s`、`fill_poll_s`、`fill_timeout_s`，再以 `p1rec orders` 跑其餘案例；從第一批真實事件填入 `EventFields`。
-- 14:00 後：`p1rec history`；`p1rec stats --sse-run <stream run_id>` 取註解 frame 最大間隔，設定 `gap_threshold_s`。
+- 14:00 後：`p1rec history`；`p1rec stats --sse-run <stream run_id>` 取心跳最大間隔，設定 `gap_threshold_s`。
 - 之後由持續運行的 `stream` 錄下夜盤；當日不再觸碰官方 server。
 
 **Numbers:**
@@ -814,7 +827,7 @@ git commit -m "Calibrate recorder settings from the first live session"
 **Behaviour:**
 
 - 10:30 的排程動作自動執行；之後確認 client a 的 2330 tick 仍持續進來。
-- 11:00：以另一份 env（`SJ_HTTP_ADDR=127.0.0.1:18081`、`SJ_AGENT_HARNESS=all`、獨立的 `SJ_HOME_PATH`）啟動第二個官方 server 實例；執行 `p1rec orders --tag harness --only harness_probe --base-url http://127.0.0.1:18081`，錄下回應後停止該實例。soak 實例不受影響。
+- 11:00：先查 soak 實例的 `usage`；`connections` 加 2（一個官方實例的量測值）超過 5 時，不開 harness 實例，F2 只以文件與模擬模式預設值作答並在契約文件註明。未超過時，以另一份 env（`SJ_HTTP_ADDR=127.0.0.1:18081`、`SJ_AGENT_HARNESS=all`、獨立的 `SJ_HOME_PATH`）啟動第二個官方 server 實例；執行 `p1rec orders --tag harness --only harness_probe --base-url http://127.0.0.1:18081`，錄下回應後停止該實例。soak 實例不受影響。
 - 12:00（重啟排在當日主動測試的最後）：停止並重啟 soak 實例，`stream` 會記下斷線與重連；重啟後執行 `p1rec reconcile --sse-run <stream run_id>`。
 - 對帳回 2 時不重試，保留 `reconcile.json` 作為 go/no-go 證據。
 - 此後到下週二 09:30 不再觸碰 soak 實例。
@@ -822,6 +835,7 @@ git commit -m "Calibrate recorder settings from the first live session"
 **Numbers:**
 
 - `18081`：Task 1 確認未被佔用。
+- 一個官方實例佔 2 條連線：Task 1 登入後 `usage.connections` 的量測值；上限 5 條：設計 §4。
 - 各時間點：週五交易時段內，重啟排在最後（設計 §9.1 第 8 步、§9.2）。
 
 **Verification:**
