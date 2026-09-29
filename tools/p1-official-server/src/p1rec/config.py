@@ -11,12 +11,13 @@ touching load_config itself.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, time
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -74,6 +75,18 @@ class FundsConfig:
 
 
 @dataclass(frozen=True)
+class StartupRequest:
+    """A request sent before the subscriptions: a literal JSON body, or the AccountRequest of an account type."""
+
+    op: str  # Logical operation in [endpoints]
+    body: str | None  # JSON text, set exactly when account_type is not
+    account_type: str | None  # S | F | H, whose account the accounts response supplies
+
+    def describe(self) -> str:
+        return f"{self.op} for account type {self.account_type}" if self.account_type else self.op
+
+
+@dataclass(frozen=True)
 class Instrument:
     code: str
     exchange: str  # TSE | OTC | TAIFEX
@@ -111,9 +124,15 @@ class StreamConfig:
     subscribe_body: str = ""
     unsubscribe_body: str = ""
 
-    # (logical operation, JSON body or "@account:<account type>")
-    startup_requests: tuple[tuple[str, str], ...] = ()
+    startup_requests: tuple[StartupRequest, ...] = ()
     retry_s: float = 0.0
+
+    # Seconds between retry rounds for requests that failed after the first send
+    request_retry_s: float = 0.0
+
+    # Asia/Taipei wall-clock time of the daily full resend
+    daily_resend_at: time | None = None
+
     instruments: tuple[Instrument, ...] = ()
     actions: tuple[StreamAction, ...] = ()
 
@@ -530,7 +549,7 @@ PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 # A startup request body standing for the AccountRequest of the account of
 # this type, one of the AccountType values in openapi.json, so that no
 # account identifier has to be written into the public p1.toml.
-ACCOUNT_BODY_RE = re.compile(r"@account:(S|F|H)")
+_ACCOUNT_BODY_RE = re.compile(r"@account:(S|F|H)")
 
 # Account fields that identify the holder, refused anywhere in a configured
 # request body for the same reason.
@@ -539,8 +558,21 @@ _ACCOUNT_IDENTIFIER_KEYS = frozenset({"account_id", "person_id", "username"})
 # Every key [stream] and its tables may hold, so a misspelt one, such as
 # [[stream.actions]], fails at load instead of being silently ignored.
 _STREAM_KEYS = frozenset(
-    {"retry_s", "subscribe_body", "unsubscribe_body", "startup_requests", "streams", "instrument", "action"}
+    {
+        "retry_s",
+        "request_retry_s",
+        "daily_resend_at",
+        "subscribe_body",
+        "unsubscribe_body",
+        "startup_requests",
+        "streams",
+        "instrument",
+        "action",
+    }
 )
+
+# Hours and minutes, both zero-padded, such as "08:35"
+_WALL_TIME_RE = re.compile(r"([01][0-9]|2[0-3]):[0-5][0-9]")
 _STREAM_ENDPOINT_KEYS = frozenset({"method", "path"})
 _INSTRUMENT_KEYS = frozenset({"code", "exchange", "security_type", "quote_types", "intraday_odd"})
 _ACTION_KEYS = frozenset({"at", "op", "code", "quote_type"})
@@ -562,10 +594,6 @@ def _parse_stream(data: Mapping[str, Any], config_dir: Path) -> StreamConfig:
     table = _optional_table(data, "stream")
     _reject_unknown_keys(table, _STREAM_KEYS, "stream")
 
-    retry_s = _get_number(data, "stream.retry_s")
-    if retry_s <= 0:
-        raise ConfigError("config key stream.retry_s must be positive")
-
     instruments = _parse_instruments(table)
     return StreamConfig(
         streams=_parse_stream_endpoints(data),
@@ -574,10 +602,27 @@ def _parse_stream(data: Mapping[str, Any], config_dir: Path) -> StreamConfig:
         subscribe_body=_get_body_template(data, "stream.subscribe_body"),
         unsubscribe_body=_get_body_template(data, "stream.unsubscribe_body"),
         startup_requests=_parse_startup_requests(data),
-        retry_s=retry_s,
+        retry_s=_get_interval(data, "stream.retry_s"),
+        request_retry_s=_get_interval(data, "stream.request_retry_s"),
+        daily_resend_at=_get_wall_time(data, "stream.daily_resend_at"),
         instruments=instruments,
         actions=_parse_actions(table, instruments),
     )
+
+
+def _get_interval(data: Mapping[str, Any], dotted_key: str) -> float:
+    """Read dotted_key as a positive, finite number of seconds."""
+    value = _get_number(data, dotted_key)
+    if not math.isfinite(value) or value <= 0:
+        raise ConfigError(f"config key {dotted_key} must be a positive, finite number of seconds, got {value!r}")
+    return value
+
+
+def _get_wall_time(data: Mapping[str, Any], dotted_key: str) -> time:
+    text = _get_str(data, dotted_key)
+    if not _WALL_TIME_RE.fullmatch(text):
+        raise ConfigError(f"config key {dotted_key} must be an HH:MM time, such as 08:35, got {text!r}")
+    return time.fromisoformat(text)
 
 
 def _reject_unknown_keys(table: Mapping[str, Any], allowed: frozenset[str], where: str) -> None:
@@ -673,14 +718,14 @@ def _check_placeholders(value: object, dotted_key: str) -> None:
             )
 
 
-def _parse_startup_requests(data: Mapping[str, Any]) -> tuple[tuple[str, str], ...]:
+def _parse_startup_requests(data: Mapping[str, Any]) -> tuple[StartupRequest, ...]:
     dotted_key = "stream.startup_requests"
     raw = _lookup(data, dotted_key)
     if not isinstance(raw, list):
         raise ConfigError(f"config key {dotted_key} must be an array of [operation, body] pairs")
     endpoints = _lookup(data, "endpoints")
 
-    requests: list[tuple[str, str]] = []
+    requests: list[StartupRequest] = []
     for index, item in enumerate(raw):
         where = f"{dotted_key}[{index}]"
         if not (isinstance(item, list) and len(item) == 2 and all(isinstance(part, str) for part in item)):
@@ -688,16 +733,18 @@ def _parse_startup_requests(data: Mapping[str, Any]) -> tuple[tuple[str, str], .
         op, body = item
         if not isinstance(endpoints, Mapping) or op not in endpoints:
             raise ConfigError(f"config key {where} names unknown endpoint: {op!r}")
-        if ACCOUNT_BODY_RE.fullmatch(body):
+        account = _ACCOUNT_BODY_RE.fullmatch(body)
+        if account is not None:
             if ACCOUNTS_OP not in endpoints:
                 raise ConfigError(f"config key {where} uses {body!r}, which needs endpoints.{ACCOUNTS_OP}")
-        else:
-            try:
-                parsed = json.loads(body)
-            except ValueError as exc:
-                raise ConfigError(f'config key {where} body must be JSON or "@account:<S|F|H>"') from exc
-            _reject_identifiers(parsed, where)
-        requests.append((op, body))
+            requests.append(StartupRequest(op=op, body=None, account_type=account.group(1)))
+            continue
+        try:
+            parsed = json.loads(body)
+        except ValueError as exc:
+            raise ConfigError(f'config key {where} body must be JSON or "@account:<S|F|H>"') from exc
+        _reject_identifiers(parsed, where)
+        requests.append(StartupRequest(op=op, body=body, account_type=None))
     return tuple(requests)
 
 
@@ -882,9 +929,7 @@ def _parse_history(data: Mapping[str, Any], config_dir: Path) -> HistoryConfig:
     if not raw_queries:
         raise ConfigError("config key history.query must not be empty")
 
-    queries = tuple(
-        _parse_history_query(item, index, known_endpoints) for index, item in enumerate(raw_queries)
-    )
+    queries = tuple(_parse_history_query(item, index, known_endpoints) for index, item in enumerate(raw_queries))
     return HistoryConfig(queries=queries, usage_bytes_pointer=usage_bytes_pointer)
 
 
@@ -963,7 +1008,5 @@ def _parse_scrub(data: Mapping[str, Any], config_dir: Path) -> ScrubConfig:
         map_path=map_path,
         selection=_get_fs_path(data, "scrub.selection", config_dir),
         contract_doc=_get_fs_path(data, "scrub.contract_doc", config_dir),
-        extra_scan_paths=tuple(
-            (config_dir / raw).resolve() for raw in _get_str_tuple(data, "scrub.extra_scan_paths")
-        ),
+        extra_scan_paths=tuple((config_dir / raw).resolve() for raw in _get_str_tuple(data, "scrub.extra_scan_paths")),
     )

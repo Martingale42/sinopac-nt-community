@@ -11,16 +11,21 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import signal
+import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from datetime import time as wall_time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -39,6 +44,7 @@ from p1rec.config import (
     OrdersConfig,
     P1Config,
     ScrubConfig,
+    StartupRequest,
     StreamAction,
     StreamConfig,
     load_config,
@@ -129,7 +135,13 @@ SAFETY_UNTIL_S = 30.0
 Log = list[tuple[str, str, object]]
 
 
-def _cfg(base_url: str, actions: tuple[StreamAction, ...] = ()) -> P1Config:
+def _cfg(
+    base_url: str,
+    actions: tuple[StreamAction, ...] = (),
+    *,
+    request_retry_s: float = 60.0,
+    daily_resend_at: wall_time | None = None,
+) -> P1Config:
     endpoints = {
         "mode": Endpoint(method="GET", path=INFO_PATH),
         "accounts": Endpoint(method="GET", path=ACCOUNTS_PATH),
@@ -159,8 +171,13 @@ def _cfg(base_url: str, actions: tuple[StreamAction, ...] = ()) -> P1Config:
             unsubscribe=endpoints["stream_unsubscribe"],
             subscribe_body=BODY_TEMPLATE,
             unsubscribe_body=BODY_TEMPLATE,
-            startup_requests=(("subscribe_trade", "@account:S"), ("subscribe_trade", "@account:F")),
+            startup_requests=(
+                StartupRequest(op="subscribe_trade", body=None, account_type="S"),
+                StartupRequest(op="subscribe_trade", body=None, account_type="F"),
+            ),
             retry_s=0.05,
+            request_retry_s=request_retry_s,
+            daily_resend_at=daily_resend_at,
             instruments=INSTRUMENTS,
             actions=actions,
         ),
@@ -189,8 +206,9 @@ class _FakeApi:
     SSE connections are logged too, as ("SSE", path, None), when the
     end-to-end server receives them. trade_confirms gives, call by call,
     the subscribe_trade field of each subscribe_trade response; calls
-    beyond it are confirmed. While gate is clear, every POST waits for it
-    after being logged.
+    beyond it are confirmed. refuse_times[code] subscription requests for
+    code are answered with success false before the next ones succeed.
+    While gate is clear, every POST waits for it after being logged.
     """
 
     def __init__(
@@ -200,6 +218,7 @@ class _FakeApi:
         fail: frozenset[str] = frozenset(),
         accounts_status: int = 200,
         trade_confirms: tuple[bool, ...] = (),
+        refuse_times: Mapping[str, int] | None = None,
         simulation: bool = True,
     ) -> None:
         self._cond = threading.Condition()
@@ -208,6 +227,7 @@ class _FakeApi:
         self._fail = fail  # Codes whose subscription is answered with HTTP 500
         self._accounts_status = accounts_status
         self._trade_confirms = list(trade_confirms)
+        self._refuse_times = dict(refuse_times or {})
         self._simulation = simulation
         self.gate = threading.Event()
         self.gate.set()
@@ -239,10 +259,15 @@ class _FakeApi:
                 confirmed = self._trade_confirms.pop(0) if self._trade_confirms else True
             return 200, {"account": body, "subscribe_trade": confirmed, "ts": 0}
         if method == "POST" and path in (SUBSCRIBE_PATH, UNSUBSCRIBE_PATH):
-            code = cast(dict[str, object], body)["code"]
+            code = str(cast(dict[str, object], body)["code"])
             if code in self._fail:
                 return 500, {"detail": "fake failure"}
-            return 200, {"success": code not in self._refuse, "message": "fake", "subscription": body}
+            with self._cond:
+                refused_once = self._refuse_times.get(code, 0) > 0
+                if refused_once:
+                    self._refuse_times[code] -= 1
+            success = code not in self._refuse and not refused_once
+            return 200, {"success": success, "message": "fake", "subscription": body}
         return 404, {"detail": "not found"}
 
     def handle(self, request: httpx.Request) -> httpx.Response:
@@ -412,9 +437,11 @@ class _FakeRecorder(threading.Thread):
 
 
 class _StuckRecorder(_FakeRecorder):
-    """A recorder that ignores stop, like one blocked waiting for response headers."""
+    """A recorder that ignores stop, like one blocked waiting for response headers, until released."""
 
-    released = threading.Event()
+    def __init__(self, *args: Any) -> None:
+        super().__init__(*args)
+        self.released = threading.Event()
 
     def run(self) -> None:
         self.released.wait()
@@ -438,6 +465,7 @@ def _session(
     api: _FakeApi,
     cfg: P1Config,
     recorder_types: Mapping[str, type[_FakeRecorder]] | None = None,
+    clock: stream.Clock = stream._utc_now,
 ) -> Iterator[_Run]:
     """Start a stream session for clients a and b with fake recorders."""
     client = CapturingClient(
@@ -452,8 +480,8 @@ def _session(
         return recorder
 
     stop = threading.Event()
-    session = stream._Session(cfg, client, ["a", "b"], tmp_path, stop, recorder_factory=factory)
-    session.start(datetime.now(timezone.utc))
+    session = stream._Session(cfg, client, ["a", "b"], tmp_path, stop, recorder_factory=factory, clock=clock)
+    session.start(clock())
     try:
         yield _Run(session, recorders, stop)
     finally:
@@ -644,11 +672,11 @@ def test_failed_subscriptions_logged_and_rest_sent(tmp_path: Path, caplog: pytes
         _connect_all(run)
         assert api.wait_until(_initial_sent)
 
-    assert not run.session.startup_failed
+    assert not run.session.failed
     assert _posts(api.log()) == INITIAL_POSTS
     assert _messages(caplog, logging.ERROR) == [
-        "subscribe 2330 Tick refused: success is not true (message: 'fake')",
-        "subscribe 2330 BidAsk refused: success is not true (message: 'fake')",
+        "subscribe 2330 Tick failed: success is not true (message: 'fake')",
+        "subscribe 2330 BidAsk failed: success is not true (message: 'fake')",
         "subscribe 00981A Tick odd-lot failed: HTTP 500",
     ]
 
@@ -672,7 +700,7 @@ def test_unconfirmed_trade_reports_stop_the_first_send(
     assert _posts(fake_server.api.log()) == STARTUP_POSTS
     _assert_every_recorder_stopped(tmp_path)
     errors = _messages(caplog, logging.ERROR)
-    assert errors[0] == "subscribe_trade for account type F refused: subscribe_trade is not true"
+    assert errors[0] == "subscribe_trade for account type F failed: subscribe_trade is not true"
     assert errors[1].startswith("first send failed for subscribe_trade for account type F; stopping")
 
 
@@ -686,13 +714,12 @@ def test_account_lookup_failure_stops_the_first_send(tmp_path: Path, caplog: pyt
         _connect_all(run)
         assert run.stop.wait(WAIT_S)
 
-    assert run.session.startup_failed
+    assert run.session.failed
     assert _posts(api.log()) == []
     assert sum(path == ACCOUNTS_PATH for _, path, _ in api.log()) == 1
     assert _messages(caplog, logging.ERROR) == [
-        "accounts failed: HTTP 500",
-        "subscribe_trade for account type S skipped: the account list is unavailable",
-        "subscribe_trade for account type F skipped: the account list is unavailable",
+        "subscribe_trade for account type S failed: the account list is unavailable (accounts: HTTP 500)",
+        "subscribe_trade for account type F failed: the account list is unavailable (accounts: HTTP 500)",
         "first send failed for subscribe_trade for account type S, subscribe_trade for account type F; "
         "stopping so that the run can be restarted once the cause is fixed",
     ]
@@ -717,11 +744,119 @@ def test_failed_startup_request_retried_on_any_next_connection(
         run.connect("b/order_event")
         run.connect("b/contract_event")
 
-    assert not run.session.startup_failed
+    assert not run.session.failed
     assert _posts(api.log())[2 * len(INITIAL_POSTS) :] == [STARTUP_POSTS[1]]
     assert _messages(caplog, logging.ERROR) == [
-        "subscribe_trade for account type F refused: subscribe_trade is not true"
+        "subscribe_trade for account type F failed: subscribe_trade is not true"
     ]
+
+
+def test_failed_subscription_retried_on_a_timer(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    retry_s = 0.1
+    api = _FakeApi(refuse_times={"TMFJ6": 1})
+    tmfj6 = (SUBSCRIBE_PATH, _body("TMFJ6", "TAIFEX", "FUT", "Tick", False))
+
+    with (
+        caplog.at_level(logging.INFO, logger="p1rec.stream"),
+        _session(tmp_path, api, _cfg("http://fake", request_retry_s=retry_s)) as run,
+    ):
+        _connect_all(run)
+
+        # Every stream stays connected, so only the timer can send it again
+        assert api.wait_until(lambda log: len(_posts(log)) == len(INITIAL_POSTS) + 1)
+
+    assert not run.session.failed
+    assert _posts(api.log())[len(INITIAL_POSTS) :] == [tmfj6]
+    sent = [line for line in _jsonl(tmp_path / "rest.jsonl") if '"TMFJ6"' in str(line["req_body"])]
+    assert cast(int, sent[1]["sent_ts_ns"]) - cast(int, sent[0]["recv_ts_ns"]) >= retry_s * 1e9
+    assert _messages(caplog, logging.ERROR) == ["subscribe TMFJ6 Tick failed: success is not true (message: 'fake')"]
+    assert "subscribe TMFJ6 Tick succeeded after 1 failed attempt(s)" in _messages(caplog, logging.INFO)
+
+
+def test_refused_trade_reports_on_resend_retried_without_a_new_connection(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The first send confirms both accounts; the leader's resend and the first timed retry refuse F
+    api = _FakeApi(trade_confirms=(True, True, True, False, False))
+
+    with (
+        caplog.at_level(logging.DEBUG, logger="p1rec.stream"),
+        _session(tmp_path, api, _cfg("http://fake", request_retry_s=0.05)) as run,
+    ):
+        _connect_all(run)
+        assert api.wait_until(_initial_sent)
+        run.connect("a/data")
+        assert api.wait_until(lambda log: len(_posts(log)) == 2 * len(INITIAL_POSTS) + 2)
+
+    assert _posts(api.log())[2 * len(INITIAL_POSTS) :] == [STARTUP_POSTS[1], STARTUP_POSTS[1]]
+    f_logs = [
+        (record.levelno, record.getMessage())
+        for record in caplog.records
+        if record.getMessage().startswith("subscribe_trade for account type F")
+    ]
+    assert f_logs == [
+        (logging.ERROR, "subscribe_trade for account type F failed: subscribe_trade is not true"),
+        (
+            logging.DEBUG,
+            "subscribe_trade for account type F failed again, 2 attempts in a row: subscribe_trade is not true",
+        ),
+        (logging.INFO, "subscribe_trade for account type F succeeded after 2 failed attempt(s)"),
+    ]
+
+
+def test_daily_resend_after_the_maintenance_window(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    api = _FakeApi()
+    resend_at = wall_time(8, 35)
+    real_start = datetime.now(timezone.utc)
+    taipei = ZoneInfo("Asia/Taipei")
+    due = datetime.combine(real_start.astimezone(taipei).date(), resend_at, tzinfo=taipei)
+
+    # A clock that reads a moment before the resend time and then runs at the real rate
+    offset = due - timedelta(seconds=0.3) - real_start
+
+    def clock() -> datetime:
+        return datetime.now(timezone.utc) + offset
+
+    with (
+        caplog.at_level(logging.INFO, logger="p1rec.stream"),
+        _session(tmp_path, api, _cfg("http://fake", daily_resend_at=resend_at), clock=clock) as run,
+    ):
+        _connect_all(run)
+        assert api.wait_until(_initial_sent)
+
+        # No recorder connects again; the clock passing the resend time alone sends everything
+        assert api.wait_until(lambda log: len(_posts(log)) == 2 * len(INITIAL_POSTS))
+        assert clock() >= due
+
+        # The next day's resend is a day away, so acting on a later connection sends nothing
+        run.connect("b/order_event")
+
+    assert _posts(api.log()) == INITIAL_POSTS + INITIAL_POSTS
+    daily = [message for message in _messages(caplog, logging.INFO) if "daily resend" in message]
+    assert daily == [
+        "daily resend at 08:35 Asia/Taipei, after the maintenance window; "
+        "resending 2 startup request(s) and 4 subscription(s)"
+    ]
+
+
+def test_control_failure_stops_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    def _broken(_self: object) -> list[str]:
+        raise RuntimeError("fake control failure")
+
+    monkeypatch.setattr(stream._Coordinator, "send_initial", _broken)
+    api = _FakeApi()
+
+    with (
+        caplog.at_level(logging.ERROR, logger="p1rec.stream"),
+        _session(tmp_path, api, _cfg("http://fake")) as run,
+    ):
+        _connect_all(run)
+        assert run.stop.wait(WAIT_S)
+
+    assert run.session.failed
+    assert _messages(caplog, logging.ERROR) == ["stream control failed; stopping the run"]
 
 
 def test_resend_does_not_delay_leader_frames(
@@ -770,15 +905,23 @@ def test_stuck_recorder_named_at_shutdown(
     monkeypatch.setattr(sse, "SSE_READ_TIMEOUT_S", 0.1)
     api = _FakeApi()
 
+    stuck: list[_StuckRecorder] = []
+
+    class _Tracked(_StuckRecorder):
+        def __init__(self, *args: Any) -> None:
+            super().__init__(*args)
+            stuck.append(self)
+
     try:
         with (
             caplog.at_level(logging.WARNING, logger="p1rec.stream"),
-            _session(tmp_path, api, _cfg("http://fake"), {"b/order_event": _StuckRecorder}) as run,
+            _session(tmp_path, api, _cfg("http://fake"), {"b/order_event": _Tracked}) as run,
         ):
             _connect_all(run)
             assert api.wait_until(_initial_sent)
     finally:
-        _StuckRecorder.released.set()
+        for recorder in stuck:
+            recorder.released.set()
 
     [warning] = _messages(caplog, logging.WARNING)
     assert warning.endswith("left behind: b/order_event")
@@ -825,6 +968,8 @@ STREAM_CONFIG_LINES = [
     "",
     "[stream]",
     "retry_s = 1.0",
+    "request_retry_s = 60.0",
+    'daily_resend_at = "08:35"',
     f"subscribe_body = '{BODY_TEMPLATE}'",
     f"unsubscribe_body = '{BODY_TEMPLATE}'",
     'startup_requests = [["subscribe_trade", "@account:S"]]',
@@ -857,7 +1002,8 @@ def test_stream_section_loads(write_config: WriteConfig) -> None:
 
     assert list(cfg.streams) == ["data", "order_event"]
     assert cfg.subscribe == Endpoint(method="POST", path=SUBSCRIBE_PATH)
-    assert cfg.startup_requests == (("subscribe_trade", "@account:S"),)
+    assert cfg.startup_requests == (StartupRequest(op="subscribe_trade", body=None, account_type="S"),)
+    assert (cfg.retry_s, cfg.request_retry_s, cfg.daily_resend_at) == (1.0, 60.0, wall_time(8, 35))
     assert cfg.instruments == (INSTRUMENTS[0],)
     [action] = cfg.actions
     assert action.at == datetime(2026, 10, 2, 2, 30, tzinfo=timezone.utc)
@@ -874,6 +1020,12 @@ def test_stream_section_loads(write_config: WriteConfig) -> None:
         ('["subscribe_trade", "@account:S"]', '["no_such_op", "@account:S"]', r"stream\.startup_requests\[0\]"),
         ("[endpoints.stream_subscribe]", "[endpoints.renamed]", r"endpoints\.stream_subscribe"),
         ('quote_types = ["Tick", "BidAsk"]', 'quote_types = ["Tik"]', r"stream\.instrument\[0\]\.quote_types"),
+        # Intervals must be positive and finite, the resend time a zero-padded HH:MM
+        ("retry_s = 1.0", "retry_s = inf", r"stream\.retry_s"),
+        ("request_retry_s = 60.0", "request_retry_s = nan", r"stream\.request_retry_s"),
+        ("request_retry_s = 60.0", "request_retry_s = 0", r"stream\.request_retry_s"),
+        ('daily_resend_at = "08:35"', 'daily_resend_at = "8:35"', r"stream\.daily_resend_at"),
+        ('daily_resend_at = "08:35"', 'daily_resend_at = "24:00"', r"stream\.daily_resend_at"),
         # Misspelt keys, at every level of the section
         ("[[stream.action]]", "[[stream.actions]]", r"unknown config key: stream\.actions"),
         ("retry_s = 1.0", "retry_s = 1.0\nretries = 3", r"unknown config key: stream\.retries"),
@@ -899,7 +1051,8 @@ def test_real_p1_toml_stream_section() -> None:
     cfg = load_config(Path(__file__).resolve().parent.parent / "p1.toml").stream
 
     assert list(cfg.streams) == ["data", "order_event", "contract_event"]
-    assert all(body.startswith("@account:") for _, body in cfg.startup_requests)
+    assert [request.account_type for request in cfg.startup_requests] == ["S", "F"]
+    assert cfg.daily_resend_at == wall_time(8, 35)
     assert any(instrument.intraday_odd for instrument in cfg.instruments)
     assert cfg.actions == ()
 
@@ -945,6 +1098,35 @@ def test_cli_interlock_abort_exits_3_without_recorders(
     assert fake_server.api.log() == [("GET", INFO_PATH, None)]
     [run_dir] = (tmp_path / "results").iterdir()
     assert list(run_dir.glob("sse_*.jsonl")) == []
+
+
+def test_stream_process_stops_on_process_sigterm(
+    fake_server: _FakeServer, write_config: WriteConfig, tmp_path: Path
+) -> None:
+    lines = [*MINIMAL_CONFIG_LINES, *STREAM_CONFIG_LINES]
+    lines = [f'base_url = "{fake_server.base_url}"' if line.startswith("base_url") else line for line in lines]
+    env = {**os.environ, **dict.fromkeys(SECRET_ENV_VARS, "fake-value-0123456789")}
+    until = (datetime.now(timezone.utc) + timedelta(seconds=SAFETY_UNTIL_S)).isoformat()
+    command = [sys.executable, "-m", "p1rec.cli", "stream", "--config", str(write_config(lines))]
+    process = subprocess.Popen(
+        [*command, "--clients", "a,b", "--until", until], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
+    )
+    try:
+        # One startup request and two subscriptions, per STREAM_CONFIG_LINES
+        assert fake_server.api.wait_until(lambda log: len(_posts(log)) == 3)
+        os.kill(process.pid, signal.SIGTERM)
+        _, stderr = process.communicate(timeout=WAIT_S)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+
+    assert process.returncode == 0, stderr.decode("utf-8", "replace")
+    [run_dir] = (tmp_path / "results").iterdir()
+    files = sorted(run_dir.glob("sse_*.jsonl"))
+    assert len(files) == 4
+    assert all(_jsonl(path)[-1]["kind"] == "stopped" for path in files)
+    assert "stopping: received SIGTERM" in (run_dir / "recorder.log").read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize(

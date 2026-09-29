@@ -270,6 +270,18 @@ gap_threshold_s = 60.0
 # outlasts the outage by about one retry interval.
 retry_s = 1.0
 
+# Seconds between retry rounds for requests that failed after the first
+# send. A round is at most the startup requests and subscriptions, so one
+# a minute stays far below the broker's accounting-query limit of 25
+# requests per 5 seconds noted in the old gateway (shioaji-server,
+# session.py).
+request_retry_s = 60.0
+
+# Asia/Taipei time of the daily full resend: just after the server's daily
+# maintenance window (docs/official-server-contract.md section 2), which
+# may drop subscriptions without closing any stream.
+daily_resend_at = "08:35"
+
 # BaseSubscriptionRequest bodies. A string value that is exactly "{name}"
 # is replaced by that field of the subscription, keeping its JSON type.
 subscribe_body = '{"security_type": "{security_type}", "exchange": "{exchange}", "code": "{code}", "quote_type": "{quote_type}", "intraday_odd": "{intraday_odd}"}'

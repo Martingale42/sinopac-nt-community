@@ -12,12 +12,16 @@ clients: when every recorder has connected, or after sse.SSE_READ_TIMEOUT_S,
 whichever comes first, the startup requests go out, then one subscription
 per instrument and quote type. If a startup request fails on that first
 send, the run stops and returns 2, so that the operator can fix the cause
-and start again. After that, each new connection of the leader recorder,
-the first client's first stream, sends everything again, since it is the
-sign that the server may have restarted and lost the subscriptions, and a
-new connection of any recorder retries the startup requests that failed
-last time. Scheduled actions change the active subscriptions at their set
-time. The run ends at --until or on SIGINT or SIGTERM.
+and start again.
+
+After that everything is sent again whenever the leader recorder, the
+first client's first stream, connects again, since that is the sign the
+server may have restarted and lost the subscriptions, and once a day after
+the server's maintenance window, which may drop them without closing any
+stream. A request that fails is retried every request_retry_s and on any
+recorder's next connection until it succeeds. Scheduled actions change the
+active subscriptions at their set time. The run ends at --until or on
+SIGINT or SIGTERM, or stops itself with 2 if the control thread fails.
 """
 
 from __future__ import annotations
@@ -34,15 +38,16 @@ import threading
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from datetime import time as wall_time
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import httpx
 
 from p1rec import sse
 from p1rec.capture import CapturedResponse, CapturingClient, describe_exception
 from p1rec.config import (
-    ACCOUNT_BODY_RE,
     ACCOUNTS_OP,
     PLACEHOLDER_RE,
     STREAM_SUBSCRIBE_OP,
@@ -50,9 +55,11 @@ from p1rec.config import (
     Endpoint,
     Instrument,
     P1Config,
+    StartupRequest,
     StreamAction,
 )
 from p1rec.interlock import assert_simulation
+from p1rec.records import EXCHANGE_TZ_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +71,9 @@ EXIT_CHECK_FAILED = 2
 _CLIENT_NAME_RE = re.compile(r"[A-Za-z0-9-]+")
 
 _REST_CLIENT_NAME = "stream"
+
+# The server's daily maintenance runs on Taipei time (docs/official-server-contract.md section 2)
+_TAIPEI = ZoneInfo(EXCHANGE_TZ_NAME)
 
 # AccountRequest fields (openapi.json), which each Account from accounts also carries
 _ACCOUNT_REQUEST_FIELDS = ("account_type", "broker_id", "account_id", "person_id")
@@ -83,6 +93,13 @@ _BLOCKED_SIGNALS = _STOP_SIGNALS | {_WAKE_SIGNAL}
 RecorderFactory = Callable[
     [str, str, str, Endpoint, Path, float, threading.Event, Callable[[], None]], threading.Thread
 ]
+
+# The wall clock the control thread schedules by, which tests replace to reach a set time of day
+Clock = Callable[[], datetime]
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def check_client_names(clients: Sequence[str]) -> None:
@@ -144,6 +161,50 @@ def _is_success(status: int) -> bool:
     return 200 <= status < 300
 
 
+def _failure_reason(response: CapturedResponse, field: str | None) -> str | None:
+    """Return why response does not confirm its request, or None if it is a 2xx whose field, if named, is true."""
+    if not _is_success(response.status):
+        return f"HTTP {response.status}"
+    if field is None:
+        return None
+    try:
+        body = response.json()
+    except ValueError:
+        body = None
+    if isinstance(body, dict) and body.get(field) is True:
+        return None
+    detail = f" (message: {body['message']!r})" if isinstance(body, dict) and "message" in body else ""
+    return f"{field} is not true{detail}"
+
+
+def _account_request(accounts: list[Mapping[str, object]] | str, account_type: str) -> dict[str, str] | str:
+    """Return the AccountRequest for the account of account_type, or why there is none.
+
+    accounts is the accounts response, or the reason it could not be had.
+    """
+    if isinstance(accounts, str):
+        return f"the account list is unavailable ({accounts})"
+    for account in accounts:
+        if account.get("account_type") != account_type:
+            continue
+        request = {name: account.get(name) for name in _ACCOUNT_REQUEST_FIELDS}
+        missing = [name for name, value in request.items() if not isinstance(value, str)]
+        if missing:
+            return f"the account has no {', '.join(missing)}"
+        return {name: str(value) for name, value in request.items()}
+    return f"{ACCOUNTS_OP} lists no such account"
+
+
+def _next_daily(now: datetime, at: wall_time) -> datetime:
+    """Return the first moment after now at which the Taipei wall clock reads at.
+
+    Taipei keeps no daylight saving time, so every day has the same length.
+    """
+    local_now = now.astimezone(_TAIPEI)
+    candidate = datetime.combine(local_now.date(), at, tzinfo=_TAIPEI)
+    return candidate if candidate > local_now else candidate + timedelta(days=1)
+
+
 @dataclass(frozen=True)
 class _Work:
     """What woke the control thread: connections to act on, and whether the leader's is among them."""
@@ -158,12 +219,17 @@ class _Coordinator:
 
     on_connected runs on recorder threads and only records the connection
     under _cond. Every request is sent by the control thread through the
-    other methods, so the active subscriptions and the failed startup
-    requests are touched by that thread alone. Each sequence of requests
-    stops before its next request once stop is set.
+    other methods, so the active subscriptions and the failed requests are
+    touched by that thread alone. No request is sent once stop is set.
+
+    A request that fails is kept, with how many times in a row it has
+    failed, until it succeeds: its first failure is logged as an ERROR, the
+    ones after as DEBUG, and its success afterwards as INFO.
     """
 
-    def __init__(self, cfg: P1Config, client: CapturingClient, keys: Sequence[str], stop: threading.Event) -> None:
+    def __init__(
+        self, cfg: P1Config, client: CapturingClient, keys: Sequence[str], stop: threading.Event, clock: Clock
+    ) -> None:
         stream_cfg = cfg.stream
         if stream_cfg.subscribe is None or stream_cfg.unsubscribe is None:
             raise ValueError("p1.toml has no [stream] section")
@@ -173,13 +239,14 @@ class _Coordinator:
         self._startup = stream_cfg.startup_requests
         self._instruments = stream_cfg.instruments
         self._stop = stop
+        self._clock = clock
         self._ops = {
             "subscribe": (STREAM_SUBSCRIBE_OP, stream_cfg.subscribe, json.loads(stream_cfg.subscribe_body)),
             "unsubscribe": (STREAM_UNSUBSCRIBE_OP, stream_cfg.unsubscribe, json.loads(stream_cfg.unsubscribe_body)),
         }
 
         self._keys = tuple(keys)
-        self._leader = self._keys[0]
+        self.leader = self._keys[0]
         self._cond = threading.Condition()
         self._connected: set[str] = set()
         self._initial_started = False
@@ -193,12 +260,10 @@ class _Coordinator:
             for instrument in stream_cfg.instruments
             for quote_type in instrument.quote_types
         }
-        self._failed_startup: list[tuple[str, str]] = []
+        self._failures: dict[StartupRequest | Subscription, int] = {}
 
-        # Kept once fetched successfully; a failed lookup is retried, but only
-        # by the next sequence, not by each startup request in this one.
+        # Kept once fetched successfully; a failed lookup is retried by the next round
         self._accounts: list[Mapping[str, object]] | None = None
-        self._account_lookup_failed = False
 
     def on_connected(self, key: str) -> None:
         """Record that recorder key got a 200 response and wake the control thread.
@@ -209,7 +274,7 @@ class _Coordinator:
         with self._cond:
             self._connected.add(key)
             self._reported += 1
-            if key == self._leader and self._initial_started:
+            if key == self.leader and self._initial_started:
                 self._leader_pending = True
             self._cond.notify_all()
 
@@ -235,14 +300,14 @@ class _Coordinator:
                 return None
             return [key for key in self._keys if key not in self._connected]
 
-    def wait_for_work(self, next_action_at: datetime | None) -> _Work | None:
-        """Wait for a connection not yet acted on, or until next_action_at; return None once stop is set."""
+    def wait_for_work(self, wake_at: datetime | None) -> _Work | None:
+        """Wait for a connection not yet acted on, or until wake_at; return None once stop is set."""
         with self._cond:
             while not self._stop.is_set() and self._reported == self._handled:
-                if next_action_at is None:
+                if wake_at is None:
                     self._cond.wait()
                     continue
-                delay_s = (next_action_at - datetime.now(timezone.utc)).total_seconds()
+                delay_s = (wake_at - self._clock()).total_seconds()
                 if delay_s <= 0:
                     break
                 self._cond.wait(delay_s)
@@ -267,15 +332,21 @@ class _Coordinator:
             target = self._reported
             return self._cond.wait_for(lambda: self._handled >= target or self._stop.is_set(), timeout_s)
 
+    def has_failures(self) -> bool:
+        return bool(self._failures)
+
     def send_initial(self) -> list[str]:
         """Send every startup request and then, if all succeeded, every subscription.
 
-        Return a description of each startup request that failed or was
-        skipped, in which case no subscription is sent. The list is empty
-        also when stop was set before the send finished.
+        The send acts on every connection reported so far. Return a
+        description of each startup request that failed, in which case no
+        subscription is sent; the list is empty also when stop was set
+        before the send finished.
         """
         with self._cond:
             self._initial_started = True
+            self._handled = self._reported
+            self._cond.notify_all()
         if self._stop.is_set():
             return []
         logger.info(
@@ -287,27 +358,36 @@ class _Coordinator:
         if self._stop.is_set():
             return []
         if failed:
-            return [self._describe_startup(op, body) for op, body in failed]
+            return [request.describe() for request in failed]
         self._send_subscriptions()
         return []
 
-    def resend(self) -> None:
-        """Send every startup request and active subscription again, keeping the startup failures for a retry."""
+    def resend(self, reason: str) -> None:
+        """Send every startup request and active subscription again, and every failed unsubscription."""
         logger.info(
-            "leader stream %s connected again; resending %d startup request(s) and %d subscription(s)",
-            self._leader,
+            "%s; resending %d startup request(s) and %d subscription(s)",
+            reason,
             len(self._startup),
             len(self._active),
         )
-        self._failed_startup = self._send_startup(self._startup)
+        self._send_startup(self._startup)
         self._send_subscriptions()
 
-    def retry_failed_startup(self) -> None:
-        """Send again the startup requests that failed last time, if there are any."""
-        if not self._failed_startup:
-            return
-        logger.info("retrying %d failed startup request(s) after a new connection", len(self._failed_startup))
-        self._failed_startup = self._send_startup(self._failed_startup)
+        # The active set no longer holds a subscription whose unsubscription failed
+        for key in list(self._failures):
+            if isinstance(key, Subscription) and key not in self._active:
+                self._send_subscription("unsubscribe", key)
+
+    def retry_failed(self) -> bool:
+        """Send again every request that has failed since it last succeeded; return whether there was any."""
+        if not self._failures:
+            return False
+        logger.debug("retrying %d failed request(s)", len(self._failures))
+        self._send_startup([request for request in self._startup if request in self._failures])
+        for key in list(self._failures):
+            if isinstance(key, Subscription):
+                self._send_subscription("subscribe" if key in self._active else "unsubscribe", key)
+        return True
 
     def apply(self, action: StreamAction) -> None:
         """Update the active subscriptions for action, then send its request for each matching instrument."""
@@ -323,117 +403,104 @@ class _Coordinator:
                 self._active.pop(subscription, None)
         logger.info("scheduled %s of %s %s due %s", action.op, action.code, action.quote_type, action.at.isoformat())
         for subscription in subscriptions:
-            if self._stop.is_set():
-                return
             self._send_subscription(action.op, subscription)
 
-    def _send_startup(self, requests: Sequence[tuple[str, str]]) -> list[tuple[str, str]]:
-        """Send requests in order and return those that failed or were skipped."""
-        self._account_lookup_failed = False
-        failed: list[tuple[str, str]] = []
-        for op, body in requests:
+    def _send_startup(self, requests: Sequence[StartupRequest]) -> list[StartupRequest]:
+        """Send requests in order and return those that failed, looking the accounts up at most once."""
+        accounts: list[Mapping[str, object]] | str | None = self._accounts
+        failed: list[StartupRequest] = []
+        for request in requests:
             if self._stop.is_set():
                 break
-            if not self._send_startup_request(op, body):
-                failed.append((op, body))
+            what = request.describe()
+            outcome: bool | None = None
+            if request.body is not None:
+                outcome = self._send_startup_request(request, what, json.loads(request.body))
+            elif request.account_type is not None:
+                if accounts is None:
+                    accounts = self._query_accounts()
+                    if accounts is None:
+                        break
+                    if not isinstance(accounts, str):
+                        self._accounts = accounts
+                account_request = _account_request(accounts, request.account_type)
+                if isinstance(account_request, str):
+                    outcome = self._record(request, what, account_request)
+                else:
+                    outcome = self._send_startup_request(request, what, account_request)
+            if outcome is False:
+                failed.append(request)
         return failed
 
-    def _send_startup_request(self, op: str, body: str) -> bool:
-        what = self._describe_startup(op, body)
-        account = ACCOUNT_BODY_RE.fullmatch(body)
-        if account is not None:
-            json_body: object = self._account_request(account.group(1), what)
-            if json_body is None:
-                return False
-        else:
-            json_body = json.loads(body)
-
-        response = self._request(op, self._endpoints[op], json_body, what)
-        return response is not None and self._confirmed(response, _STARTUP_CONFIRMATIONS.get(op), what)
-
-    @staticmethod
-    def _describe_startup(op: str, body: str) -> str:
-        account = ACCOUNT_BODY_RE.fullmatch(body)
-        return f"{op} for account type {account.group(1)}" if account else op
-
-    def _account_request(self, account_type: str, what: str) -> dict[str, str] | None:
-        """Return the AccountRequest for the account of account_type, or None after logging why not."""
-        accounts = self._fetch_accounts()
-        if accounts is None:
-            logger.error("%s skipped: the account list is unavailable", what)
+    def _send_startup_request(self, request: StartupRequest, what: str, json_body: object) -> bool | None:
+        """Send one startup request; return whether it succeeded, or None if stop kept it from being sent."""
+        outcome = self._request(request.op, self._endpoints[request.op], json_body)
+        if outcome is None:
             return None
-        for account in accounts:
-            if account.get("account_type") != account_type:
-                continue
-            request = {name: account.get(name) for name in _ACCOUNT_REQUEST_FIELDS}
-            missing = [name for name, value in request.items() if not isinstance(value, str)]
-            if missing:
-                logger.error("%s skipped: the account has no %s", what, ", ".join(missing))
-                return None
-            return {name: str(value) for name, value in request.items()}
-        logger.error("%s skipped: %s lists no such account", what, ACCOUNTS_OP)
-        return None
+        confirmation = _STARTUP_CONFIRMATIONS.get(request.op)
+        reason = outcome if isinstance(outcome, str) else _failure_reason(outcome, confirmation)
+        return self._record(request, what, reason)
 
-    def _fetch_accounts(self) -> list[Mapping[str, object]] | None:
-        if self._accounts is None and not self._account_lookup_failed:
-            self._accounts = self._query_accounts()
-            self._account_lookup_failed = self._accounts is None
-        return self._accounts
-
-    def _query_accounts(self) -> list[Mapping[str, object]] | None:
-        response = self._request(ACCOUNTS_OP, self._endpoints[ACCOUNTS_OP], None, ACCOUNTS_OP)
-        if response is None:
+    def _query_accounts(self) -> list[Mapping[str, object]] | str | None:
+        """Return the accounts response, why it could not be had, or None if stop kept it from being sent."""
+        outcome = self._request(ACCOUNTS_OP, self._endpoints[ACCOUNTS_OP], None)
+        if outcome is None:
             return None
-        if not _is_success(response.status):
-            logger.error("%s failed: HTTP %d", ACCOUNTS_OP, response.status)
-            return None
+        if isinstance(outcome, str):
+            return f"{ACCOUNTS_OP}: {outcome}"
+        if not _is_success(outcome.status):
+            return f"{ACCOUNTS_OP}: HTTP {outcome.status}"
         try:
-            body = response.json()
+            body = outcome.json()
         except ValueError:
             body = None
         if not isinstance(body, list) or not all(isinstance(account, dict) for account in body):
-            logger.error("%s response is not a JSON array of accounts", ACCOUNTS_OP)
-            return None
+            return f"{ACCOUNTS_OP}: the response is not a JSON array of accounts"
         return body
 
     def _send_subscriptions(self) -> None:
         for subscription in list(self._active):
-            if self._stop.is_set():
-                return
             self._send_subscription("subscribe", subscription)
 
-    def _send_subscription(self, verb: str, subscription: Subscription) -> None:
+    def _send_subscription(self, verb: str, subscription: Subscription) -> bool | None:
+        """Send one subscription request; return whether it succeeded, or None if stop kept it from being sent."""
         op, endpoint, template = self._ops[verb]
-        what = f"{verb} {subscription.describe()}"
-        response = self._request(op, endpoint, render_template(template, subscription.fields()), what)
-        if response is not None:
-            self._confirmed(response, _SUBSCRIPTION_CONFIRMATION, what)
+        outcome = self._request(op, endpoint, render_template(template, subscription.fields()))
+        if outcome is None:
+            return None
+        reason = outcome if isinstance(outcome, str) else _failure_reason(outcome, _SUBSCRIPTION_CONFIRMATION)
+        return self._record(subscription, f"{verb} {subscription.describe()}", reason)
 
-    @staticmethod
-    def _confirmed(response: CapturedResponse, field: str | None, what: str) -> bool:
-        """Return whether response is a 2xx whose field, if one is named, is JSON true, logging an ERROR if not."""
-        if not _is_success(response.status):
-            logger.error("%s failed: HTTP %d", what, response.status)
-            return False
-        if field is None:
+    def _record(self, key: StartupRequest | Subscription, what: str, reason: str | None) -> bool:
+        """Log and keep the outcome of key's request, which failed with reason unless it is None.
+
+        Return whether the request succeeded.
+        """
+        failures = self._failures.get(key, 0)
+        if reason is None:
+            if failures:
+                del self._failures[key]
+                logger.info("%s succeeded after %d failed attempt(s)", what, failures)
             return True
-        try:
-            body = response.json()
-        except ValueError:
-            body = None
-        if isinstance(body, dict) and body.get(field) is True:
-            return True
-        detail = f" (message: {body['message']!r})" if isinstance(body, dict) and "message" in body else ""
-        logger.error("%s refused: %s is not true%s", what, field, detail)
+        self._failures[key] = failures + 1
+        if failures == 0:
+            logger.error("%s failed: %s", what, reason)
+        else:
+            logger.debug("%s failed again, %d attempts in a row: %s", what, failures + 1, reason)
         return False
 
-    def _request(self, op: str, endpoint: Endpoint, json_body: object, what: str) -> CapturedResponse | None:
-        """Send one request, returning None after logging an ERROR if it could not complete."""
+    def _request(self, op: str, endpoint: Endpoint, json_body: object) -> CapturedResponse | str | None:
+        """Send one request and return its response or why it could not complete.
+
+        Return None without sending once stop is set, so a control thread
+        left running past shutdown never uses the closed client.
+        """
+        if self._stop.is_set():
+            return None
         try:
             return self._client.request(op, endpoint, json_body=json_body)
         except httpx.HTTPError as exc:
-            logger.error("%s failed: %s", what, describe_exception(exc))
-            return None
+            return describe_exception(exc)
 
 
 def _pending_actions(actions: Sequence[StreamAction], now: datetime) -> list[StreamAction]:
@@ -457,10 +524,11 @@ class _Session:
     """The recorders, their coordinator and the control thread of one stream run.
 
     The control thread waits for the first connections, sends the initial
-    subscriptions, then acts on new connections and scheduled actions until
-    stop is set. If the first send fails, it sets startup_failed and stop
-    and calls on_self_stop, unless shutdown has already begun. shutdown sets
-    stop and joins every thread within one shared bound.
+    subscriptions, then acts on new connections, retries, the daily resend
+    and scheduled actions until stop is set. If the first send or the
+    control thread itself fails, it sets failed and stop and calls
+    on_self_stop, unless shutdown has already begun. shutdown sets stop and
+    joins every thread within one shared bound.
     """
 
     def __init__(
@@ -472,19 +540,23 @@ class _Session:
         stop: threading.Event,
         recorder_factory: RecorderFactory = sse.SseRecorder,
         on_self_stop: Callable[[], None] = lambda: None,
+        clock: Clock = _utc_now,
     ) -> None:
         stream_cfg = cfg.stream
-        self.startup_failed = False
+        self.failed = False
         self._stop = stop
         self._on_self_stop = on_self_stop
+        self._clock = clock
         self._stop_lock = threading.Lock()
         self._shutting_down = False
         self._retry_s = stream_cfg.retry_s
+        self._request_retry = timedelta(seconds=stream_cfg.request_retry_s)
+        self._daily_resend_at = stream_cfg.daily_resend_at
         self._actions = stream_cfg.actions
         self._pending: list[StreamAction] = []
 
         keys = [f"{client_name}/{stream_name}" for client_name in clients for stream_name in stream_cfg.streams]
-        self._coordinator = _Coordinator(cfg, client, keys, stop)
+        self._coordinator = _Coordinator(cfg, client, keys, stop, clock)
 
         self._recorders: dict[str, threading.Thread] = {}
         for client_name in clients:
@@ -522,8 +594,10 @@ class _Session:
         A recorder can take up to sse.SSE_READ_TIMEOUT_S to notice stop while
         it waits for response headers, counted from its connection attempt,
         which may begin just before stop is set; retry_s covers that. The
-        control thread shares the bound, since at worst it finishes one
-        request, bounded by the shorter http_timeout_s.
+        control thread shares the bound: once stop is set it sends nothing
+        more, and the request it may be waiting on is bounded by
+        http_timeout_s, so one outlasting the bound is named like any
+        recorder.
         """
         with self._stop_lock:
             self._shutting_down = True
@@ -539,7 +613,9 @@ class _Session:
                 "%d thread(s) still running %.1fs after stop, left behind: %s", len(stuck), bound_s, ", ".join(stuck)
             )
 
-    def _stop_self(self) -> None:
+    def _fail(self) -> None:
+        """Mark the run failed and stop it, waking run_stream unless shutdown has already begun."""
+        self.failed = True
         with self._stop_lock:
             self._stop.set()
             if not self._shutting_down:
@@ -561,25 +637,47 @@ class _Session:
                     "first send failed for %s; stopping so that the run can be restarted once the cause is fixed",
                     ", ".join(failed),
                 )
-                self.startup_failed = True
-                self._stop_self()
+                self._fail()
                 return
             self._serve(collections.deque(self._pending))
         except Exception:
-            logger.exception("stream control failed; no further requests or scheduled actions will be sent")
+            # Recording on without resends or retries would lose subscriptions unnoticed for days
+            logger.exception("stream control failed; stopping the run")
+            self._fail()
 
     def _serve(self, actions: collections.deque[StreamAction]) -> None:
-        """Act on new connections and due actions until stop is set."""
+        """Act on new connections, retries, the daily resend and due actions until stop is set."""
+        daily_at = _next_daily(self._clock(), self._daily_resend_at) if self._daily_resend_at else None
+
+        # Subscriptions that failed on the first send wait one interval, like any later failure
+        retry_at = self._clock() + self._request_retry if self._coordinator.has_failures() else None
         while True:
-            work = self._coordinator.wait_for_work(actions[0].at if actions else None)
+            deadlines = [at for at in (actions[0].at if actions else None, retry_at, daily_at) if at is not None]
+            work = self._coordinator.wait_for_work(min(deadlines, default=None))
             if work is None:
                 return
+            now = self._clock()
+            daily_due = daily_at is not None and daily_at <= now
+            retried = True
             if work.leader_connected:
-                self._coordinator.resend()
-            elif work.new_connection:
-                self._coordinator.retry_failed_startup()
-            while actions and actions[0].at <= datetime.now(timezone.utc) and not self._stop.is_set():
+                self._coordinator.resend(f"leader stream {self._coordinator.leader} connected again")
+            elif daily_due and self._daily_resend_at is not None:
+                self._coordinator.resend(
+                    f"daily resend at {self._daily_resend_at:%H:%M} {EXCHANGE_TZ_NAME}, after the maintenance window"
+                )
+            elif work.new_connection or (retry_at is not None and retry_at <= now):
+                retried = self._coordinator.retry_failed()
+            else:
+                retried = False
+            if daily_due and self._daily_resend_at is not None:
+                daily_at = _next_daily(now, self._daily_resend_at)
+            while actions and actions[0].at <= self._clock() and not self._stop.is_set():
                 self._coordinator.apply(actions.popleft())
+
+            if not self._coordinator.has_failures():
+                retry_at = None
+            elif retried or retry_at is None:
+                retry_at = self._clock() + self._request_retry
             self._coordinator.mark_handled(work.reported)
 
 
@@ -635,11 +733,12 @@ def run_stream(cfg: P1Config, clients: list[str], until: datetime, run_dir: Path
     """Record every configured stream for each client until until or SIGINT/SIGTERM.
 
     Return 0 after a normal stop, or EXIT_CHECK_FAILED after the run stopped
-    itself because a startup request failed on the first send. Returns 1
-    without connecting if p1.toml has no [stream] section or until is not
-    in the future. Runs the interlock check first and lets its
-    InterlockError propagate, then raises RuntimeError if any other thread
-    is running, since every thread must inherit the blocked stop signals.
+    itself because a startup request failed on the first send or the
+    control thread failed. Returns 1 without connecting if p1.toml has no
+    [stream] section or until is not in the future. Runs the interlock
+    check first and lets its InterlockError propagate, then raises
+    RuntimeError if any other thread is running, since every thread must
+    inherit the blocked stop signals.
     """
     check_client_names(clients)
     if until.utcoffset() is None:
@@ -676,4 +775,4 @@ def run_stream(cfg: P1Config, clients: list[str], until: datetime, run_dir: Path
                 logger.info("stopping: %s", _wait_for_stop(deadline, until, stop))
             finally:
                 session.shutdown()
-    return EXIT_CHECK_FAILED if session.startup_failed else 0
+    return EXIT_CHECK_FAILED if session.failed else 0
