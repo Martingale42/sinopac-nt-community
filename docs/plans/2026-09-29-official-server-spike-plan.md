@@ -425,9 +425,11 @@ git commit -m "Add scenario model, price references and funds preflight"
 
 - `p1rec stream --clients a,b --until <ISO 8601 含時區>`：連鎖檢查後，每個 client 對 `streams` 中的每條端點（例如綜合行情、`order_event`、`contract_event`）各開一個 `SseRecorder`，輸出 `sse_<client>_<串流名>.jsonl`。
 - 訂閱是 server 全域（契約文件 §1）：所有 recorder 首次連上後，依序送出 `startup_requests`（例如每個帳戶的 `subscribe_trade`），再對 `instruments` 的每個商品與報價類型送出一次訂閱（本體由 `subscribe_body` 代入 `{code}`、`{exchange}`、`{security_type}`、`{quote_type}`、`{intraday_odd}`）。
-- 之後只有「主 recorder」（第一個 client 的第一條串流）重連時，才重送 `startup_requests` 與目前有效的全部訂閱，並記一次 INFO；其他 recorder 重連不重送。訂閱失敗記 ERROR 並繼續其餘訂閱。
+- 首次送出時任一 `startup_requests` 失敗或被跳過（含 `accounts` 查詢失敗；`subscribe_trade` 回應的 `subscribe_trade` 不是 `true` 也算失敗），記 ERROR、不送訂閱，並自行停止：所有 client 照常寫出 `stopped` 後以 2 結束，由操作者排除原因後重新啟動。
+- 之後只有「主 recorder」（第一個 client 的第一條串流）重連時，才重送 `startup_requests` 與目前有效的全部訂閱，並記一次 INFO；其他 recorder 重連不重送。重送時的失敗記 ERROR 並繼續，失敗的 `startup_requests` 記下來，在任一 recorder 下一次連上時重試（頻率受 `retry_s` 限制）。訂閱失敗（非 2xx 或 `success` 不是 `true`）記 ERROR 並繼續其餘訂閱。
+- 所有 REST 請求都由一條控制執行緒送出；recorder 在 `on_connected` 只通知它，因此重送再慢也不耽誤主 recorder 讀取 frame。
 - `[[stream.action]]` 在指定時間送出 `subscribe` 或 `unsubscribe` 並更新有效訂閱集合；啟動時已過期的動作記 WARN 並跳過。
-- 到 `--until` 或收到 SIGINT／SIGTERM 時，所有 client 寫出 `stopped` 後以 0 結束。對每個 recorder 的 join 最多等 `sse.SSE_READ_TIMEOUT_S + retry_s`（讀取逾時為三個心跳間隔，契約文件 §2；recorder 的等待從它發出連線起算，stop 可能晚於連線發出，因此加一個 `retry_s` 作為餘裕）；逾時仍未結束的 recorder（例如卡在等待 response header）記 WARN 並列出名稱，結束碼仍為 0。
+- 到 `--until`（啟動時換算成 `time.monotonic()` 的期限，牆上時鐘跳動不影響停止時間）或收到 SIGINT／SIGTERM 時，所有 client 寫出 `stopped` 後以 0 結束。SIGINT／SIGTERM 在所有執行緒中被擋下、由主執行緒以 `sigtimedwait` 接收，因此 `run_stream` 開始擋訊號前若已有其他執行緒在跑，拋出 `RuntimeError`。對每個 recorder 的 join 最多等 `sse.SSE_READ_TIMEOUT_S + retry_s`（讀取逾時為三個心跳間隔，契約文件 §2；recorder 的等待從它發出連線起算，stop 可能晚於連線發出，因此加一個 `retry_s` 作為餘裕）；逾時仍未結束的 recorder（例如卡在等待 response header）記 WARN 並列出名稱，結束碼仍為 0。
 
 **Interface:**
 
@@ -436,7 +438,7 @@ git commit -m "Add scenario model, price references and funds preflight"
 class Instrument:
     code: str
     exchange: str        # TSE | OTC | TAIFEX
-    security_type: str   # STK | FUT | OPT
+    security_type: str   # STK | FUT | OPT | IND
     quote_types: tuple[str, ...]  # Tick | BidAsk | Quote
     intraday_odd: bool
 
@@ -448,21 +450,21 @@ class StreamAction:
     quote_type: str
 
 @dataclass(frozen=True)
-class StreamConfig:
-    streams: dict[str, Endpoint]        # 串流名 -> SSE 端點
-    subscribe: Endpoint
-    unsubscribe: Endpoint
-    subscribe_body: str                 # JSON 範本
-    unsubscribe_body: str
-    startup_requests: tuple[tuple[str, str], ...]  # (邏輯操作, JSON 本體或 "@account:<帳戶類型>")
-    retry_s: float
-    instruments: tuple[Instrument, ...]
-    actions: tuple[StreamAction, ...]
+class StreamConfig:  # 預設值代表 p1.toml 沒有 [stream]；有 [stream] 時 subscribe 與 unsubscribe 必有值
+    streams: dict[str, Endpoint] = field(default_factory=dict)  # 串流名 -> SSE 端點
+    subscribe: Endpoint | None = None   # 取自 endpoints.stream_subscribe
+    unsubscribe: Endpoint | None = None  # 取自 endpoints.stream_unsubscribe
+    subscribe_body: str = ""            # JSON 範本
+    unsubscribe_body: str = ""
+    startup_requests: tuple[tuple[str, str], ...] = ()  # (邏輯操作, JSON 本體或 "@account:<帳戶類型>")
+    retry_s: float = 0.0
+    instruments: tuple[Instrument, ...] = ()
+    actions: tuple[StreamAction, ...] = ()
 
 def run_stream(cfg: P1Config, clients: list[str], until: datetime, run_dir: Path) -> int: ...
 ```
 
-`startup_requests` 的本體寫成 `"@account:S"`（`F`、`H` 同理）時，代表以 `accounts` 查到的該類型帳戶組成的 `AccountRequest`（`account_type`、`broker_id`、`account_id`、`person_id`）；repo 是公開的，帳號因此不寫進 `p1.toml`，直接寫帳號欄位的本體在載入時拒絕。帳戶清單查到後沿用，查詢失敗則由下一次重送再查。
+`startup_requests` 的本體寫成 `"@account:S"`（`F`、`H` 同理）時，代表以 `accounts` 查到的該類型帳戶組成的 `AccountRequest`（`account_type`、`broker_id`、`account_id`、`person_id`）；repo 是公開的，帳號因此不寫進 `p1.toml`：任何設定的請求本體在任何深度出現 `account_id`、`person_id`、`username` 都在載入時拒絕，`[stream]` 及其子表的未知鍵也一樣。帳戶清單查到後沿用；查詢失敗不快取，同一輪送出只查一次。
 
 **Tests:**
 

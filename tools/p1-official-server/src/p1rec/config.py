@@ -368,9 +368,18 @@ PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 # account identifier has to be written into the public p1.toml.
 ACCOUNT_BODY_RE = re.compile(r"@account:(S|F|H)")
 
-# AccountRequest fields that identify the account holder, refused in a
-# literal startup body for the same reason.
-_ACCOUNT_IDENTIFIER_KEYS = frozenset({"account_id", "person_id"})
+# Account fields that identify the holder, refused anywhere in a configured
+# request body for the same reason.
+_ACCOUNT_IDENTIFIER_KEYS = frozenset({"account_id", "person_id", "username"})
+
+# Every key [stream] and its tables may hold, so a misspelt one, such as
+# [[stream.actions]], fails at load instead of being silently ignored.
+_STREAM_KEYS = frozenset(
+    {"retry_s", "subscribe_body", "unsubscribe_body", "startup_requests", "streams", "instrument", "action"}
+)
+_STREAM_ENDPOINT_KEYS = frozenset({"method", "path"})
+_INSTRUMENT_KEYS = frozenset({"code", "exchange", "security_type", "quote_types", "intraday_odd"})
+_ACTION_KEYS = frozenset({"at", "op", "code", "quote_type"})
 
 # Stream names become part of file names, so they are kept to a safe set
 _STREAM_NAME_RE = re.compile(r"[A-Za-z0-9_-]+")
@@ -387,6 +396,7 @@ def _parse_stream(data: Mapping[str, Any], config_dir: Path) -> StreamConfig:
     if "stream" not in data:
         return StreamConfig()
     table = _optional_table(data, "stream")
+    _reject_unknown_keys(table, _STREAM_KEYS, "stream")
 
     retry_s = _get_number(data, "stream.retry_s")
     if retry_s <= 0:
@@ -406,6 +416,24 @@ def _parse_stream(data: Mapping[str, Any], config_dir: Path) -> StreamConfig:
     )
 
 
+def _reject_unknown_keys(table: Mapping[str, Any], allowed: frozenset[str], where: str) -> None:
+    unknown = sorted(set(table) - allowed)
+    if unknown:
+        raise ConfigError(f"unknown config key: {', '.join(f'{where}.{key}' for key in unknown)}")
+
+
+def _identifier_keys(value: object) -> set[str]:
+    """Return every account identifier key found at any depth of a parsed JSON value."""
+    if isinstance(value, dict):
+        found = set(_ACCOUNT_IDENTIFIER_KEYS & value.keys())
+        for item in value.values():
+            found |= _identifier_keys(item)
+        return found
+    if isinstance(value, list):
+        return set().union(*(_identifier_keys(item) for item in value))
+    return set()
+
+
 def _named_endpoint(data: Mapping[str, Any], op: str) -> Endpoint:
     return Endpoint(method=_get_str(data, f"endpoints.{op}.method"), path=_get_str(data, f"endpoints.{op}.path"))
 
@@ -419,6 +447,9 @@ def _parse_stream_endpoints(data: Mapping[str, Any]) -> dict[str, Endpoint]:
     for name in raw:
         if not _STREAM_NAME_RE.fullmatch(name):
             raise ConfigError(f"config key stream.streams.{name}: a stream name may only use letters, digits, - and _")
+        if not isinstance(raw[name], Mapping):
+            raise ConfigError(f"config key stream.streams.{name} must be a table")
+        _reject_unknown_keys(raw[name], _STREAM_ENDPOINT_KEYS, f"stream.streams.{name}")
         endpoint = Endpoint(
             method=_get_str(data, f"stream.streams.{name}.method"),
             path=_get_str(data, f"stream.streams.{name}.path"),
@@ -439,7 +470,17 @@ def _get_body_template(data: Mapping[str, Any], dotted_key: str) -> str:
     if not isinstance(template, dict):
         raise ConfigError(f"config key {dotted_key} must be a JSON object")
     _check_placeholders(template, dotted_key)
+    _reject_identifiers(template, dotted_key)
     return text
+
+
+def _reject_identifiers(body: object, where: str) -> None:
+    found = _identifier_keys(body)
+    if found:
+        raise ConfigError(
+            f"config key {where} must not name the account ({', '.join(sorted(found))}); "
+            'a startup request takes it from "@account:<S|F|H>"'
+        )
 
 
 def _check_placeholders(value: object, dotted_key: str) -> None:
@@ -491,8 +532,7 @@ def _parse_startup_requests(data: Mapping[str, Any]) -> tuple[tuple[str, str], .
                 parsed = json.loads(body)
             except ValueError as exc:
                 raise ConfigError(f'config key {where} body must be JSON or "@account:<S|F|H>"') from exc
-            if isinstance(parsed, dict) and _ACCOUNT_IDENTIFIER_KEYS & parsed.keys():
-                raise ConfigError(f'config key {where} body must not name the account; use "@account:<S|F|H>"')
+            _reject_identifiers(parsed, where)
         requests.append((op, body))
     return tuple(requests)
 
@@ -532,6 +572,7 @@ def _parse_instruments(table: Mapping[str, Any]) -> tuple[Instrument, ...]:
     seen: set[tuple[str, str, str, str, bool]] = set()
     for index, item in enumerate(raw):
         where = f"stream.instrument[{index}]"
+        _reject_unknown_keys(item, _INSTRUMENT_KEYS, where)
         code = cast(str, _item(item, "code", where, str))
         if not code:
             raise ConfigError(f"config key {where}.code must not be empty")
@@ -562,6 +603,7 @@ def _parse_actions(table: Mapping[str, Any], instruments: tuple[Instrument, ...]
     actions: list[StreamAction] = []
     for index, item in enumerate(_array_of_tables(table, "action")):
         where = f"stream.action[{index}]"
+        _reject_unknown_keys(item, _ACTION_KEYS, where)
         at = cast(datetime, _item(item, "at", where, datetime))
         if at.utcoffset() is None:
             raise ConfigError(f"config key {where}.at must carry a UTC offset, such as 2026-10-02T10:30:00+08:00")

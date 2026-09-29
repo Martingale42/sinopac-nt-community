@@ -3,7 +3,8 @@
 End-to-end tests run run_stream in the main thread against a real HTTP
 server on a free loopback port. Tests of the subscription logic drive
 stream._Session directly, with recorders the test connects by hand and a
-CapturingClient answered in-process, so every step is synchronous.
+CapturingClient answered in-process, and wait for the control thread with
+wait_until_handled before checking that a connection sent nothing.
 """
 
 from __future__ import annotations
@@ -12,8 +13,10 @@ import json
 import logging
 import signal
 import threading
-from collections.abc import Callable, Iterator
+import time
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -23,7 +26,7 @@ import httpx
 import pytest
 from helpers import MINIMAL_CONFIG_LINES, SECRET_ENV_VARS, WriteConfig
 
-from p1rec import cli, sse, stream
+from p1rec import capture, cli, sse, stream
 from p1rec.capture import CapturingClient
 from p1rec.config import (
     ConfigError,
@@ -41,7 +44,8 @@ from p1rec.config import (
     StreamConfig,
     load_config,
 )
-from p1rec.stream import render_template, run_stream
+from p1rec.interlock import EXIT_INTERLOCK_ABORT
+from p1rec.stream import EXIT_CHECK_FAILED, render_template, run_stream
 
 INFO_PATH = "/api/v1/info"
 ACCOUNTS_PATH = "/api/v1/auth/accounts"
@@ -90,6 +94,7 @@ SUBSCRIPTION_BODIES = [
     _body("00981A", "TSE", "STK", "Tick", True),
     _body("TMFJ6", "TAIFEX", "FUT", "Tick", False),
 ]
+SUBSCRIPTION_POSTS = [(SUBSCRIBE_PATH, body) for body in SUBSCRIPTION_BODIES]
 
 # Fake accounts shaped like the official server's Account objects
 ACCOUNTS = [
@@ -114,7 +119,7 @@ ACCOUNT_REQUEST_FIELDS = ("account_type", "broker_id", "account_id", "person_id"
 STARTUP_POSTS = [
     (SUBSCRIBE_TRADE_PATH, {name: account[name] for name in ACCOUNT_REQUEST_FIELDS}) for account in ACCOUNTS
 ]
-INITIAL_POSTS = STARTUP_POSTS + [(SUBSCRIBE_PATH, body) for body in SUBSCRIPTION_BODIES]
+INITIAL_POSTS = STARTUP_POSTS + SUBSCRIPTION_POSTS
 
 HEARTBEAT = b'event:heartbeat\ndata:{"type":"heartbeat","connection_id":"1"}\n\n'
 
@@ -169,17 +174,30 @@ class _FakeApi:
     """Answer the REST operations the stream subcommand uses, logging every request in arrival order.
 
     SSE connections are logged too, as ("SSE", path, None), when the
-    end-to-end server receives them.
+    end-to-end server receives them. trade_confirms gives, call by call,
+    the subscribe_trade field of each subscribe_trade response; calls
+    beyond it are confirmed. While gate is clear, every POST waits for it
+    after being logged.
     """
 
     def __init__(
-        self, refuse: frozenset[str] = frozenset(), fail: frozenset[str] = frozenset(), accounts_status: int = 200
+        self,
+        *,
+        refuse: frozenset[str] = frozenset(),
+        fail: frozenset[str] = frozenset(),
+        accounts_status: int = 200,
+        trade_confirms: tuple[bool, ...] = (),
+        simulation: bool = True,
     ) -> None:
         self._cond = threading.Condition()
         self._log: Log = []
         self._refuse = refuse  # Codes whose subscription is answered with success false
         self._fail = fail  # Codes whose subscription is answered with HTTP 500
         self._accounts_status = accounts_status
+        self._trade_confirms = list(trade_confirms)
+        self._simulation = simulation
+        self.gate = threading.Event()
+        self.gate.set()
 
     def record(self, method: str, path: str, body: object) -> None:
         with self._cond:
@@ -197,12 +215,16 @@ class _FakeApi:
     def answer(self, method: str, path: str, raw_body: bytes) -> tuple[int, object]:
         body = json.loads(raw_body) if raw_body else None
         self.record(method, path, body)
+        if method == "POST":
+            self.gate.wait(WAIT_S)
         if (method, path) == ("GET", INFO_PATH):
-            return 200, {"simulation": True}
+            return 200, {"simulation": self._simulation}
         if (method, path) == ("GET", ACCOUNTS_PATH):
             return self._accounts_status, ACCOUNTS if self._accounts_status == 200 else {"detail": "fake failure"}
         if (method, path) == ("POST", SUBSCRIBE_TRADE_PATH):
-            return 200, {"account": body, "subscribe_trade": True, "ts": 0}
+            with self._cond:
+                confirmed = self._trade_confirms.pop(0) if self._trade_confirms else True
+            return 200, {"account": body, "subscribe_trade": confirmed, "ts": 0}
         if method == "POST" and path in (SUBSCRIBE_PATH, UNSUBSCRIBE_PATH):
             code = cast(dict[str, object], body)["code"]
             if code in self._fail:
@@ -223,12 +245,13 @@ class _Handler(BaseHTTPRequestHandler):
         server = cast(_FakeServer, self.server)
         if self.path in SSE_PATHS:
             server.api.record("SSE", self.path, None)
+            generation = server.generation(self.path)
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.end_headers()
             self.wfile.write(HEARTBEAT)
             self.wfile.flush()
-            server.done.wait()
+            server.hold(self.path, generation)
             return
         self._reply(*server.api.answer("GET", self.path, b""))
 
@@ -247,19 +270,43 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 class _FakeServer(ThreadingHTTPServer):
-    """A real HTTP server on a free loopback port whose SSE streams send one heartbeat, then go silent."""
+    """A real HTTP server on a free loopback port.
+
+    Each SSE stream sends one heartbeat, then stays silent until drop() ends
+    every open stream on its path, or the server closes.
+    """
 
     daemon_threads = True
 
-    def __init__(self, api: _FakeApi) -> None:
+    def __init__(self) -> None:
         super().__init__(("127.0.0.1", 0), _Handler)
-        self.api = api
-        self.done = threading.Event()
+        self.api = _FakeApi()
+        self._cond = threading.Condition()
+        self._generations: dict[str, int] = {}
+        self._closed = False
 
     @property
     def base_url(self) -> str:
         host, port = self.server_address[:2]
         return f"http://{host!s}:{port}"
+
+    def generation(self, path: str) -> int:
+        with self._cond:
+            return self._generations.get(path, 0)
+
+    def hold(self, path: str, generation: int) -> None:
+        with self._cond:
+            self._cond.wait_for(lambda: self._closed or self._generations.get(path, 0) != generation)
+
+    def drop(self, path: str) -> None:
+        with self._cond:
+            self._generations[path] = self._generations.get(path, 0) + 1
+            self._cond.notify_all()
+
+    def close_streams(self) -> None:
+        with self._cond:
+            self._closed = True
+            self._cond.notify_all()
 
     def handle_error(self, request: object, client_address: object) -> None:
         # A recorder hanging up on a silent stream is expected here
@@ -268,14 +315,24 @@ class _FakeServer(ThreadingHTTPServer):
 
 @pytest.fixture
 def fake_server() -> Iterator[_FakeServer]:
-    server = _FakeServer(_FakeApi())
+    server = _FakeServer()
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
         yield server
     finally:
-        server.done.set()
+        server.close_streams()
         server.shutdown()
         server.server_close()
+
+
+@pytest.fixture
+def allow_test_threads(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let run_stream start although the fake server's threads are running.
+
+    Those threads keep the stop signals unblocked, which is safe here only
+    because these tests send them to the main thread alone.
+    """
+    monkeypatch.setattr(stream, "_check_no_other_threads", lambda: None)
 
 
 def _run_until_ready(cfg: P1Config, run_dir: Path, api: _FakeApi, ready: Callable[[Log], bool]) -> int:
@@ -306,6 +363,13 @@ def _run_until_ready(cfg: P1Config, run_dir: Path, api: _FakeApi, ready: Callabl
 
 def _jsonl(path: Path) -> list[dict[str, object]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def _assert_every_recorder_stopped(run_dir: Path) -> None:
+    files = sorted(run_dir.glob("sse_*.jsonl"))
+    assert len(files) == 6
+    for path in files:
+        assert _jsonl(path)[-1]["kind"] == "stopped"
 
 
 class _FakeRecorder(threading.Thread):
@@ -343,14 +407,26 @@ class _StuckRecorder(_FakeRecorder):
         self.released.wait()
 
 
+@dataclass
+class _Run:
+    session: stream._Session
+    recorders: dict[str, _FakeRecorder]
+    stop: threading.Event
+
+    def connect(self, key: str) -> None:
+        """Play a connection of recorder key and wait until the control thread has acted on it."""
+        self.recorders[key].connect()
+        assert self.session.wait_until_handled(WAIT_S)
+
+
 @contextmanager
 def _session(
     tmp_path: Path,
     api: _FakeApi,
     cfg: P1Config,
-    recorder_types: dict[str, type[_FakeRecorder]] | None = None,
-) -> Iterator[dict[str, _FakeRecorder]]:
-    """Start a stream session for clients a and b with fake recorders, yielding them by key."""
+    recorder_types: Mapping[str, type[_FakeRecorder]] | None = None,
+) -> Iterator[_Run]:
+    """Start a stream session for clients a and b with fake recorders."""
     client = CapturingClient(
         cfg.base_url, "stream", tmp_path / "rest.jsonl", WAIT_S, transport=httpx.MockTransport(api.handle)
     )
@@ -362,17 +438,18 @@ def _session(
         recorders[recorder.key] = recorder
         return recorder
 
-    session = stream._Session(cfg, client, ["a", "b"], tmp_path, threading.Event(), recorder_factory=factory)
+    stop = threading.Event()
+    session = stream._Session(cfg, client, ["a", "b"], tmp_path, stop, recorder_factory=factory)
     session.start(datetime.now(timezone.utc))
     try:
-        yield recorders
+        yield _Run(session, recorders, stop)
     finally:
         session.shutdown()
         client.close()
 
 
-def _connect_all(recorders: dict[str, _FakeRecorder], skip: frozenset[str] = frozenset()) -> None:
-    for key, recorder in recorders.items():
+def _connect_all(run: _Run, skip: frozenset[str] = frozenset()) -> None:
+    for key, recorder in run.recorders.items():
         if key not in skip:
             recorder.connect()
 
@@ -381,7 +458,11 @@ def _initial_sent(log: Log) -> bool:
     return len(_posts(log)) >= len(INITIAL_POSTS)
 
 
-def test_one_recorder_per_client_and_stream(fake_server: _FakeServer, tmp_path: Path) -> None:
+def _messages(caplog: pytest.LogCaptureFixture, level: int) -> list[str]:
+    return [record.getMessage() for record in caplog.records if record.levelno == level]
+
+
+def test_one_recorder_per_client_and_stream(fake_server: _FakeServer, allow_test_threads: None, tmp_path: Path) -> None:
     exit_code = _run_until_ready(
         _cfg(fake_server.base_url), tmp_path, fake_server.api, lambda log: sum(m == "SSE" for m, _, _ in log) == 6
     )
@@ -399,7 +480,9 @@ def test_one_recorder_per_client_and_stream(fake_server: _FakeServer, tmp_path: 
             assert str(lines[0]["url"]).endswith(endpoint.path)
 
 
-def test_startup_then_subscriptions_sent_once(fake_server: _FakeServer, tmp_path: Path) -> None:
+def test_startup_then_subscriptions_sent_once(
+    fake_server: _FakeServer, allow_test_threads: None, tmp_path: Path
+) -> None:
     api = fake_server.api
 
     exit_code = _run_until_ready(_cfg(fake_server.base_url), tmp_path, api, _initial_sent)
@@ -427,17 +510,17 @@ def test_leader_reconnect_resends(tmp_path: Path, caplog: pytest.LogCaptureFixtu
 
     with (
         caplog.at_level(logging.INFO, logger="p1rec.stream"),
-        _session(tmp_path, api, _cfg("http://fake")) as recorders,
+        _session(tmp_path, api, _cfg("http://fake")) as run,
     ):
-        _connect_all(recorders)
+        _connect_all(run)
         assert api.wait_until(_initial_sent)
 
         # Every other recorder reconnecting, including client b's first stream, sends nothing
         for key in KEYS[1:]:
-            recorders[key].connect()
+            run.connect(key)
         assert _posts(api.log()) == INITIAL_POSTS
 
-        recorders["a/data"].connect()
+        run.connect("a/data")
         resent = _posts(api.log())[len(INITIAL_POSTS) :]
 
     assert resent == INITIAL_POSTS
@@ -456,16 +539,14 @@ def test_scheduled_unsubscribe_updates_active_set(tmp_path: Path) -> None:
         at=datetime.now(timezone.utc) + timedelta(seconds=0.2), op="unsubscribe", code="2330", quote_type="Tick"
     )
 
-    with _session(tmp_path, api, _cfg("http://fake", actions=(action,))) as recorders:
-        _connect_all(recorders)
+    with _session(tmp_path, api, _cfg("http://fake", actions=(action,))) as run:
+        _connect_all(run)
         assert api.wait_until(lambda log: any(path == UNSUBSCRIBE_PATH for path, _ in _posts(log)))
-        before = len(_posts(api.log()))
-
-        recorders["a/data"].connect()
+        run.connect("a/data")
         posts = _posts(api.log())
 
     assert posts[len(INITIAL_POSTS)] == (UNSUBSCRIBE_PATH, _body("2330", "TSE", "STK", "Tick", False))
-    resent = [body for path, body in posts[before:] if path == SUBSCRIBE_PATH]
+    resent = [body for path, body in posts[len(INITIAL_POSTS) + 1 :] if path == SUBSCRIBE_PATH]
     assert resent == [body for body in SUBSCRIPTION_BODIES if body != _body("2330", "TSE", "STK", "Tick", False)]
 
 
@@ -477,29 +558,49 @@ def test_past_action_skipped_with_warning(tmp_path: Path, caplog: pytest.LogCapt
 
     with (
         caplog.at_level(logging.WARNING, logger="p1rec.stream"),
-        _session(tmp_path, api, _cfg("http://fake", actions=(action,))) as recorders,
+        _session(tmp_path, api, _cfg("http://fake", actions=(action,))) as run,
     ):
-        _connect_all(recorders)
+        _connect_all(run)
         assert api.wait_until(_initial_sent)
-        recorders["a/data"].connect()
+        run.connect("a/data")
 
     assert _posts(api.log()) == INITIAL_POSTS + INITIAL_POSTS
-    warnings = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
-    assert len(warnings) == 1
-    assert "skipping scheduled unsubscribe of 2330 Tick" in warnings[0]
+    [warning] = _messages(caplog, logging.WARNING)
+    assert "skipping scheduled unsubscribe of 2330 Tick" in warning
 
 
-def test_until_stops_all_clients(fake_server: _FakeServer, tmp_path: Path) -> None:
+def test_until_stops_all_clients(fake_server: _FakeServer, allow_test_threads: None, tmp_path: Path) -> None:
     until = datetime.now(timezone.utc) + timedelta(seconds=0.5)
 
     exit_code = run_stream(_cfg(fake_server.base_url), ["a", "b"], until, tmp_path)
 
     assert exit_code == 0
     assert datetime.now(timezone.utc) >= until
-    files = sorted(tmp_path.glob("sse_*.jsonl"))
-    assert len(files) == 6
-    for path in files:
-        assert _jsonl(path)[-1]["kind"] == "stopped"
+    _assert_every_recorder_stopped(tmp_path)
+
+
+def test_until_deadline_ignores_wall_clock_steps(
+    fake_server: _FakeServer, allow_test_threads: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    step_back_s = 3.0
+    until = datetime.now(timezone.utc) + timedelta(seconds=0.3)
+    calls: list[None] = []
+
+    class _SteppedBack(datetime):
+        # The wall clock steps back by step_back_s right after run_stream first reads it
+        @classmethod
+        def now(cls, tz: object = None) -> datetime:
+            calls.append(None)
+            shift = timedelta(0) if len(calls) == 1 else timedelta(seconds=step_back_s)
+            return datetime.now(timezone.utc) - shift
+
+    monkeypatch.setattr(stream, "datetime", _SteppedBack)
+    started = time.monotonic()
+
+    exit_code = run_stream(_cfg(fake_server.base_url), ["a", "b"], until, tmp_path)
+
+    assert exit_code == 0
+    assert time.monotonic() - started < step_back_s
 
 
 def test_first_send_waits_at_most_the_read_timeout(
@@ -510,13 +611,13 @@ def test_first_send_waits_at_most_the_read_timeout(
 
     with (
         caplog.at_level(logging.WARNING, logger="p1rec.stream"),
-        _session(tmp_path, api, _cfg("http://fake")) as recorders,
+        _session(tmp_path, api, _cfg("http://fake")) as run,
     ):
-        _connect_all(recorders, skip=frozenset({"b/contract_event"}))
+        _connect_all(run, skip=frozenset({"b/contract_event"}))
         assert api.wait_until(_initial_sent)
 
     assert _posts(api.log()) == INITIAL_POSTS
-    [warning] = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+    [warning] = _messages(caplog, logging.WARNING)
     assert warning.endswith("first connection from: b/contract_event")
 
 
@@ -525,42 +626,129 @@ def test_failed_subscriptions_logged_and_rest_sent(tmp_path: Path, caplog: pytes
 
     with (
         caplog.at_level(logging.ERROR, logger="p1rec.stream"),
-        _session(tmp_path, api, _cfg("http://fake")) as recorders,
+        _session(tmp_path, api, _cfg("http://fake")) as run,
     ):
-        _connect_all(recorders)
+        _connect_all(run)
         assert api.wait_until(_initial_sent)
 
+    assert not run.session.startup_failed
     assert _posts(api.log()) == INITIAL_POSTS
-    errors = [record.getMessage() for record in caplog.records if record.levelno == logging.ERROR]
-    assert errors == [
+    assert _messages(caplog, logging.ERROR) == [
         "subscribe 2330 Tick refused: success is not true (message: 'fake')",
         "subscribe 2330 BidAsk refused: success is not true (message: 'fake')",
         "subscribe 00981A Tick odd-lot failed: HTTP 500",
     ]
 
 
-def test_account_lookup_failure_skips_startup_and_retries(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+def test_unconfirmed_trade_reports_stop_the_first_send(
+    fake_server: _FakeServer, allow_test_threads: None, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    fake_server.api = _FakeApi(trade_confirms=(True, False))
+
+    with caplog.at_level(logging.ERROR, logger="p1rec.stream"):
+        exit_code = run_stream(
+            _cfg(fake_server.base_url),
+            ["a", "b"],
+            datetime.now(timezone.utc) + timedelta(seconds=SAFETY_UNTIL_S),
+            tmp_path,
+        )
+
+    assert exit_code == EXIT_CHECK_FAILED
+
+    # Both startup requests went out, then no subscription
+    assert _posts(fake_server.api.log()) == STARTUP_POSTS
+    _assert_every_recorder_stopped(tmp_path)
+    errors = _messages(caplog, logging.ERROR)
+    assert errors[0] == "subscribe_trade for account type F refused: subscribe_trade is not true"
+    assert errors[1].startswith("first send failed for subscribe_trade for account type F; stopping")
+
+
+def test_account_lookup_failure_stops_the_first_send(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     api = _FakeApi(accounts_status=500)
-    subscriptions = [(SUBSCRIBE_PATH, body) for body in SUBSCRIPTION_BODIES]
 
     with (
         caplog.at_level(logging.ERROR, logger="p1rec.stream"),
-        _session(tmp_path, api, _cfg("http://fake")) as recorders,
+        _session(tmp_path, api, _cfg("http://fake")) as run,
     ):
-        _connect_all(recorders)
-        assert api.wait_until(lambda log: len(_posts(log)) == len(subscriptions))
-        recorders["a/data"].connect()
+        _connect_all(run)
+        assert run.stop.wait(WAIT_S)
 
-    assert _posts(api.log()) == subscriptions + subscriptions
-
-    # A failed lookup is not cached, so the resend asks again
-    assert sum(path == ACCOUNTS_PATH for _, path, _ in api.log()) == 2
-    skipped = [record.getMessage() for record in caplog.records if "skipped" in record.getMessage()]
-    assert skipped == [
-        f"subscribe_trade for account type {account_type} skipped: the account list is unavailable"
-        for account_type in ("S", "F", "S", "F")
+    assert run.session.startup_failed
+    assert _posts(api.log()) == []
+    assert sum(path == ACCOUNTS_PATH for _, path, _ in api.log()) == 1
+    assert _messages(caplog, logging.ERROR) == [
+        "accounts failed: HTTP 500",
+        "subscribe_trade for account type S skipped: the account list is unavailable",
+        "subscribe_trade for account type F skipped: the account list is unavailable",
+        "first send failed for subscribe_trade for account type S, subscribe_trade for account type F; "
+        "stopping so that the run can be restarted once the cause is fixed",
     ]
-    assert all("0000001" not in record.getMessage() for record in caplog.records)
+
+
+def test_failed_startup_request_retried_on_any_next_connection(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The first send and the leader's resend confirm S; the resend refuses F
+    api = _FakeApi(trade_confirms=(True, True, True, False))
+
+    with (
+        caplog.at_level(logging.ERROR, logger="p1rec.stream"),
+        _session(tmp_path, api, _cfg("http://fake")) as run,
+    ):
+        _connect_all(run)
+        assert api.wait_until(_initial_sent)
+        run.connect("a/data")
+        assert _posts(api.log()) == INITIAL_POSTS + INITIAL_POSTS
+
+        # Any recorder's next connection retries only the failed request, once
+        run.connect("b/order_event")
+        run.connect("b/contract_event")
+
+    assert not run.session.startup_failed
+    assert _posts(api.log())[2 * len(INITIAL_POSTS) :] == [STARTUP_POSTS[1]]
+    assert _messages(caplog, logging.ERROR) == [
+        "subscribe_trade for account type F refused: subscribe_trade is not true"
+    ]
+
+
+def test_resend_does_not_delay_leader_frames(
+    fake_server: _FakeServer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    frames: dict[str, int] = {}
+    frames_cond = threading.Condition()
+    append_jsonl = capture.append_jsonl
+
+    def spy_append(path: Path, record: Mapping[str, object]) -> None:
+        append_jsonl(path, record)
+        if record.get("kind") == "frame":
+            with frames_cond:
+                frames[path.name] = frames.get(path.name, 0) + 1
+                frames_cond.notify_all()
+
+    monkeypatch.setattr(capture, "append_jsonl", spy_append)
+    api = _FakeApi()
+    cfg = _cfg(fake_server.base_url)
+    client = CapturingClient(
+        cfg.base_url, "stream", tmp_path / "rest.jsonl", WAIT_S, transport=httpx.MockTransport(api.handle)
+    )
+    session = stream._Session(cfg, client, ["a"], tmp_path, threading.Event())
+    session.start(datetime.now(timezone.utc))
+    try:
+        assert api.wait_until(lambda log: len(_posts(log)) == len(INITIAL_POSTS))
+
+        # The resend's first request now hangs until the gate opens again
+        api.gate.clear()
+        fake_server.drop(STREAMS["data"].path)
+        assert api.wait_until(lambda log: len(_posts(log)) == len(INITIAL_POSTS) + 1)
+
+        # The leader has reconnected and records its new heartbeat while the resend is stuck
+        with frames_cond:
+            assert frames_cond.wait_for(lambda: frames.get("sse_a_data.jsonl", 0) == 2, WAIT_S)
+        assert not api.gate.is_set()
+    finally:
+        api.gate.set()
+        session.shutdown()
+        client.close()
 
 
 def test_stuck_recorder_named_at_shutdown(
@@ -572,15 +760,25 @@ def test_stuck_recorder_named_at_shutdown(
     try:
         with (
             caplog.at_level(logging.WARNING, logger="p1rec.stream"),
-            _session(tmp_path, api, _cfg("http://fake"), {"b/order_event": _StuckRecorder}) as recorders,
+            _session(tmp_path, api, _cfg("http://fake"), {"b/order_event": _StuckRecorder}) as run,
         ):
-            _connect_all(recorders)
+            _connect_all(run)
             assert api.wait_until(_initial_sent)
     finally:
         _StuckRecorder.released.set()
 
-    [warning] = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+    [warning] = _messages(caplog, logging.WARNING)
     assert warning.endswith("left behind: b/order_event")
+
+
+def test_other_threads_refused(fake_server: _FakeServer, tmp_path: Path) -> None:
+    until = datetime.now(timezone.utc) + timedelta(seconds=SAFETY_UNTIL_S)
+
+    with pytest.raises(RuntimeError, match="before any other thread"):
+        run_stream(_cfg(fake_server.base_url), ["a", "b"], until, tmp_path)
+
+    assert [method for method, _, _ in fake_server.api.log()] == ["GET"]  # The interlock check only
+    assert list(tmp_path.glob("sse_*.jsonl")) == []
 
 
 def test_render_template_keeps_json_types() -> None:
@@ -661,9 +859,18 @@ def test_stream_section_loads(write_config: WriteConfig) -> None:
         ('"code": "{code}"', '"code": "x{code}"', r"stream\.subscribe_body"),
         ('"code": "{code}"', '"code": "{ticker}"', r"stream\.subscribe_body"),
         ('["subscribe_trade", "@account:S"]', '["no_such_op", "@account:S"]', r"stream\.startup_requests\[0\]"),
-        ('"@account:S"', '"{\\"account_id\\": \\"0000001\\"}"', r"stream\.startup_requests\[0\]"),
         ("[endpoints.stream_subscribe]", "[endpoints.renamed]", r"endpoints\.stream_subscribe"),
         ('quote_types = ["Tick", "BidAsk"]', 'quote_types = ["Tik"]', r"stream\.instrument\[0\]\.quote_types"),
+        # Misspelt keys, at every level of the section
+        ("[[stream.action]]", "[[stream.actions]]", r"unknown config key: stream\.actions"),
+        ("retry_s = 1.0", "retry_s = 1.0\nretries = 3", r"unknown config key: stream\.retries"),
+        ('path = "/api/v1/stream/data"', 'path = "/api/v1/stream/data"\nquery = "x"', r"stream\.streams\.data\.query"),
+        ("intraday_odd = false", "intraday_odd = false\nodd = true", r"stream\.instrument\[0\]\.odd"),
+        ('quote_type = "Tick"', 'quote_type = "Tick"\nwhen = 1', r"stream\.action\[0\]\.when"),
+        # Account identifiers, however deep in a configured body
+        ('"@account:S"', '"{\\"account\\": {\\"account_id\\": \\"0000001\\"}}"', r"stream\.startup_requests\[0\]"),
+        ('"@account:S"', '"[{\\"username\\": \\"tester\\"}]"', r"stream\.startup_requests\[0\].*username"),
+        ('"code": "{code}"', '"code": "{code}", "person_id": "Z100000000"', r"stream\.subscribe_body.*person_id"),
     ],
 )
 def test_stream_section_rejected(write_config: WriteConfig, old: str, new: str, key: str) -> None:
@@ -684,11 +891,15 @@ def test_real_p1_toml_stream_section() -> None:
     assert cfg.actions == ()
 
 
+def _set_secret_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for var in SECRET_ENV_VARS:
+        monkeypatch.setenv(var, "fake-value-0123456789")
+
+
 def test_cli_passes_clients_and_until(
     write_config: WriteConfig, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    for var in SECRET_ENV_VARS:
-        monkeypatch.setenv(var, "fake-value-0123456789")
+    _set_secret_env(monkeypatch)
     calls: list[tuple[list[str], datetime]] = []
 
     def _fake_run_stream(_cfg: P1Config, clients: list[str], until: datetime, _run_dir: Path) -> int:
@@ -704,6 +915,23 @@ def test_cli_passes_clients_and_until(
 
     assert exit_code == 0
     assert calls == [(["a", "b"], datetime(2026, 10, 6, 1, 30, tzinfo=timezone.utc))]
+
+
+def test_cli_interlock_abort_exits_3_without_recorders(
+    fake_server: _FakeServer, write_config: WriteConfig, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _set_secret_env(monkeypatch)
+    fake_server.api = _FakeApi(simulation=False)
+    lines = [*MINIMAL_CONFIG_LINES, *STREAM_CONFIG_LINES]
+    lines = [f'base_url = "{fake_server.base_url}"' if line.startswith("base_url") else line for line in lines]
+    until = (datetime.now(timezone.utc) + timedelta(seconds=SAFETY_UNTIL_S)).isoformat()
+
+    exit_code = cli.main(["stream", "--config", str(write_config(lines)), "--clients", "a,b", "--until", until])
+
+    assert exit_code == EXIT_INTERLOCK_ABORT
+    assert fake_server.api.log() == [("GET", INFO_PATH, None)]
+    [run_dir] = (tmp_path / "results").iterdir()
+    assert list(run_dir.glob("sse_*.jsonl")) == []
 
 
 @pytest.mark.parametrize(
