@@ -495,6 +495,7 @@ git commit -m "Stream quotes to several recorded SSE clients"
 **Behaviour:**
 
 - `p1rec orders [--only <id,...>] [--base-url <url>]` 依 `scenarios.toml` 順序執行；`--base-url` 覆蓋 `base_url`。
+- 期貨案例只在期交所日盤（08:45–13:45，台北時間）執行：合約檔的漲跌停價只對日盤有效，夜盤的漲跌幅以當日一般交易時段結算價為基準（推論自期貨 API 測試，契約文件 §2），在日盤以外遇到期貨案例一律拒絕並記 ERROR，不送任何請求。
 - 每個 `place`、`update_price`、`update_qty`、`cancel`、`close` 呼叫前執行連鎖檢查；中止時以 3 結束，不再送任何請求。
 - `account` 欄位帶 `accounts` 回傳的完整帳戶物件：股票與零股用 `S`、期貨用 `F`（只帶帳號時 `account_type` 預設為 `S`，契約文件 §2）。
 - 請求本體由 `body_templates` 代入 `{code}`、`{action}`、`{price}`、`{quantity}`、`{price_type}`、`{order_type}`、`{custom_field}`、`{trade_id}`；股票與零股用 `place_stock`，期貨用 `place_futures`。
