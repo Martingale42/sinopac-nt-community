@@ -6,8 +6,9 @@ scrub refuses to run unless git ignores results_root. The full pipeline
 then runs as a live day would: self-test-interlock, preflight, stream in
 the background, orders, stream's scheduled unsubscribe, every SSE
 connection dropped and refused for a while, history, stream stopped,
-reconcile, stats, a scrub export of two fixtures and a scan. Every subcommand runs as a subprocess of the p1rec
-console script with made-up secrets in its environment, except orders.
+reconcile, stats, a scrub export of two fixtures and a scan. Every
+subcommand runs as a subprocess of the p1rec console script with made-up
+secrets in its environment, except orders.
 
 orders runs in this process through p1rec.cli.main instead, with the
 clock that run_orders takes injected the way tests/test_orders.py injects
@@ -137,9 +138,10 @@ _STREAM_SAFETY_S = 120.0
 _STREAM_DOWN_S = 1.5
 
 # When the rehearsal config's scheduled action falls after stream is
-# launched, late enough that stream has started, since an action already
-# due at startup is skipped, and soon enough to keep the rehearsal short.
-_ACTION_AFTER_S = 2.0
+# launched, late enough that stream has started even on a loaded host,
+# since an action already due at startup is skipped, and soon enough to
+# keep the rehearsal short.
+_ACTION_AFTER_S = 4.0
 
 # How each rehearsal case ends against the stub (tests/data/scenarios.toml)
 _EXPECTED_OUTCOMES = {
