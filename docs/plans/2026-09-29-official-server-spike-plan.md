@@ -194,7 +194,7 @@ git commit -m "Add p1rec recorder skeleton with config and redacting logs"
 
 - 每個 REST 請求在 `rest.jsonl` 寫一行：`client`、`op`、`method`、`url`、`req_body`、`sent_ts_ns`、`recv_ts_ns`、`status`、`resp_headers`，以及 `resp_body`（UTF-8）或 `resp_body_b64`（無法解碼時）。錯誤狀態碼照記並回傳，不拋例外；連線錯誤記一行 `error` 後拋出。
 - SSE 以收到的位元組切分 frame（`\n\n` 與 `\r\n\r\n` 皆可），每個完整 frame 寫一行 `kind="frame"`，含 `raw` 與 `recv_ts_ns`；註解 frame 同樣記錄。
-- 連上寫 `kind="connected"`（含狀態碼），斷線寫 `kind="disconnected"`（含錯誤），隔 `retry_s` 重連；最後一個 frame 有 `id` 時重連帶 `Last-Event-ID`（官方 1.7.6 的 frame 不帶 `id:`，此路徑只在量到 `id` 時生效）；停止時寫 `kind="stopped"`。每次連上後呼叫 `on_connected`。
+- 連上寫 `kind="connected"`（含狀態碼），斷線寫 `kind="disconnected"`（含錯誤），隔 `retry_s` 重連；曾收到非空 `id` 時，重連帶最近一次的 `id` 作為 `Last-Event-ID`（依 SSE 規範，沒有 `id` 的 frame 不會清掉它）（官方 1.7.6 的 frame 不帶 `id:`，此路徑只在量到 `id` 時生效）；停止時寫 `kind="stopped"`。每次連上後呼叫 `on_connected`。
 - `parse_frame` 只供分析，不改動已寫入的 `raw`。
 
 **Interface:**
@@ -427,7 +427,7 @@ git commit -m "Add scenario model, price references and funds preflight"
 - 訂閱是 server 全域（契約文件 §1）：所有 recorder 首次連上後，依序送出 `startup_requests`（例如每個帳戶的 `subscribe_trade`），再對 `instruments` 的每個商品與報價類型送出一次訂閱（本體由 `subscribe_body` 代入 `{code}`、`{exchange}`、`{security_type}`、`{quote_type}`、`{intraday_odd}`）。
 - 之後只有「主 recorder」（第一個 client 的第一條串流）重連時，才重送 `startup_requests` 與目前有效的全部訂閱，並記一次 INFO；其他 recorder 重連不重送。訂閱失敗記 ERROR 並繼續其餘訂閱。
 - `[[stream.action]]` 在指定時間送出 `subscribe` 或 `unsubscribe` 並更新有效訂閱集合；啟動時已過期的動作記 WARN 並跳過。
-- 到 `--until` 或收到 SIGINT／SIGTERM 時，所有 client 寫出 `stopped` 後以 0 結束。
+- 到 `--until` 或收到 SIGINT／SIGTERM 時，所有 client 寫出 `stopped` 後以 0 結束。對每個 recorder 的 join 最多等 `http_timeout_s`；逾時仍未結束的 recorder（例如卡在等待 response header）記 WARN 並列出名稱，結束碼仍為 0。
 
 **Interface:**
 
@@ -810,8 +810,8 @@ git commit -m "Rehearse the full recorder pipeline against a stub server"
 Run: `jq '.funds_ok, .connections' results/p1/<當日 preflight run>/preflight.json`
 Expected: `true`，連線數不超過 5。
 
-Run: `grep -c '"kind": "frame"' results/p1/<stream run>/sse_a.jsonl results/p1/<stream run>/sse_b.jsonl`
-Expected: 兩者皆大於 0，且 15:00 後重跑時數字仍在增加。
+Run: `for f in results/p1/<stream run>/sse_*_*.jsonl; do printf '%s ' "$f"; jq -c 'select(.kind=="frame")' "$f" | wc -l; done`
+Expected: 每個 client 的行情串流檔皆大於 0，且 15:00 後重跑時數字仍在增加。
 
 **Commit:**
 
@@ -846,7 +846,7 @@ git commit -m "Calibrate recorder settings from the first live session"
 Run: `jq '(.only_in_rest | length), (.only_in_sse | length), (.mismatched | length)' results/p1/<當日 reconcile run>/reconcile.json`
 Expected: 產出三個數字並抄入契約文件；GO 準則 4、5 依此判定，不要求為 0。
 
-Run: `grep -c '"op": "place_stock"' results/p1/*-orders-harness/rest.jsonl`
+Run: `jq -c 'select(.op=="place_stock")' results/p1/*-orders-harness/rest.jsonl | wc -l`
 Expected: `1`。
 
 **Commit:**
