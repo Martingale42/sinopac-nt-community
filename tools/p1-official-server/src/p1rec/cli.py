@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import NoReturn
 
 from p1rec.config import ConfigError, P1Config, load_config, read_secrets
+from p1rec.history import run_history
 from p1rec.interlock import EXIT_INTERLOCK_ABORT, InterlockError, self_test
 from p1rec.redact import redaction_values, setup_logging
 from p1rec.rundir import new_run
@@ -76,6 +77,10 @@ def _self_test_interlock(_args: argparse.Namespace, cfg: P1Config, _run_dir: Pat
     return self_test(cfg.interlock)
 
 
+def _history(_args: argparse.Namespace, cfg: P1Config, run_dir: Path) -> int:
+    return run_history(cfg, run_dir)
+
+
 @dataclass(frozen=True)
 class Subcommand:
     add_arguments: ArgumentHook
@@ -97,7 +102,7 @@ _SUBCOMMANDS: dict[str, Subcommand] = {
     "orders": Subcommand(add_arguments=_add_scenarios_argument, handler=_not_implemented),
     "reconcile": Subcommand(add_arguments=_no_extra_arguments, handler=_not_implemented),
     "stats": Subcommand(add_arguments=_no_extra_arguments, handler=_not_implemented),
-    "history": Subcommand(add_arguments=_no_extra_arguments, handler=_not_implemented),
+    "history": Subcommand(add_arguments=_no_extra_arguments, handler=_history),
     "scrub": Subcommand(add_arguments=_no_extra_arguments, handler=_not_implemented),
 }
 

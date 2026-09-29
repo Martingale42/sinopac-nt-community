@@ -10,13 +10,14 @@ touching load_config itself.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from p1rec.jsonpointer import is_valid_pointer_syntax
 
@@ -63,8 +64,18 @@ class EventFields:
 
 
 @dataclass(frozen=True)
+class HistoryQuery:
+    op: Literal["ticks", "kbars", "snapshots"]
+
+    # Parsed and re-serialized by httpx when sent, so rest.jsonl records
+    # what actually went on the wire, not this string byte-for-byte.
+    body: str
+
+
+@dataclass(frozen=True)
 class HistoryConfig:
-    """Placeholder, filled in once history-query fields are defined."""
+    queries: tuple[HistoryQuery, ...]
+    usage_bytes_pointer: str  # JSON pointer into UsageOut, e.g. "/bytes"
 
 
 @dataclass(frozen=True)
@@ -274,6 +285,16 @@ def _optional_table(data: Mapping[str, Any], key: str) -> Mapping[str, Any]:
     return value
 
 
+def _require_endpoint_method(known_endpoints: Mapping[str, Any], op: str, method: str, key: str) -> None:
+    """Raise ConfigError, naming key, unless known_endpoints[op] exists with the given HTTP method."""
+    if op not in known_endpoints:
+        raise ConfigError(f"config key {key} names unknown endpoint: {op!r}")
+    endpoint_table = known_endpoints[op]
+    endpoint_method = endpoint_table.get("method") if isinstance(endpoint_table, Mapping) else None
+    if endpoint_method != method:
+        raise ConfigError(f"config key {key} must name a {method} endpoint, but {op!r} is {endpoint_method!r}")
+
+
 _DEFAULT_INTERLOCK_ENDPOINT_OP = "mode"
 
 
@@ -286,18 +307,13 @@ def _parse_interlock(data: Mapping[str, Any], config_dir: Path) -> InterlockConf
     pointer = _get_pointer(data, "interlock.pointer")
 
     known_endpoints = _lookup(data, "endpoints")
-    if not isinstance(known_endpoints, Mapping) or endpoint_op not in known_endpoints:
+    if not isinstance(known_endpoints, Mapping):
         raise ConfigError(f"config key interlock.endpoint_op names unknown endpoint: {endpoint_op!r}")
 
     # A POST that reports simulation mode as a side effect would still be
     # a mutation the interlock must not itself trigger, so only a GET may
     # back the check.
-    endpoint_table = known_endpoints[endpoint_op]
-    endpoint_method = endpoint_table.get("method") if isinstance(endpoint_table, Mapping) else None
-    if endpoint_method != "GET":
-        raise ConfigError(
-            f"config key interlock.endpoint_op must name a GET endpoint, but {endpoint_op!r} is {endpoint_method!r}"
-        )
+    _require_endpoint_method(known_endpoints, endpoint_op, "GET", "interlock.endpoint_op")
 
     return InterlockConfig(endpoint_op=endpoint_op, pointer=pointer)
 
@@ -327,9 +343,59 @@ def _parse_events(data: Mapping[str, Any], config_dir: Path) -> EventFields:
     return EventFields()
 
 
+_HISTORY_OPS = ("ticks", "kbars", "snapshots")
+
+
 def _parse_history(data: Mapping[str, Any], config_dir: Path) -> HistoryConfig:
-    _optional_table(data, "history")
-    return HistoryConfig()
+    # usage_bytes_pointer is looked up through _lookup (via _get_pointer)
+    # rather than read from the table below, so a p1.toml missing the
+    # whole [history] section fails here with that dotted key, the same
+    # way a missing [interlock] section does.
+    usage_bytes_pointer = _get_pointer(data, "history.usage_bytes_pointer")
+
+    known_endpoints = _lookup(data, "endpoints")
+    if not isinstance(known_endpoints, Mapping):
+        raise ConfigError("config key endpoints must be a table")
+
+    # run_history always reads usage itself, not through a configurable
+    # op name, so this checks the fixed "usage" entry directly rather
+    # than a dotted key someone could point elsewhere.
+    _require_endpoint_method(known_endpoints, "usage", "GET", "endpoints.usage")
+
+    table = _optional_table(data, "history")
+    raw_queries = table.get("query", [])
+    if not isinstance(raw_queries, list):
+        raise ConfigError("config key history.query must be an array of tables")
+    if not raw_queries:
+        raise ConfigError("config key history.query must not be empty")
+
+    queries = tuple(
+        _parse_history_query(item, index, known_endpoints) for index, item in enumerate(raw_queries)
+    )
+    return HistoryConfig(queries=queries, usage_bytes_pointer=usage_bytes_pointer)
+
+
+def _parse_history_query(item: Any, index: int, known_endpoints: Mapping[str, Any]) -> HistoryQuery:
+    key = f"history.query[{index}]"
+    if not isinstance(item, Mapping):
+        raise ConfigError(f"config key {key} must be a table")
+
+    op = item.get("op")
+    if op not in _HISTORY_OPS:
+        raise ConfigError(f"config key {key}.op must be one of {_HISTORY_OPS}, got {op!r}")
+    _require_endpoint_method(known_endpoints, op, "POST", f"{key}.op")
+
+    body = item.get("body")
+    if not isinstance(body, str):
+        raise ConfigError(f"config key {key}.body must be a string, got {type(body).__name__}")
+    try:
+        parsed_body = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise ConfigError(f"config key {key}.body is not valid JSON: {exc}") from exc
+    if not isinstance(parsed_body, dict):
+        raise ConfigError(f"config key {key}.body must be a JSON object")
+
+    return HistoryQuery(op=op, body=body)
 
 
 def _parse_scrub(data: Mapping[str, Any], config_dir: Path) -> ScrubConfig:

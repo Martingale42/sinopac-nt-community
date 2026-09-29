@@ -48,7 +48,7 @@ def _build_cfg(tmp_path: Path) -> P1Config:
         stream=StreamConfig(),
         orders=OrdersConfig(),
         events=EventFields(),
-        history=HistoryConfig(),
+        history=HistoryConfig(queries=(), usage_bytes_pointer="/bytes"),
         scrub=ScrubConfig(),
     )
 

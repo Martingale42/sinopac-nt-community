@@ -123,3 +123,33 @@ path = "/api/v1/agent/harness"
 [interlock]
 endpoint_op = "mode"
 pointer = "/simulation"
+
+# History queries for `p1rec history` (docs/official-server-contract.md
+# section 1): ticks, kbars and snapshots take their request in a JSON
+# body, not query parameters, usage_bytes_pointer names UsageOut's
+# cumulative byte counter read before and after each query below, and
+# KBarsRequest's start/end are dates only (`shioaji data kbars --help`:
+# kbars are stored per day), not a time-of-day range.
+#
+# calibrate: Task 12 sets every date/start/end to the actual previous
+# trading day, the futures codes to that day's near-month contracts, and
+# adds the near-month at-the-money TXO call/put codes to the snapshots
+# query below, before running `p1rec history` live.
+[history]
+usage_bytes_pointer = "/bytes"
+
+[[history.query]]
+op = "ticks"
+body = '{"contract": {"security_type": "STK", "exchange": "TSE", "code": "2330"}, "date": "2026-09-29", "query_type": "AllDay"}'
+
+[[history.query]]
+op = "kbars"
+body = '{"contract": {"security_type": "STK", "exchange": "TSE", "code": "2330"}, "start": "2026-09-29", "end": "2026-09-29"}'
+
+[[history.query]]
+op = "kbars"
+body = '{"contract": {"security_type": "FUT", "exchange": "TAIFEX", "code": "TMFJ6"}, "start": "2026-09-29", "end": "2026-09-29"}'
+
+[[history.query]]
+op = "snapshots"
+body = '{"contracts": [{"security_type": "STK", "exchange": "TSE", "code": "2330"}, {"security_type": "STK", "exchange": "TSE", "code": "0050"}, {"security_type": "STK", "exchange": "TSE", "code": "2890"}, {"security_type": "STK", "exchange": "TSE", "code": "00981A"}, {"security_type": "STK", "exchange": "TSE", "code": "00631L"}, {"security_type": "FUT", "exchange": "TAIFEX", "code": "TXFJ6"}, {"security_type": "FUT", "exchange": "TAIFEX", "code": "MXFJ6"}, {"security_type": "FUT", "exchange": "TAIFEX", "code": "TMFJ6"}]}'

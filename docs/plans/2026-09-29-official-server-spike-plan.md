@@ -673,7 +673,7 @@ class HistoryConfig:
 def run_history(cfg: P1Config, run_dir: Path) -> int: ...
 ```
 
-`p1.toml` 的查詢：2330 前一交易日 ticks；2330 前一交易日 09:00–13:30 kbars；TMF 前一交易日 kbars；錄製商品全部的 snapshots。
+`p1.toml` 的查詢：2330 前一交易日 ticks；2330 前一交易日 kbars（KBarsRequest 只收日期）；TMF 前一交易日 kbars；錄製商品全部的 snapshots。
 
 **Tests:**
 

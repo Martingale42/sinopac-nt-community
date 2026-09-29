@@ -155,7 +155,7 @@ def _self_test_cfg(interlock: InterlockConfig) -> P1Config:
         stream=StreamConfig(),
         orders=OrdersConfig(),
         events=EventFields(),
-        history=HistoryConfig(),
+        history=HistoryConfig(queries=(), usage_bytes_pointer="/bytes"),
         scrub=ScrubConfig(),
     )
 
