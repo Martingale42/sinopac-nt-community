@@ -128,10 +128,13 @@ pointer = "/simulation"
 # section 1): ticks, kbars and snapshots take their request in a JSON
 # body, not query parameters; usage_bytes_pointer names UsageOut's
 # cumulative byte counter, read before and after each query below.
+# KBarsRequest's start/end are dates only (`shioaji data kbars --help`:
+# kbars are stored per day), not a time-of-day range.
 #
 # calibrate: Task 12 sets every date/start/end to the actual previous
-# trading day and the futures codes to that day's near-month contracts
-# before running `p1rec history` live.
+# trading day, the futures codes to that day's near-month contracts, and
+# adds the near-month at-the-money TXO call/put codes to the snapshots
+# query below, before running `p1rec history` live.
 [history]
 usage_bytes_pointer = "/bytes"
 
@@ -141,7 +144,7 @@ body = '{"contract": {"security_type": "STK", "exchange": "TSE", "code": "2330"}
 
 [[history.query]]
 op = "kbars"
-body = '{"contract": {"security_type": "STK", "exchange": "TSE", "code": "2330"}, "start": "2026-09-29 09:00:00", "end": "2026-09-29 13:30:00"}'
+body = '{"contract": {"security_type": "STK", "exchange": "TSE", "code": "2330"}, "start": "2026-09-29", "end": "2026-09-29"}'
 
 [[history.query]]
 op = "kbars"

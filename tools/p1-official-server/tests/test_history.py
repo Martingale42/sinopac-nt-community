@@ -6,6 +6,7 @@ import json
 import logging
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import TypedDict, cast
 
 import httpx
 import pytest
@@ -99,8 +100,24 @@ def _queue_handler(
     return handler
 
 
-def _history_json(run_dir: Path) -> dict[str, object]:
-    return json.loads((run_dir / "history.json").read_text(encoding="utf-8"))
+class _QueryEntry(TypedDict):
+    op: str
+    body: str
+    status: int | None
+    response_bytes: int | None
+    usage_before: int | None
+    usage_after: int | None
+    usage_delta: int | None
+
+
+class _HistoryJson(TypedDict):
+    queries: list[_QueryEntry]
+    failed_count: int
+
+
+def _history_json(run_dir: Path) -> _HistoryJson:
+    raw = json.loads((run_dir / "history.json").read_text(encoding="utf-8"))
+    return cast(_HistoryJson, raw)
 
 
 def test_usage_delta_recorded(tmp_path: Path) -> None:
@@ -144,7 +161,7 @@ def test_missing_usage_field_null_and_warn(tmp_path: Path, caplog: pytest.LogCap
     assert any(record.levelno == logging.WARNING for record in caplog.records)
 
 
-def test_failed_query_continues_exit_2(tmp_path: Path) -> None:
+def test_failed_query_continues_exit_2(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     cfg = _build_cfg(tmp_path, (_TICKS_QUERY, _KBARS_QUERY))
     run_dir = tmp_path / "run"
     run_dir.mkdir()
@@ -158,9 +175,14 @@ def test_failed_query_continues_exit_2(tmp_path: Path) -> None:
         },
     )
 
-    exit_code = run_history(cfg, run_dir, transport=httpx.MockTransport(handler))
+    with caplog.at_level(logging.ERROR, logger="p1rec.history"):
+        exit_code = run_history(cfg, run_dir, transport=httpx.MockTransport(handler))
 
-    assert exit_code == EXIT_HISTORY_QUERY_FAILED
+    # A caller reading this exit code (a shell script, say) sees the
+    # literal 2, not the name EXIT_HISTORY_QUERY_FAILED, so the constant
+    # must actually equal it rather than only itself.
+    assert exit_code == 2 == EXIT_HISTORY_QUERY_FAILED
+    assert any(record.levelno == logging.ERROR for record in caplog.records)
     queries = _history_json(run_dir)["queries"]
     assert len(queries) == 2  # the second query still ran after the first failed
     assert queries[0]["op"] == "ticks"

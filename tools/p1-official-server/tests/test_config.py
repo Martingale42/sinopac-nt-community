@@ -44,6 +44,8 @@ def test_load_config_success(tmp_path: Path, write_config: WriteConfig) -> None:
     assert cfg.endpoints == {
         "mode": Endpoint(method="GET", path="/api/v1/info"),
         "place_stock": Endpoint(method="POST", path="/api/v1/order/place_order"),
+        "usage": Endpoint(method="GET", path="/api/v1/auth/usage"),
+        "ticks": Endpoint(method="POST", path="/api/v1/data/ticks"),
     }
     assert cfg.interlock == InterlockConfig(endpoint_op="mode", pointer="/simulation")
     # These remaining placeholder types only need to construct and load here
@@ -258,6 +260,34 @@ def test_history_usage_bytes_pointer_required(write_config: WriteConfig) -> None
     config_path = write_config(lines)
 
     with pytest.raises(ConfigError, match=r"history\.usage_bytes_pointer"):
+        load_config(config_path)
+
+
+def test_history_query_op_must_name_known_endpoint(write_config: WriteConfig) -> None:
+    # "kbars" is a valid op, but MINIMAL_CONFIG_LINES defines no
+    # [endpoints.kbars], so the query cannot be sent.
+    lines = ['op = "kbars"' if line == 'op = "ticks"' else line for line in MINIMAL_CONFIG_LINES]
+    config_path = write_config(lines)
+
+    with pytest.raises(ConfigError, match=r"history\.query\[0\]\.op"):
+        load_config(config_path)
+
+
+def test_history_query_op_must_be_post(write_config: WriteConfig) -> None:
+    lines = list(MINIMAL_CONFIG_LINES)
+    lines[lines.index("[endpoints.ticks]") + 1] = 'method = "GET"'
+    config_path = write_config(lines)
+
+    with pytest.raises(ConfigError, match=r"history\.query\[0\]\.op"):
+        load_config(config_path)
+
+
+def test_history_usage_endpoint_must_be_get(write_config: WriteConfig) -> None:
+    lines = list(MINIMAL_CONFIG_LINES)
+    lines[lines.index("[endpoints.usage]") + 1] = 'method = "POST"'
+    config_path = write_config(lines)
+
+    with pytest.raises(ConfigError, match=r"endpoints\.usage"):
         load_config(config_path)
 
 

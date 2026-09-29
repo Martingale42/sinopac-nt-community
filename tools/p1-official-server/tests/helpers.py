@@ -37,6 +37,16 @@ MINIMAL_CONFIG_LINES = [
     'method = "POST"',
     'path = "/api/v1/order/place_order"',
     "",
+    # usage and ticks back the [history] section below: _parse_history
+    # requires both, the same way [interlock] requires "mode" above.
+    "[endpoints.usage]",
+    'method = "GET"',
+    'path = "/api/v1/auth/usage"',
+    "",
+    "[endpoints.ticks]",
+    'method = "POST"',
+    'path = "/api/v1/data/ticks"',
+    "",
     "[interlock]",
     'endpoint_op = "mode"',
     'pointer = "/simulation"',

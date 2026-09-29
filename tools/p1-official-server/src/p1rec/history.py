@@ -23,9 +23,9 @@ from p1rec.jsonpointer import JsonPointerError, resolve_pointer
 
 logger = logging.getLogger(__name__)
 
-# cli.py's mapping from run_history's return value to the process exit
-# code, shared with every other subcommand that reports "checked, and at
-# least one check failed" the same way.
+# This module's own exit code for "checked, and at least one query
+# failed", the same value every other subcommand that reports that
+# outcome uses; cli.py returns it as-is, without any further mapping.
 EXIT_HISTORY_QUERY_FAILED = 2
 
 

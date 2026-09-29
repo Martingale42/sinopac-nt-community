@@ -66,7 +66,10 @@ class EventFields:
 @dataclass(frozen=True)
 class HistoryQuery:
     op: Literal["ticks", "kbars", "snapshots"]
-    body: str  # JSON object text, sent verbatim as the request body
+
+    # Parsed and re-serialized by httpx when sent, so rest.jsonl records
+    # what actually went on the wire, not this string byte-for-byte.
+    body: str
 
 
 @dataclass(frozen=True)
@@ -345,16 +348,26 @@ def _parse_history(data: Mapping[str, Any], config_dir: Path) -> HistoryConfig:
     # way a missing [interlock] section does.
     usage_bytes_pointer = _get_pointer(data, "history.usage_bytes_pointer")
 
+    known_endpoints = _lookup(data, "endpoints")
+    if not isinstance(known_endpoints, Mapping):
+        raise ConfigError("config key endpoints must be a table")
+    # run_history always reads usage itself, not through a configurable
+    # op name, so this checks the fixed "usage" entry directly rather
+    # than a dotted key someone could point elsewhere.
+    _require_endpoint_method(known_endpoints, "usage", "GET", "endpoints.usage")
+
     table = _optional_table(data, "history")
     raw_queries = table.get("query", [])
     if not isinstance(raw_queries, list):
         raise ConfigError("config key history.query must be an array of tables")
 
-    queries = tuple(_parse_history_query(item, index) for index, item in enumerate(raw_queries))
+    queries = tuple(
+        _parse_history_query(item, index, known_endpoints) for index, item in enumerate(raw_queries)
+    )
     return HistoryConfig(queries=queries, usage_bytes_pointer=usage_bytes_pointer)
 
 
-def _parse_history_query(item: Any, index: int) -> HistoryQuery:
+def _parse_history_query(item: Any, index: int, known_endpoints: Mapping[str, Any]) -> HistoryQuery:
     key = f"history.query[{index}]"
     if not isinstance(item, Mapping):
         raise ConfigError(f"config key {key} must be a table")
@@ -362,6 +375,7 @@ def _parse_history_query(item: Any, index: int) -> HistoryQuery:
     op = item.get("op")
     if op not in _HISTORY_OPS:
         raise ConfigError(f"config key {key}.op must be one of {_HISTORY_OPS}, got {op!r}")
+    _require_endpoint_method(known_endpoints, op, "POST", f"{key}.op")
 
     body = item.get("body")
     if not isinstance(body, str):
@@ -374,6 +388,16 @@ def _parse_history_query(item: Any, index: int) -> HistoryQuery:
         raise ConfigError(f"config key {key}.body must be a JSON object")
 
     return HistoryQuery(op=op, body=body)
+
+
+def _require_endpoint_method(known_endpoints: Mapping[str, Any], op: str, method: str, key: str) -> None:
+    """Raise ConfigError, naming key, unless known_endpoints[op] exists with the given HTTP method."""
+    if op not in known_endpoints:
+        raise ConfigError(f"config key {key} names unknown endpoint: {op!r}")
+    endpoint_table = known_endpoints[op]
+    endpoint_method = endpoint_table.get("method") if isinstance(endpoint_table, Mapping) else None
+    if endpoint_method != method:
+        raise ConfigError(f"config key {key} must name a {method} endpoint, but {op!r} is {endpoint_method!r}")
 
 
 def _parse_scrub(data: Mapping[str, Any], config_dir: Path) -> ScrubConfig:
