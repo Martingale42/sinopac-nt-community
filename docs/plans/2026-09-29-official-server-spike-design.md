@@ -78,7 +78,7 @@ P1 是 spike，只回答一個問題：**NT adapter 能不能直接接官方 ser
 
 1. 第 0 步先查模擬帳戶的股票餘額與期貨保證金，結果存為 fixture。
 2. 錄製器依劇本算出最壞情況資金需求；不足就不下任何單，記 ERROR 後停下，由使用者取得資金。`calibrate:` 各商品保證金以第 0 步實查為準。
-3. 委託生命週期一律用不會成交的遠價限價單錄製；真正成交的只有最便宜的一張股票與一口 TMF，並於當日平倉。
+3. 委託生命週期一律用不會成交的遠價限價單錄製。會成交的委託只下在兩檔商品上：最便宜的一張股票與一口 TMF；市價類組合都在這兩檔上逐筆來回，開倉後立即平倉，同一時間最多持有一個部位，資金需求因此以單一部位計。
 4. 刻意送一張超過餘額的委託，錄下資金不足的拒單 payload。
 
 **時段**：證交所 09:00–13:30（試撮 08:30–09:00），期交所日盤 08:45–13:45、夜盤 15:00–次日 05:00。下單劇本排在對應時段內。
@@ -87,7 +87,7 @@ P1 是 spike，只回答一個問題：**NT adapter 能不能直接接官方 ser
 
 方案：黑箱錄製器（捨棄的方案見 §11）。
 
-- **位置**：`tools/p1-official-server/record.py`（單檔，PEP 723 inline metadata 宣告相依，`requires-python >= 3.12`）與 `tools/p1-official-server/p1.toml`；以 `uv run` 執行，不動 adapter 的 maturin `pyproject.toml`。
+- **位置**：`tools/p1-official-server/`，自帶獨立的 `pyproject.toml`（套件 `p1rec`，`requires-python >= 3.12`）與 `p1.toml`、`scenarios.toml`；以 `uv run --project tools/p1-official-server p1rec <子命令>` 執行，不動 adapter 的 maturin `pyproject.toml`。
 - **子命令**：
 
   | 子命令 | 作用 |
@@ -95,8 +95,10 @@ P1 是 spike，只回答一個問題：**NT adapter 能不能直接接官方 ser
   | `self-test-interlock` | 餵入偽造的 Production 回應，確認錄製器中止 |
   | `preflight` | 第 0 步：模式檢查、資金盤點、額度檢查、連線數 |
   | `stream` | 開 N 個 SSE client，原樣錄下每個 frame |
-  | `orders` | 依 `p1.toml` 的劇本下模擬單，錄 REST 請求與回應 |
+  | `orders` | 依 `scenarios.toml` 的劇本下模擬單，錄 REST 請求與回應 |
   | `reconcile` | 官方 server 重啟後以 REST 拉當日委託與成交，對照 SSE 紀錄 |
+  | `stats` | 串流統計：事件數、每秒尖峰、心跳間隔、斷線缺口、延遲分位數 |
+  | `history` | 歷史 ticks／kbars／snapshots 查詢，前後以 usage 量額度消耗 |
   | `scrub` | 去識別化並掃描要 commit 的檔案 |
 
 - **輸出**：`results/p1/<run_id>/` 下的 `sse_<client>.jsonl`、`rest.jsonl`、`server.log`、`recorder.log`。每行 JSONL 含收到時間（奈秒）、client 名稱、種類與原始內容；原始位元組不經解析改寫。`results/` 加入 `.gitignore`。
@@ -159,7 +161,7 @@ P1 是 spike，只回答一個問題：**NT adapter 能不能直接接官方 ser
 1. `docs/official-server-contract.md`：差距表與 §6 各項答案及證據。
 2. `test_data/official/1.7.6/`：`openapi.json`、挑選過的 fixture（`<組別>_<情境>.{json,sse}`）、`MANIFEST.toml`（每筆記來源 run_id、錄製時間、商品、對應清單項目）。
 3. `results/p1/<run_id>/`（不進版控）：原始錄製、server log、錄製器 log。
-4. `tools/p1-official-server/`：`record.py` 與 `p1.toml`。
+4. `tools/p1-official-server/`：錄製器套件 `p1rec`、`p1.toml` 與 `scenarios.toml`。
 5. go/no-go 結論寫入 `ROADMAP.md` 與契約文件；`custom_field` 編碼以新 ADR 定案。
 
 **去識別化**：repo 是公開的。帳號、身分證字號、CA 憑證內容、clientname 內的 API key 前綴以確定性替換（同值同佔位字串，保留 ID 之間的對應）；替換對照表只存在 `results/`。`scrub` 掃描所有待 commit 檔案，任何原始值出現即失敗。
