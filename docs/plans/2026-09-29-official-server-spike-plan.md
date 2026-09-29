@@ -798,6 +798,7 @@ git commit -m "Rehearse the full recorder pipeline against a stub server"
 - 前一個交易日：依當日合約清單校準 `p1.toml` 的近月期貨代號（TXFJ6、MXFJ6、TMFJ6 於 2026-10-21 到期，soak 跨過該日就改用下一個月份）與近月價平 TXO 買權、賣權各一檔，同步更新 `[stream]` 商品、`[history]` 的 snapshots 查詢與 `scenarios.toml`。
 - 07:30 前：校時狀態（`timedatectl` 與 `chronyc tracking` 或等效指令）存入 `results/p1/<日期>-ntp.txt`；填入 `futures_margin_twd`；啟動官方 server 並依 Task 1 記下的方式把 log 導向 `results/p1/<日期>-server/server.log`（放在自己的 run 目錄內，Task 15 才能以 `fixtures.toml` 挑選）；`p1rec self-test-interlock` 回 0；`p1rec preflight` 回 0，回 2 即停止並交由使用者取得模擬資金。
 - 08:00 前：`p1rec stream --clients a,b --until <下週二 09:30 +08:00>` 於 tmux 啟動，即為 soak 起點；預先排入週五 10:30 取消 2330 tick 訂閱的動作（§6 D2：訂閱為全域，看兩個 client 是否同時停止收到 2330）。
+- 08:30 後（每日維護之後、下單之前）：再跑一次 `p1rec preflight`，以當日更新後的漲跌停價確認資金；回 2 即停止。
 - 09:00 後：`p1rec orders --only <第一個生命週期案例>`，量出延遲後填入 `step_wait_s`、`fill_poll_s`、`fill_timeout_s`，再以 `p1rec orders` 跑其餘案例；從第一批真實事件填入 `EventFields`。同時確認四件事：IOC／FOK 未成交時交易所自動刪單的事件形狀（是否以 Cancel 事件送出）、部分成交後刪單時 REST 的狀態字串、成交事件的 `deal_key` 與 `deal_qty`、改量後刪單時 `cancel_quantity` 是累計值還是單次值；與 `derive_status` 的規則不符時先修正，再進 Task 13。
 - 13:45 後：`p1rec reconcile --sse-run <stream run_id>` 對當日委託對帳。
 - 收盤後：以 `p1rec scrub --scan-only` 的 log 確認每個類別的原始值長度都不低於 `MIN_SUBSTRING_MATCH_LEN`（log 只列類別與數量），有低於門檻的類別就先檢查對應的 JSON 指標再調整。
