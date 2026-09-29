@@ -28,7 +28,7 @@ P1 spike 的產出文件（設計：`docs/plans/2026-09-29-official-server-spike
 | `balance` | POST | `/api/v1/portfolio/account_balance` | `AccountRequest` | `AccountBalance` | |
 | `margin` | POST | `/api/v1/portfolio/margin` | `AccountRequest` | `Margin` | |
 | `usage` | GET | `/api/v1/auth/usage` | — | `UsageOut` | `connections`、`bytes`、`limit_bytes`、`remaining_bytes` |
-| `ca_status` | GET | `/api/v1/auth/ca_expiretime` | — | `CaExpireResponse` | 含 `person_id`，需去識別化 |
+| `ca_status` | GET | `/api/v1/auth/ca_expiretime` | query `person_id`（必填） | `CaExpireResponse` | 請求 URL 與回應都含 `person_id`，需去識別化 |
 | `harness_info` | GET | `/api/v1/agent/harness` | — | `AgentHarnessInfo` | `info` 與 `health` 也帶同樣欄位 |
 
 規格中另有而 adapter 可能用到的：`/api/v1/order/order_deal_records`、`/api/v1/order/trade_cache_health`、`/api/v1/stream/status`、`/api/v1/data/contracts/tick-bands/{rule}`、`/api/v1/stream/data/contract_event`。
