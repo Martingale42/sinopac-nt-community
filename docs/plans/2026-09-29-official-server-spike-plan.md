@@ -569,9 +569,9 @@ git commit -m "Stream quotes to several recorded SSE clients"
 - `expect_fill` 案例：每 `fill_poll_s` 查 `trades`（`AccountRequest` + `refresh: true`）直到該委託成交、無成交地結束或超過 `fill_timeout_s`。交易所拒單時下單回應仍為 200，`Failed` 只出現在之後的 `trades`（契約文件 §2）；`Failed` 的成交量為 null 或 0 時視為無成交，`Cancelled` 只有成交量為 0 時才視為無成交，null 視為可能已成交。成交後送出反向、以跌停（平多）或漲停（平空）價構成的可成交 LMT ROD 單 `close`，同樣等到成交。逾時、部分或可能成交後結束、平倉被拒或未成交時記 CRITICAL（含案例 id 與「possible residual position, check manually」），不送其他平倉單，之後的 `expect_fill` 案例一律略過，以 2 結束。
 - 異動請求回 5xx（或 4xx 以外的任何非 2xx）或拿不到回應（連線中斷、逾時）時，server 可能已處理該請求：記 CRITICAL（含案例 id 與「possible residual position, check manually」），停止整個劇本，以 1 結束。同步拒單只以 4xx 回應（契約文件 §2）。
 - 已送出委託後被其他例外中斷（例如等待成交時的 KeyboardInterrupt）時，記 CRITICAL、在 `orders.json` 寫入該案例的 `trade_id` 與 `interrupted`，再把例外往上拋。解析回應本體時的任何例外（例如過深巢狀引發的 RecursionError）都當成無法解析，不中斷劇本。
-- 每則關於可能殘留部位或掛單的 CRITICAL／ERROR 都寫出該案例的 `trade_id` 與 `close_trade_id`，以及處置方式（「check trades for <id>; cancel or close it in the simulator before rerunning」）；劇本結束時記一行 INFO，列出各結果的件數與 `orders.json` 的路徑。
+- 每則關於可能殘留部位或掛單的 CRITICAL／ERROR 都寫出該案例的 `trade_id` 與 `close_trade_id`，以及處置方式（「check trades for <id>; cancel or close it in the simulator before rerunning」）；劇本結束時記一行 INFO，列出結束碼、各結果的件數、需要處理的案例 id（`residual_position`、`order_may_rest`、`unknown_outcome`、`interrupted`，以及送單後被連鎖檢查中止者）與 `orders.json` 的路徑。
 - 無法準備的案例（帳戶、合約或資金查詢失敗）記 ERROR、不送任何請求，結束碼為 2。
-- `orders.json` 在每個案例之後與劇本結束時以暫存檔加 `os.replace` 原子改寫；中止或中斷時照樣寫，寫入失敗只記 ERROR，不蓋掉原本的例外。內容為 `base_url`、實際使用的 `[orders]` 時間設定（`timings`），以及每個案例的 `id`、`trade_id`、`close_trade_id`、`steps`（每步的 `step`、`op`、HTTP `status`、`accepted`）、`outcome` 與 `reason`，鍵序固定，不含帳戶識別。
+- `orders.json` 在每個案例之後與劇本結束時原子改寫：暫存檔寫完先 fsync，再 `os.replace`，之後 fsync 所在目錄（執行主機曾遇硬斷電）；中止或中斷時照樣寫，寫入失敗只記 ERROR，不蓋掉原本的例外。內容為 `base_url`、實際使用的 `[orders]` 時間設定（`timings`），以及每個案例的 `id`、`trade_id`、`close_trade_id`、`steps`（每步的 `step`、`op`、HTTP `status`、`accepted`）、`outcome` 與 `reason`，鍵序固定，不含帳戶識別。
 - `[orders]` 與其子表出現未知鍵、`orders.exchange` 的值不在 openapi 的 `Exchange` 列舉內、三個指標的最後一段是帳戶識別鍵時，拒絕載入。
 - 結束碼：全部案例跑完（含拒單）為 0；有部位或掛單可能殘留、案例在交易時段外被拒、案例無法準備時為 2；連鎖檢查中止為 3；異動請求結果未知（5xx 或無回應）為 1。
 

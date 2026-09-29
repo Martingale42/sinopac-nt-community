@@ -51,7 +51,7 @@ from p1rec.broker import (
 )
 from p1rec.capture import CapturedResponse, CapturingClient, describe_exception
 from p1rec.config import PLACEHOLDER_RE, ConfigError, OrdersConfig, P1Config
-from p1rec.interlock import InterlockError, assert_simulation
+from p1rec.interlock import EXIT_INTERLOCK_ABORT, InterlockError, assert_simulation
 from p1rec.jsonpointer import JsonPointerError, resolve_pointer
 from p1rec.prices import SHARES_PER_BOARD_LOT, format_decimal, resolve_price
 from p1rec.records import EXIT_CHECK_FAILED
@@ -112,8 +112,9 @@ _STATUS_CANCELLED = "Cancelled"
 _CLOSE_PRICE_TYPE = "LMT"
 _CLOSE_ORDER_TYPE = "ROD"
 
-# Prices at or below the day's lowest tradable price, where a buy that is
-# not meant to fill can rest without meeting a seller.
+# Prices a buy not meant to fill may use: far_below (limit_down for stock
+# and odd lots, reference * 0.95 for futures), limit_down, or one tick
+# above either, all far enough below the market to rest without a seller.
 _RESTING_PRICE_REFS = frozenset(
     {PriceRef.FAR_BELOW, PriceRef.FAR_BELOW_PLUS_TICK, PriceRef.LIMIT_DOWN, PriceRef.LIMIT_DOWN_PLUS_TICK}
 )
@@ -146,6 +147,11 @@ _FAILED_OUTCOMES = frozenset(
         Outcome.NOT_PREPARED,
         Outcome.SKIPPED_AFTER_RESIDUAL,
     }
+)
+
+# Outcomes whose case may have left an order or a position behind
+_ATTENTION_OUTCOMES = frozenset(
+    {Outcome.RESIDUAL_POSITION, Outcome.ORDER_MAY_REST, Outcome.UNKNOWN_OUTCOME, Outcome.INTERRUPTED}
 )
 
 # A case's outcome and the reason orders.json records for it
@@ -231,18 +237,20 @@ def run_orders(
                         _log_residual(record, "the run was interrupted after an order was sent")
                     raise
                 _write_summary(summary_path, cfg, records)
-    except BaseException:
+    except BaseException as exc:
         _write_summary_or_log(summary_path, cfg, records)
-        _log_run_summary(summary_path, records)
+        _log_run_summary(summary_path, records, _exit_code_for(exc))
         raise
     _write_summary(summary_path, cfg, records)
-    _log_run_summary(summary_path, records)
 
     if any(record.outcome is Outcome.UNKNOWN_OUTCOME for record in records):
-        return EXIT_UNEXPECTED
-    if any(record.outcome in _FAILED_OUTCOMES for record in records):
-        return EXIT_CHECK_FAILED
-    return 0
+        exit_code = EXIT_UNEXPECTED
+    elif any(record.outcome in _FAILED_OUTCOMES for record in records):
+        exit_code = EXIT_CHECK_FAILED
+    else:
+        exit_code = 0
+    _log_run_summary(summary_path, records, exit_code)
+    return exit_code
 
 
 def select_cases(cases: Sequence[Case], only: Collection[str] | None) -> list[Case]:
@@ -265,13 +273,14 @@ def check_cases(cases: Sequence[Case]) -> None:
     """Raise ConfigError naming the case unless every case can run without leaving a position.
 
     A case that does not expect a fill must be a limit buy priced, at place
-    and at every update_price, at or below the day's lowest tradable price
-    plus a tick, so it cannot meet a seller; if it is ROD it must end with
-    cancel, since its order would otherwise still rest when the next case
-    starts and the funds preflight counts one case at a time, while IOC and
-    FOK orders expire by themselves. A case expected to fill must not
-    update its quantity, since its close sends the quantity it placed. An
-    exceed_funds quantity is sized in board lots at limit_down, so it
+    and at every update_price, at far_below (limit_down for stock and odd
+    lots, reference * 0.95 for futures), at limit_down, or one tick above
+    either, so it rests without meeting a seller. If it is ROD it must end
+    with cancel, since its order would otherwise still rest when the next
+    case starts and the funds preflight counts one case at a time, while
+    IOC and FOK orders expire by themselves. A case expected to fill must
+    not update its quantity, since its close sends the quantity it placed.
+    An exceed_funds quantity is sized in board lots at limit_down, so it
     needs a stock case priced at limit_down.
     """
     for case in cases:
@@ -862,8 +871,19 @@ def _write_summary(path: Path, cfg: P1Config, records: Sequence[_CaseRecord]) ->
         ],
     }
     temporary = path.with_name(f"{path.name}.tmp")
-    temporary.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    # Synced before and after the rename, since a power loss could
+    # otherwise leave the new name pointing at unwritten blocks.
+    with temporary.open("w", encoding="utf-8") as fh:
+        fh.write(json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
+        fh.flush()
+        os.fsync(fh.fileno())
     os.replace(temporary, path)
+    directory = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
 
 
 def _write_summary_or_log(path: Path, cfg: P1Config, records: Sequence[_CaseRecord]) -> None:
@@ -874,11 +894,31 @@ def _write_summary_or_log(path: Path, cfg: P1Config, records: Sequence[_CaseReco
         logger.error("could not write %s: %s", path, describe_exception(exc))
 
 
-def _log_run_summary(path: Path, records: Sequence[_CaseRecord]) -> None:
+def _exit_code_for(exc: BaseException) -> int | None:
+    """Return the exit code the CLI turns exc into, or None for one it does not catch, such as KeyboardInterrupt."""
+    if isinstance(exc, InterlockError):
+        return EXIT_INTERLOCK_ABORT
+    return EXIT_UNEXPECTED if isinstance(exc, Exception) else None
+
+
+def _log_run_summary(path: Path, records: Sequence[_CaseRecord], exit_code: int | None) -> None:
+    """Log the run's exit code, its outcome counts, the cases needing attention and where orders.json is.
+
+    A case needs attention when its outcome says an order or a position may
+    remain, and so does one the interlock stopped after its order was sent.
+    """
     counts = Counter(record.outcome.value for record in records)
+    attention = [
+        record.id
+        for record in records
+        if record.outcome in _ATTENTION_OUTCOMES
+        or (record.outcome is Outcome.INTERLOCK_ABORT and record.may_hold_order())
+    ]
     logger.info(
-        "orders: %d cases, %s; summary in %s",
+        "orders: exit code %s; %d cases: %s; needing attention: %s; summary in %s",
+        "none, interrupted" if exit_code is None else exit_code,
         len(records),
         ", ".join(f"{count} {outcome}" for outcome, count in sorted(counts.items())),
+        ", ".join(attention) or "none",
         path,
     )

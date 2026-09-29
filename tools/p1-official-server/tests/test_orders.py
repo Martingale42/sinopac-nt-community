@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -281,6 +282,11 @@ def _messages(caplog: pytest.LogCaptureFixture, level: int) -> list[str]:
     return [r.getMessage() for r in caplog.records if r.levelno == level]
 
 
+def _run_summary(caplog: pytest.LogCaptureFixture) -> str:
+    (summary,) = [m for m in _messages(caplog, logging.INFO) if m.startswith("orders: ")]
+    return summary
+
+
 def _set_secret_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for var in SECRET_ENV_VARS:
         monkeypatch.setenv(var, "fake-value-0123456789")
@@ -292,6 +298,7 @@ def _set_secret_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_interlock_before_every_mutation(
     tmp_path: Path, write_config: WriteConfig, caplog: pytest.LogCaptureFixture
 ) -> None:
+    caplog.set_level(logging.INFO)
     server = OrderServer(modes=[True, False])
     run_dir = tmp_path / "run"
     run_dir.mkdir()
@@ -314,6 +321,8 @@ def test_interlock_before_every_mutation(
     (critical,) = _messages(caplog, logging.CRITICAL)
     assert "first" in critical
     assert "possible residual position, check manually" in critical
+    assert _run_summary(caplog).startswith("orders: exit code 3; 2 cases: 1 interlock_abort, 1 not_run; ")
+    assert "; needing attention: first; " in _run_summary(caplog)
 
 
 def test_every_mutation_follows_its_own_mode_query(tmp_path: Path, write_config: WriteConfig) -> None:
@@ -479,6 +488,7 @@ def test_fill_then_close_sequence(tmp_path: Path, write_config: WriteConfig) -> 
 def test_fill_timeout_logs_critical_and_exits_2(
     tmp_path: Path, write_config: WriteConfig, caplog: pytest.LogCaptureFixture
 ) -> None:
+    caplog.set_level(logging.INFO)
     server = OrderServer(fills=False)
     clock = FakeClock()
     cfg = _config(write_config, fill_poll_s=2.0, fill_timeout_s=10.0)
@@ -497,6 +507,10 @@ def test_fill_timeout_logs_critical_and_exits_2(
     assert "possible residual position, check manually" in critical[0]
     # Every 2 s until 10 s have passed, then once to confirm the resting case ended unfilled
     assert server.kinds().count("trades") == 6
+    assert _run_summary(caplog) == (
+        "orders: exit code 2; 3 cases: 1 completed, 1 residual_position, 1 skipped_after_residual; "
+        f"needing attention: stuck; summary in {tmp_path / 'run' / ORDERS_JSON}"
+    )
 
 
 def test_order_ending_unfilled_needs_no_close(
@@ -584,6 +598,7 @@ def test_interlock_abort_before_the_close(
 def test_interrupt_during_fill_wait(
     tmp_path: Path, write_config: WriteConfig, caplog: pytest.LogCaptureFixture
 ) -> None:
+    caplog.set_level(logging.INFO)
     server = OrderServer()
     cfg = _config(write_config, fill_poll_s=2.0)
     run_dir = tmp_path / "run"
@@ -607,6 +622,8 @@ def test_interrupt_during_fill_wait(
     (critical,) = _messages(caplog, logging.CRITICAL)
     assert "fill" in critical
     assert "possible residual position, check manually" in critical
+    assert _run_summary(caplog).startswith("orders: exit code none, interrupted; ")
+    assert "; needing attention: fill; " in _run_summary(caplog)
 
 
 @pytest.mark.parametrize(
@@ -1127,11 +1144,35 @@ def test_orders_json_content(tmp_path: Path, write_config: WriteConfig, caplog: 
     }
     assert list(json.loads(text)["cases"][0]) == ["id", "trade_id", "close_trade_id", "steps", "outcome", "reason"]
     assert not path.with_name(f"{ORDERS_JSON}.tmp").exists()
-    (summary,) = [m for m in _messages(caplog, logging.INFO) if m.startswith("orders: ")]
-    assert summary == f"orders: 2 cases, 1 completed, 1 rejected; summary in {path}"
+    assert _run_summary(caplog) == (
+        f"orders: exit code 0; 2 cases: 1 completed, 1 rejected; needing attention: none; summary in {path}"
+    )
     for value in _ACCOUNT_IDENTIFIERS:
         assert value not in text
         assert value not in caplog.text
+
+
+def test_orders_json_synced_before_and_after_the_rename(
+    tmp_path: Path, write_config: WriteConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events: list[str] = []
+    real_fsync, real_replace = os.fsync, os.replace
+
+    def fsync(fd: int) -> None:
+        events.append("fsync")
+        real_fsync(fd)
+
+    def replace(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+        events.append("replace")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(os, "replace", replace)
+
+    _run(tmp_path, _config(write_config), OrderServer(), [_case("resting")])
+
+    # Once after the case and once at the end, each syncing the file and then its directory
+    assert events == ["fsync", "replace", "fsync"] * 2
 
 
 # Scenario and config files
