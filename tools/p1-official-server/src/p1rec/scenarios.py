@@ -239,7 +239,7 @@ def _steps(raw: Mapping[str, Any], where: str, quantity: int | Literal["exceed_f
         if parsed.reduce_by is not None:
             reduced += parsed.reduce_by
 
-            # An exceed_funds quantity is only known once the live balance is
+            # An exceed_funds quantity is only known once the live balance is known
             if isinstance(quantity, int) and reduced > quantity:
                 raise ConfigError(
                     f"{where}.steps[{step_index}]: update_qty reductions total {reduced}, "
