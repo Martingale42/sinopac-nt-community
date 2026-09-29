@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -106,15 +108,53 @@ def test_log_exception_redacts_secret_in_traceback(tmp_path: Path, capsys: pytes
         assert "ValueError" in output
 
 
-def test_format_mismatch_does_not_leak_raw_args(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_malformed_record_leaves_notice_not_silence(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     secret_value = "abcdefghijklmnopqrstuvwx"
 
     setup_logging(tmp_path, secrets=[secret_value], level="INFO")
-    logger = logging.getLogger("p1rec.orders")
-    # Too few %-placeholders for the args, so record.getMessage() raises
-    # inside Handler.emit(), which normally falls back to handleError and
-    # prints the traceback plus the record's raw, unredacted args to stderr.
-    logger.error("only one placeholder: %s", secret_value, secret_value)
+
+    # Outside of a test run, p1rec's two handlers are the only ones on the
+    # root logger; pytest's own LogCaptureHandler deliberately re-raises a
+    # formatting error to fail the test (by design, unrelated to this
+    # behaviour), so it is detached here to check what p1rec's own
+    # handlers do on their own, matching how the CLI actually runs.
+    root = logging.getLogger()
+    foreign_handlers = [h for h in root.handlers if not isinstance(h.formatter, RedactingFormatter)]
+    for handler in foreign_handlers:
+        root.removeHandler(handler)
+    try:
+        logger = logging.getLogger("p1rec.orders")
+        # Two %-placeholders but one arg, so record.getMessage() raises
+        # inside Handler.emit(); the base Handler.handleError would print
+        # the traceback and the record's raw, unredacted args straight to
+        # stderr, so this must leave a notice, not vanish silently either.
+        logger.critical("residual position %s %s", secret_value)
+
+        for handler in root.handlers:
+            handler.flush()
+    finally:
+        for handler in foreign_handlers:
+            root.addHandler(handler)
+
+    log_text = (tmp_path / "recorder.log").read_text(encoding="utf-8")
+    stderr_text = capsys.readouterr().err
+
+    for output in (log_text, stderr_text):
+        assert secret_value not in output
+        assert "logging error at" in output
+        assert "record dropped" in output
+
+
+def test_sys_excepthook_redacts_secret(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    secret_value = "abcdefghijklmnopqrstuvwx"
+
+    setup_logging(tmp_path, secrets=[secret_value], level="INFO")
+    try:
+        raise RuntimeError("boom " + secret_value)
+    except RuntimeError:
+        exc_type, exc_value, exc_tb = sys.exc_info()
+        assert exc_type is not None
+        sys.excepthook(exc_type, exc_value, exc_tb)
 
     for handler in logging.getLogger().handlers:
         handler.flush()
@@ -122,8 +162,35 @@ def test_format_mismatch_does_not_leak_raw_args(tmp_path: Path, capsys: pytest.C
     log_text = (tmp_path / "recorder.log").read_text(encoding="utf-8")
     stderr_text = capsys.readouterr().err
 
-    assert secret_value not in log_text
-    assert secret_value not in stderr_text
+    for output in (log_text, stderr_text):
+        assert secret_value not in output
+        assert "***" in output
+        assert "RuntimeError" in output
+
+
+def test_thread_exception_is_redacted(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    secret_value = "abcdefghijklmnopqrstuvwx"
+
+    setup_logging(tmp_path, secrets=[secret_value], level="INFO")
+
+    def _raise() -> None:
+        raise RuntimeError("sse failed " + secret_value)
+
+    thread = threading.Thread(target=_raise, name="sse-worker")
+    thread.start()
+    thread.join()
+
+    for handler in logging.getLogger().handlers:
+        handler.flush()
+
+    log_text = (tmp_path / "recorder.log").read_text(encoding="utf-8")
+    stderr_text = capsys.readouterr().err
+
+    for output in (log_text, stderr_text):
+        assert secret_value not in output
+        assert "***" in output
+        assert "RuntimeError" in output
+        assert "sse-worker" in output
 
 
 def test_setup_logging_creates_recorder_log(tmp_path: Path) -> None:
@@ -154,3 +221,24 @@ def test_setup_logging_redacts_third_party_logger(tmp_path: Path, capsys: pytest
     assert secret_value not in log_text
     assert secret_value not in stderr_text
     assert "***" in log_text
+
+
+def test_setup_logging_removes_only_its_own_handlers(tmp_path: Path) -> None:
+    root = logging.getLogger()
+    marker_handler = logging.NullHandler()
+    root.addHandler(marker_handler)
+    try:
+        setup_logging(tmp_path, secrets=[], level="INFO")
+
+        assert marker_handler in root.handlers
+    finally:
+        root.removeHandler(marker_handler)
+
+
+def test_caplog_still_works_after_setup_logging(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.INFO)
+
+    setup_logging(tmp_path, secrets=[], level="INFO")
+    logging.getLogger("p1rec.orders").info("hello from caplog")
+
+    assert "hello from caplog" in caplog.text

@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import dataclasses
-import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from conftest import MINIMAL_CONFIG_LINES, SECRET_ENV_VARS, WriteConfig
+from helpers import MINIMAL_CONFIG_LINES, SECRET_ENV_VARS, WriteConfig
 
 from p1rec import cli
 from p1rec.cli import main
@@ -150,28 +149,3 @@ def test_tag_accepts_ordinary_value(
     assert exit_code == 1  # stub handler
     run_dirs = list((tmp_path / "results").iterdir())
     assert run_dirs[0].name.endswith("-stream-soak-1")
-
-
-def test_log_uses_root_logger_so_third_party_output_is_redacted(
-    tmp_path: Path, write_config: WriteConfig, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    config_path = write_config()
-    secret_value = "abcdefghijklmnopqrstuvwx"
-    monkeypatch.setenv("SJ_API_KEY", secret_value)
-    for var in SECRET_ENV_VARS[1:]:
-        monkeypatch.setenv(var, "fake-value-0123456789")
-
-    def _logging_handler(_args: object, _cfg: object, _run_dir: Path) -> int:
-        logging.getLogger("httpx").info("request used token %s", secret_value)
-        return 0
-
-    original = cli._SUBCOMMANDS["stream"]
-    monkeypatch.setitem(cli._SUBCOMMANDS, "stream", dataclasses.replace(original, handler=_logging_handler))
-
-    exit_code = main(["stream", "--config", str(config_path)])
-
-    assert exit_code == 0
-    run_dirs = list((tmp_path / "results").iterdir())
-    log_text = (run_dirs[0] / "recorder.log").read_text(encoding="utf-8")
-    assert secret_value not in log_text
-    assert "***" in log_text

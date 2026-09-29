@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from conftest import MINIMAL_CONFIG_LINES, WriteConfig
+from helpers import MINIMAL_CONFIG_LINES, WriteConfig
 
 from p1rec.config import (
     ConfigError,
@@ -106,6 +106,19 @@ def test_inline_secret_rejected_inside_array_of_tables(write_config: WriteConfig
 
     with pytest.raises(ConfigError, match=r"history\.query\.api_key"):
         load_config(config_path)
+
+
+def test_inline_secret_rejected_for_person_id_and_egress_ip(write_config: WriteConfig) -> None:
+    bogus_value = "A123456789"  # shaped like a Taiwanese national ID
+    lines = [*MINIMAL_CONFIG_LINES, "", "[scrub]", f'person_id = "{bogus_value}"']
+    config_path = write_config(lines)
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_config(config_path)
+
+    message = str(exc_info.value)
+    assert "scrub.person_id" in message
+    assert bogus_value not in message
 
 
 def test_secrets_table_itself_is_not_rejected(write_config: WriteConfig) -> None:

@@ -95,10 +95,11 @@ class P1Config:
 # Roles read via read_secrets(); see P1Config.secret_env above
 _SECRET_ROLES = ("api_key", "sec_key", "ca_passwd", "person_id", "egress_ip")
 
-# Keys that must never carry a literal secret value in p1.toml, since inside
-# [secrets] these same names are role -> env-var-name mappings instead, not
-# secret values, which is why that table is exempt in _reject_inline_secrets.
-_INLINE_SECRET_KEYS = frozenset({"api_key", "sec_key", "ca_passwd"})
+# Keys that must never carry a literal secret value anywhere in p1.toml,
+# since inside [secrets] these same names are role -> env-var-name mappings
+# instead, not secret values, which is why that table is exempt in
+# _reject_inline_secrets.
+_INLINE_SECRET_KEYS = frozenset(_SECRET_ROLES)
 
 # Shape every [secrets] value must have, restricted to the SJ_/P1_ prefixes
 # this project actually uses rather than any uppercase identifier, so a

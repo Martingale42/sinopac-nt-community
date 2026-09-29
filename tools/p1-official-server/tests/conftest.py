@@ -1,42 +1,19 @@
-"""Shared pytest fixtures for p1rec tests."""
+"""Shared pytest fixtures for p1rec tests.
+
+Shared constants and type aliases live in helpers.py; this module only
+holds fixtures, which need pytest's machinery to be usable.
+"""
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+import sys
+import threading
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-
-# Shape of the write_config fixture below: an optional list of TOML lines in,
-# the written file's path out.
-WriteConfig = Callable[..., Path]
-
-# A minimal but complete p1.toml, shared by tests that need a valid config
-# to load and mutate, independent of the real p1.toml.
-MINIMAL_CONFIG_LINES = [
-    'base_url = "http://127.0.0.1:8080"',
-    "http_timeout_s = 35",
-    'results_root = "results"',
-    'fixtures_root = "fixtures"',
-    "",
-    "[secrets]",
-    'api_key = "SJ_API_KEY"',
-    'sec_key = "SJ_SEC_KEY"',
-    'ca_passwd = "SJ_CA_PASSWD"',
-    'person_id = "P1_PERSON_ID"',
-    'egress_ip = "P1_EGRESS_IP"',
-    "",
-    "[endpoints.mode]",
-    'method = "GET"',
-    'path = "/api/v1/info"',
-    "",
-    "[endpoints.place_stock]",
-    'method = "POST"',
-    'path = "/api/v1/order/place_order"',
-]
-
-SECRET_ENV_VARS = ("SJ_API_KEY", "SJ_SEC_KEY", "SJ_CA_PASSWD", "P1_PERSON_ID", "P1_EGRESS_IP")
+from helpers import MINIMAL_CONFIG_LINES, WriteConfig
 
 
 @pytest.fixture
@@ -57,19 +34,20 @@ def write_config(tmp_path: Path) -> WriteConfig:
 
 
 @pytest.fixture(autouse=True)
-def _reset_logging() -> None:
-    """Restore the root logger's handlers, level and raiseExceptions flag.
+def _reset_logging() -> Iterator[None]:
+    """Restore the root logger's handlers, level, propagate and excepthooks.
 
-    setup_logging attaches handlers to the root logger so third-party
-    loggers are redacted too, so a test that calls it must not leak a
-    handler, a changed level or a disabled raiseExceptions flag into
-    unrelated tests.
+    setup_logging attaches handlers to the root logger and installs
+    sys.excepthook / threading.excepthook, so a test that calls it must
+    not leak any of that into unrelated tests; in particular, pytest's own
+    log-capturing handler on the root logger must survive untouched.
     """
     root = logging.getLogger()
     original_handlers = list(root.handlers)
     original_level = root.level
     original_propagate = root.propagate
-    original_raise_exceptions = logging.raiseExceptions
+    original_sys_excepthook = sys.excepthook
+    original_thread_excepthook = threading.excepthook
 
     yield
 
@@ -79,4 +57,5 @@ def _reset_logging() -> None:
             handler.close()
     root.setLevel(original_level)
     root.propagate = original_propagate
-    logging.raiseExceptions = original_raise_exceptions
+    sys.excepthook = original_sys_excepthook
+    threading.excepthook = original_thread_excepthook
