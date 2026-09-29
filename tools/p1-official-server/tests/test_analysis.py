@@ -1,0 +1,562 @@
+"""Tests for p1rec.analysis: order reconciliation and SSE stream statistics."""
+
+from __future__ import annotations
+
+import dataclasses
+import json
+import logging
+from datetime import datetime, timezone
+from decimal import Decimal
+from pathlib import Path
+
+import httpx
+import pytest
+from helpers import MINIMAL_CONFIG_LINES, SECRET_ENV_VARS, WriteConfig
+
+from p1rec import analysis
+from p1rec.analysis import (
+    NS_PER_S,
+    AnalysisError,
+    Mismatch,
+    OrderView,
+    derive_status,
+    orders_from_rest,
+    orders_from_sse,
+    percentile_nearest_rank,
+    read_jsonl,
+    reconcile,
+    run_reconcile,
+)
+from p1rec.cli import main
+from p1rec.config import ConfigError, EventFields, load_config
+from p1rec.interlock import InterlockError
+
+T0_NS = int(datetime(2026, 10, 1, 1, 0, tzinfo=timezone.utc).timestamp()) * NS_PER_S
+SSE_RUN = "20261001T010000Z-stream"
+REST_RUN = "20261001T011000Z-orders"
+
+
+@pytest.fixture
+def fields(write_config: WriteConfig) -> EventFields:
+    return load_config(write_config()).events
+
+
+@pytest.fixture
+def results_root(tmp_path: Path) -> Path:
+    # MINIMAL_CONFIG_LINES sets results_root = "results" next to p1.toml
+    return tmp_path / "results"
+
+
+def _order(
+    key: str,
+    op_type: str = "New",
+    op_code: str = "00",
+    *,
+    event_id: str,
+    order_qty: int = 2,
+    cancel_qty: int = 0,
+    state: str = "FuturesOrder",
+) -> dict[str, object]:
+    """Return an OrderEvent shaped like the official server's order report."""
+    return {
+        "state": state,
+        "data": {
+            state: {
+                "event_id": event_id,
+                "operation": {"op_type": op_type, "op_code": op_code, "op_msg": ""},
+                "order": {"id": key, "seqno": "000001", "ordno": "X0001", "action": "Buy", "quantity": order_qty},
+                "status": {
+                    "id": key,
+                    "exchange_ts": 1790000000.0,
+                    "order_quantity": order_qty,
+                    "cancel_quantity": cancel_qty,
+                },
+                "contract": {"code": "TMFJ6"},
+            }
+        },
+    }
+
+
+def _deal(key: str, quantity: int, *, event_id: str, state: str = "FuturesDeal") -> dict[str, object]:
+    """Return an OrderEvent shaped like the OpenAPI FuturesDealEvent."""
+    return {
+        "state": state,
+        "data": {
+            state: {
+                "event_id": event_id,
+                "trade_id": key,
+                "seqno": "000001",
+                "ordno": "X0001",
+                "exchange_seq": "1",
+                "action": "Buy",
+                "code": "TMFJ6",
+                "price": 100.0,
+                "quantity": quantity,
+                "security_type": "FUT",
+                "ts": 1790000000.0,
+            }
+        },
+    }
+
+
+def _frame(client: str, stream: str, ts_ns: int, event: str, data: object) -> dict[str, object]:
+    text = data if isinstance(data, str) else json.dumps(data, separators=(",", ":"))
+    return {
+        "client": client,
+        "stream": stream,
+        "kind": "frame",
+        "recv_ts_ns": ts_ns,
+        "raw": f"event:{event}\ndata:{text}\n\n",
+    }
+
+
+def _lifecycle(client: str, stream: str, ts_ns: int, *, kind: str, **extra: object) -> dict[str, object]:
+    return {"client": client, "stream": stream, "kind": kind, "recv_ts_ns": ts_ns, **extra}
+
+
+def _order_frames(client: str, events: list[dict[str, object]], stream: str = "order_event") -> list[dict[str, object]]:
+    return [_frame(client, stream, T0_NS + i * NS_PER_S, "order_event", event) for i, event in enumerate(events)]
+
+
+def _write_jsonl(path: Path, records: list[dict[str, object]]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+    return path
+
+
+def _write_sse(run_dir: Path, client: str, stream: str, records: list[dict[str, object]]) -> Path:
+    return _write_jsonl(run_dir / f"sse_{client}_{stream}.jsonl", records)
+
+
+def _trade(key: str, status: str, deal_quantity: int | None, order_quantity: int = 2) -> dict[str, object]:
+    """Return a Trade shaped like the official server's trades list items."""
+    return {
+        "contract": {"code": "TMFJ6"},
+        "order": {"id": key, "seqno": "000001", "ordno": "X0001", "action": "Buy", "quantity": order_quantity},
+        "status": {
+            "id": key,
+            "status": status,
+            "status_code": "00",
+            "deal_quantity": deal_quantity,
+            "cancel_quantity": 0,
+            "order_quantity": order_quantity,
+        },
+    }
+
+
+def _trades_record(trades: object, status: int = 200) -> dict[str, object]:
+    return {
+        "client": "orders",
+        "op": "trades",
+        "method": "POST",
+        "url": "http://127.0.0.1:8080/api/v1/order/trades",
+        "req_body": '{"refresh":true}',
+        "sent_ts_ns": T0_NS,
+        "recv_ts_ns": T0_NS,
+        "status": status,
+        "resp_headers": [],
+        "resp_body": json.dumps(trades),
+    }
+
+
+# Three orders both clients see: one working, one cancelled and one
+# filled by two deals.
+_EVENTS = [
+    _order("t1", event_id="e1"),
+    _order("t2", event_id="e2"),
+    _order("t2", "Cancel", event_id="e3", cancel_qty=2),
+    _order("t3", event_id="e4"),
+    _deal("t3", 1, event_id="e5"),
+    _deal("t3", 1, event_id="e6"),
+]
+_MATCHING_TRADES = [_trade("t1", "Submitted", 0), _trade("t2", "Cancelled", 0), _trade("t3", "Filled", 2)]
+
+
+def _set_secret_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for var in SECRET_ENV_VARS:
+        monkeypatch.setenv(var, "fake-value-0123456789")
+
+
+def _only_new_run(results_root: Path, subcommand: str) -> Path:
+    (run_dir,) = [path for path in results_root.iterdir() if path.name.endswith(f"-{subcommand}")]
+    return run_dir
+
+
+def _run_cli_reconcile(
+    write_config: WriteConfig, monkeypatch: pytest.MonkeyPatch, results_root: Path
+) -> tuple[int, dict[str, object]]:
+    _set_secret_env(monkeypatch)
+    exit_code = main(
+        ["reconcile", "--config", str(write_config()), "--sse-run", SSE_RUN, "--rest-run", REST_RUN]
+    )
+    report = json.loads((_only_new_run(results_root, "reconcile") / "reconcile.json").read_text(encoding="utf-8"))
+    return exit_code, report
+
+
+def test_all_match_exit_0(write_config: WriteConfig, monkeypatch: pytest.MonkeyPatch, results_root: Path) -> None:
+    for client in ("a", "b"):
+        _write_sse(results_root / SSE_RUN, client, "order_event", _order_frames(client, _EVENTS))
+    _write_jsonl(results_root / REST_RUN / "rest.jsonl", [_trades_record(_MATCHING_TRADES)])
+
+    exit_code, report = _run_cli_reconcile(write_config, monkeypatch, results_root)
+
+    assert exit_code == 0
+    assert report["only_in_rest"] == []
+    assert report["only_in_sse"] == []
+    assert report["mismatched"] == []
+    assert report["per_client_keys"] == {"a": ["t1", "t2", "t3"], "b": ["t1", "t2", "t3"]}
+
+
+def test_missing_in_sse_reported(
+    write_config: WriteConfig, monkeypatch: pytest.MonkeyPatch, results_root: Path
+) -> None:
+    for client in ("a", "b"):
+        _write_sse(results_root / SSE_RUN, client, "order_event", _order_frames(client, _EVENTS))
+    trades = [*_MATCHING_TRADES, _trade("t4", "Submitted", 0)]
+    _write_jsonl(results_root / REST_RUN / "rest.jsonl", [_trades_record(trades)])
+
+    exit_code, report = _run_cli_reconcile(write_config, monkeypatch, results_root)
+
+    assert exit_code == 2
+    assert report["only_in_rest"] == ["t4"]
+    assert report["only_in_sse"] == []
+    assert report["mismatched"] == []
+
+
+def test_status_mismatch_reported(tmp_path: Path, fields: EventFields) -> None:
+    events = [_order("t1", event_id="e1"), _deal("t1", 1, event_id="e2")]
+    path = _write_sse(tmp_path, "a", "order_event", _order_frames("a", events))
+
+    sse = orders_from_sse({"a": [path]}, fields)
+    rest = orders_from_rest([_trade("t1", "Filled", 2)], fields)
+    report = reconcile(sse, rest)
+
+    assert report.mismatched == [
+        Mismatch(
+            client="a",
+            sse=OrderView(key="t1", status="PartFilled", filled_qty=Decimal(1)),
+            rest=OrderView(key="t1", status="Filled", filled_qty=Decimal(2)),
+        )
+    ]
+    assert not report.clean
+
+
+def test_client_coverage_difference(tmp_path: Path, fields: EventFields) -> None:
+    without_t2 = [event for event in _EVENTS if "t2" not in json.dumps(event)]
+    paths = {
+        "a": [_write_sse(tmp_path, "a", "order_event", _order_frames("a", _EVENTS))],
+        "b": [_write_sse(tmp_path, "b", "order_event", _order_frames("b", without_t2))],
+    }
+
+    report = reconcile(orders_from_sse(paths, fields), orders_from_rest(_MATCHING_TRADES, fields))
+
+    keys = report.per_client_keys
+    assert set(keys["a"]) - set(keys["b"]) == {"t2"}
+    # Client a saw t2, so only the coverage, not the comparison, shows b's gap
+    assert report.only_in_rest == []
+
+
+def test_deals_accumulate_qty(tmp_path: Path, fields: EventFields) -> None:
+    events = [
+        _order("t1", event_id="e1", order_qty=3),
+        _deal("t1", 1, event_id="e2"),
+        _deal("t1", 2, event_id="e3"),
+    ]
+    path = _write_sse(tmp_path, "a", "order_event", _order_frames("a", events))
+
+    views = orders_from_sse({"a": [path]}, fields)
+
+    assert views["a"]["t1"] == OrderView(key="t1", status="Filled", filled_qty=Decimal(3))
+
+
+def test_stats_peak_second_and_gaps(
+    write_config: WriteConfig, monkeypatch: pytest.MonkeyPatch, results_root: Path
+) -> None:
+    heartbeat = {"type": "heartbeat", "connection_id": "1"}
+    tick = {"code": "TMFJ6", "close": "100"}
+    burst_second_ns = T0_NS + 61 * NS_PER_S
+    records = [_frame("a", "data", T0_NS + i * 30 * NS_PER_S, "heartbeat", heartbeat) for i in range(3)]
+    records += [_frame("a", "data", burst_second_ns + i * 1_000_000, "tick_fop", tick) for i in range(50)]
+    last_burst_ns = burst_second_ns + 49 * 1_000_000
+    records.append(_frame("a", "data", last_burst_ns + 90 * NS_PER_S, "heartbeat", heartbeat))
+    _write_sse(results_root / SSE_RUN, "a", "data", records)
+    _set_secret_env(monkeypatch)
+
+    exit_code = main(["stats", "--config", str(write_config()), "--sse-run", SSE_RUN])
+
+    assert exit_code == 0
+    stats = json.loads((_only_new_run(results_root, "stats") / "stats.json").read_text(encoding="utf-8"))
+    file_stats = stats["files"]["sse_a_data.jsonl"]
+    assert file_stats["peak_seconds"][0] == {"second": "2026-10-01T01:01:01Z", "frames": 50}
+    assert len(file_stats["peak_seconds"]) == 5  # the burst second plus four one-heartbeat seconds
+    assert file_stats["gaps"] == [
+        {"from": "2026-10-01T01:01:01.049000Z", "to": "2026-10-01T01:02:31.049000Z", "gap_s": 90.0}
+    ]
+    assert stats["clients"]["a"]["event_counts"] == {"heartbeat": 4, "tick_fop": 50}
+    assert file_stats["heartbeat_interval_s"] == {"n": 3, "min": 30.0, "median": 30.0, "max": pytest.approx(91.049)}
+
+
+@pytest.mark.parametrize(
+    ("new_ok", "cancel_ok", "order_qty", "cancel_qty", "filled_qty", "expected"),
+    [
+        (False, False, 2, 0, 0, "Failed"),
+        (True, False, 2, 0, 0, "Submitted"),
+        (True, False, 2, 0, 1, "PartFilled"),
+        (True, False, 2, 0, 2, "Filled"),
+        (True, True, 2, 2, 0, "Cancelled"),
+        (True, True, 3, 2, 1, "Cancelled"),  # partly filled, remainder cancelled
+        (True, False, 3, 1, 1, "PartFilled"),  # quantity reduced without a Cancel
+        (True, True, 3, 1, 0, "Submitted"),  # a Cancel that left quantity working
+        (None, False, None, 0, 1, "Unknown"),  # deals seen, order events missed
+        (None, False, 2, 0, 0, "Unknown"),  # quantity known but no New seen
+        (True, False, 0, 0, 0, "Submitted"),  # a zero quantity alone never reads Filled
+    ],
+)
+def test_derive_status_rules(
+    new_ok: bool | None, cancel_ok: bool, order_qty: int | None, cancel_qty: int, filled_qty: int, expected: str
+) -> None:
+    status = derive_status(
+        new_ok=new_ok,
+        cancel_ok=cancel_ok,
+        order_qty=None if order_qty is None else Decimal(order_qty),
+        cancel_qty=Decimal(cancel_qty),
+        filled_qty=Decimal(filled_qty),
+    )
+
+    assert status == expected
+
+
+def test_rejected_new_matches_prefixed_rest_status(tmp_path: Path, fields: EventFields) -> None:
+    path = _write_sse(tmp_path, "a", "order_event", _order_frames("a", [_order("t1", op_code="88", event_id="e1")]))
+    rest = orders_from_rest([_trade("t1", "Status.Failed", None)], fields)
+
+    report = reconcile(orders_from_sse({"a": [path]}, fields), rest)
+
+    assert report.clean
+
+
+def test_event_on_two_streams_counted_once(tmp_path: Path, fields: EventFields) -> None:
+    events = [_order("t1", event_id="e1"), _deal("t1", 1, event_id="e2")]
+    paths = [
+        _write_sse(tmp_path, "a", "data", _order_frames("a", events, stream="data")),
+        _write_sse(tmp_path, "a", "order_event", _order_frames("a", events)),
+    ]
+
+    views = orders_from_sse({"a": paths}, fields)
+
+    assert views["a"]["t1"] == OrderView(key="t1", status="PartFilled", filled_qty=Decimal(1))
+
+
+def test_truncated_last_line_skipped_with_warning(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    path = _write_jsonl(tmp_path / "x.jsonl", [{"n": 1}, {"n": 2}])
+    with path.open("ab") as fh:
+        fh.write(b'{"n": 3, "raw": "ev' + b"\0" * 8)
+
+    with caplog.at_level(logging.WARNING, logger="p1rec.analysis"):
+        records = [record for _, record in read_jsonl(path)]
+
+    assert records == [{"n": 1}, {"n": 2}]
+    assert "x.jsonl:3: skipping unreadable last line" in caplog.text
+
+
+def test_unreadable_middle_line_raises(tmp_path: Path) -> None:
+    path = tmp_path / "x.jsonl"
+    path.write_text('{"n": 1}\n{"n": \n{"n": 3}\n', encoding="utf-8")
+
+    with pytest.raises(AnalysisError, match=r"x\.jsonl:2"):
+        list(read_jsonl(path))
+
+
+def test_rest_run_uses_last_trades_response(tmp_path: Path, fields: EventFields) -> None:
+    rest_log = _write_jsonl(
+        tmp_path / "rest.jsonl",
+        [
+            _trades_record([_trade("old", "Submitted", 0)]),
+            {"client": "orders", "op": "trades", "sent_ts_ns": T0_NS, "error_ts_ns": T0_NS, "error": "ReadTimeout"},
+            _trades_record([_trade("new", "Submitted", 0)]),
+            {"client": "orders", "op": "cancel", "status": 200, "resp_body": "{}"},
+        ],
+    )
+
+    payload = analysis.last_trades_payload(rest_log)
+
+    assert set(orders_from_rest(payload, fields)) == {"new"}
+
+
+def _live_transport(simulation: bool, trades: object, seen: list[httpx.Request]) -> httpx.MockTransport:
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.method == "GET" and request.url.path == "/api/v1/info":
+            return httpx.Response(200, json={"simulation": simulation})
+        if request.method == "POST" and request.url.path == "/api/v1/order/trades":
+            return httpx.Response(200, json=trades)
+        return httpx.Response(404)
+
+    return httpx.MockTransport(handler)
+
+
+def _live_cfg_lines() -> list[str]:
+    return [*MINIMAL_CONFIG_LINES, "", "[endpoints.trades]", 'method = "POST"', 'path = "/api/v1/order/trades"']
+
+
+def test_live_reconcile_checks_interlock_then_records_trades(tmp_path: Path, write_config: WriteConfig) -> None:
+    cfg = load_config(write_config(_live_cfg_lines()))
+    for client in ("a", "b"):
+        _write_sse(cfg.results_root / SSE_RUN, client, "order_event", _order_frames(client, _EVENTS))
+    run_dir = tmp_path / "reconcile-run"
+    run_dir.mkdir()
+    seen: list[httpx.Request] = []
+
+    exit_code = run_reconcile(cfg, SSE_RUN, None, run_dir, transport=_live_transport(True, _MATCHING_TRADES, seen))
+
+    assert exit_code == 0
+    assert [request.url.path for request in seen] == ["/api/v1/info", "/api/v1/order/trades"]
+    assert json.loads(seen[1].content) == {"refresh": True}
+    recorded = [record for _, record in read_jsonl(run_dir / "rest.jsonl")]
+    assert [(record["client"], record["op"]) for record in recorded] == [("reconcile", "mode"), ("reconcile", "trades")]
+    assert json.loads((run_dir / "reconcile.json").read_text(encoding="utf-8"))["rest_run"] is None
+
+
+def test_live_reconcile_aborts_before_trades_when_not_simulation(tmp_path: Path, write_config: WriteConfig) -> None:
+    cfg = load_config(write_config(_live_cfg_lines()))
+    _write_sse(cfg.results_root / SSE_RUN, "a", "order_event", _order_frames("a", _EVENTS))
+    run_dir = tmp_path / "reconcile-run"
+    run_dir.mkdir()
+    seen: list[httpx.Request] = []
+
+    with pytest.raises(InterlockError):
+        run_reconcile(cfg, SSE_RUN, None, run_dir, transport=_live_transport(False, _MATCHING_TRADES, seen))
+
+    assert [request.url.path for request in seen] == ["/api/v1/info"]
+    assert not (run_dir / "reconcile.json").exists()
+
+
+def _file_stats(path: Path, fields: EventFields) -> dict[str, object]:
+    """Return the stats of the single file path, recorded by client a."""
+    files = analysis.stream_stats({"a": [path]}, fields)["files"]
+    assert isinstance(files, dict)
+    file_stats = files[path.name]
+    assert isinstance(file_stats, dict)
+    return file_stats
+
+
+def test_heartbeat_intervals_reset_on_reconnect_and_outage_listed(tmp_path: Path, fields: EventFields) -> None:
+    heartbeat = {"type": "heartbeat"}
+    s = NS_PER_S
+    records = [
+        _lifecycle("a", "data", T0_NS, kind="connected", status=200),
+        _frame("a", "data", T0_NS + 30 * s, "heartbeat", heartbeat),
+        _frame("a", "data", T0_NS + 60 * s, "heartbeat", heartbeat),
+        _lifecycle("a", "data", T0_NS + 70 * s, kind="disconnected", error="RemoteProtocolError"),
+        _lifecycle("a", "data", T0_NS + 71 * s, kind="disconnected", error="ConnectError"),
+        _lifecycle("a", "data", T0_NS + 72 * s, kind="connected", status=503),
+        _lifecycle("a", "data", T0_NS + 72 * s, kind="disconnected", error="HTTP 503 response ended"),
+        _lifecycle("a", "data", T0_NS + 80 * s, kind="connected", status=200),
+        _frame("a", "data", T0_NS + 110 * s, "heartbeat", heartbeat),
+        _frame("a", "data", T0_NS + 140 * s, "heartbeat", heartbeat),
+        _lifecycle("a", "data", T0_NS + 150 * s, kind="stopped"),
+    ]
+    path = _write_sse(tmp_path, "a", "data", records)
+
+    file_stats = _file_stats(path, fields)
+
+    assert file_stats["heartbeat_interval_s"] == {"n": 2, "min": 30.0, "median": 30.0, "max": 30.0}
+    assert file_stats["outages"] == [
+        {
+            "disconnected_at": "2026-10-01T01:01:10.000000Z",
+            "reconnected_at": "2026-10-01T01:01:20.000000Z",
+            "outage_s": 10.0,
+            "attempts": 3,
+            "first_error": "RemoteProtocolError",
+        }
+    ]
+    assert file_stats["gaps"] == []  # 50 s across the outage stays under 60 s
+
+
+def test_latency_from_taipei_date_and_time(tmp_path: Path, fields: EventFields) -> None:
+    # 09:00:00.000 Taipei is T0 (01:00:00Z), and tick i arrives (i + 1) * 5 ms after it
+    records = [
+        _frame(
+            "a",
+            "tick_fop",
+            T0_NS + (i + 1) * 5_000_000,
+            "tick_fop",
+            {"code": "TMFJ6", "date": "2026-10-01", "time": "09:00:00.000000"},
+        )
+        for i in range(100)
+    ]
+    records.append(_frame("a", "tick_fop", T0_NS, "tick_fop", {"code": "TMFJ6", "date": "2026-10-01", "time": "bad"}))
+    records.append(_frame("a", "tick_fop", T0_NS, "heartbeat", {"type": "heartbeat"}))
+    path = _write_sse(tmp_path, "a", "tick_fop", records)
+
+    latency = _file_stats(path, fields)["latency_s"]
+
+    assert latency == {
+        "n": 100,
+        "p50": pytest.approx(0.25),
+        "p99": pytest.approx(0.495),
+        "max": pytest.approx(0.5),
+        "unparsable": 1,
+    }
+
+
+def test_exchange_ts_numeric_epoch_seconds(fields: EventFields) -> None:
+    numeric = dataclasses.replace(fields, exchange_ts_pointers=("/status/exchange_ts",), exchange_ts_format=None)
+
+    assert analysis.exchange_ts_ns({"status": {"exchange_ts": 1790000000.25}}, numeric) == 1790000000250000000
+    assert analysis.exchange_ts_ns({"status": {}}, numeric) is None
+
+
+def test_percentile_nearest_rank() -> None:
+    values = [float(v) for v in range(1, 11)]
+
+    assert percentile_nearest_rank(values, 50) == 5.0
+    assert percentile_nearest_rank(values, 99) == 10.0
+    assert percentile_nearest_rank(values, 0) == 1.0
+    assert percentile_nearest_rank([7.0], 99) == 7.0
+    with pytest.raises(ValueError):
+        percentile_nearest_rank([], 50)
+
+
+def _replace_event_line(key: str, new_line: str | None) -> list[str]:
+    prefix = f"{key} = "
+    lines = [line for line in MINIMAL_CONFIG_LINES if not line.startswith(prefix)]
+    return lines if new_line is None else [*lines, new_line]
+
+
+@pytest.mark.parametrize(
+    ("key", "new_line", "message"),
+    [
+        ("exchange_ts_format", None, r"events\.exchange_ts_format is required"),
+        ("order_key", 'order_key = ""', r"events\.order_key"),
+        ("gap_threshold_s", "gap_threshold_s = 0", r"events\.gap_threshold_s"),
+        ("deal_states", 'deal_states = ["FuturesOrder"]', r"must not share a state"),
+        ("order_event_name", None, r"events\.order_event_name"),
+    ],
+)
+def test_events_config_rejected(write_config: WriteConfig, key: str, new_line: str | None, message: str) -> None:
+    with pytest.raises(ConfigError, match=message):
+        load_config(write_config(_replace_event_line(key, new_line)))
+
+
+def test_events_config_optional_exchange_ts(write_config: WriteConfig) -> None:
+    lines = [line for line in MINIMAL_CONFIG_LINES if not line.startswith("exchange_ts_")]
+
+    events = load_config(write_config(lines)).events
+
+    assert events.exchange_ts_pointers == ()
+    assert events.exchange_ts_format is None
+    assert events.rest_list == ""
+
+
+def test_run_id_with_separator_rejected(write_config: WriteConfig) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        main(["stats", "--config", str(write_config()), "--sse-run", "runs/elsewhere"])
+
+    assert exc_info.value.code == 1
+
+
+def test_missing_sse_run_exits_1(write_config: WriteConfig, monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_secret_env(monkeypatch)
+
+    assert main(["stats", "--config", str(write_config()), "--sse-run", SSE_RUN]) == 1

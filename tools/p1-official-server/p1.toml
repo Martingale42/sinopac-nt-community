@@ -123,3 +123,42 @@ path = "/api/v1/agent/harness"
 [interlock]
 endpoint_op = "mode"
 pointer = "/simulation"
+
+# Order reports and stream timing, from the order_event and tick frames
+# recorded in simulation mode on 2026-09-29. Report pointers are relative
+# to the report an OrderEvent holds at data/<state>, since the state names
+# that key.
+[events]
+order_event_name = "order_event"
+order_states = ["StockOrder", "FuturesOrder"]
+deal_states = ["StockDeal", "FuturesDeal"]
+event_id = "/event_id"
+order_key = "/order/id"
+op_type = "/operation/op_type"
+op_code = "/operation/op_code"
+op_code_success = "00"
+order_qty = "/status/order_quantity"
+cancel_qty = "/status/cancel_quantity"
+
+# calibrate: no deal has been recorded yet, so these follow the OpenAPI
+# StockDealEvent and FuturesDealEvent schemas until the first one is.
+deal_key = "/trade_id"
+deal_qty = "/quantity"
+
+# trades answers with a bare array of Trade objects
+rest_list = ""
+rest_key = "/order/id"
+rest_status = "/status/status"
+rest_filled_qty = "/status/deal_quantity"
+
+# Tick frames carry the exchange time as Taipei-local date and time
+# strings without a zone (docs/official-server-contract.md section 2).
+exchange_ts_pointers = ["/date", "/time"]
+exchange_ts_format = "%Y-%m-%d %H:%M:%S.%f"
+
+heartbeat_event = "heartbeat"
+
+# calibrate: twice the largest heartbeat interval stats measures on the
+# first live day, and until then twice the 30 s heartbeat measured in
+# docs/official-server-contract.md section 2.
+gap_threshold_s = 60.0

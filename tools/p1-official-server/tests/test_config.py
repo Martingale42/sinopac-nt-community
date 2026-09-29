@@ -50,7 +50,7 @@ def test_load_config_success(tmp_path: Path, write_config: WriteConfig) -> None:
     assert cfg.funds == FundsConfig()
     assert cfg.stream == StreamConfig()
     assert cfg.orders == OrdersConfig()
-    assert cfg.events == EventFields()
+    assert isinstance(cfg.events, EventFields)
     assert cfg.history == HistoryConfig()
     assert cfg.scrub == ScrubConfig()
 

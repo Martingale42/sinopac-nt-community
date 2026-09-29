@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import NoReturn
 
+from p1rec.analysis import run_reconcile, run_stats
 from p1rec.config import ConfigError, P1Config, load_config, read_secrets
 from p1rec.interlock import EXIT_INTERLOCK_ABORT, InterlockError, self_test
 from p1rec.redact import redaction_values, setup_logging
@@ -67,6 +68,40 @@ def _add_scenarios_argument(sub: argparse.ArgumentParser) -> None:
     )
 
 
+def _validate_run_id(value: str) -> str:
+    """Reject a run id that could name anything but a directory directly under results_root."""
+    if not _TAG_RE.fullmatch(value) or value in {".", ".."}:
+        raise argparse.ArgumentTypeError(f"invalid run id {value!r}: must be a run directory name, not a path")
+    return value
+
+
+def _add_sse_run_argument(sub: argparse.ArgumentParser) -> None:
+    sub.add_argument(
+        "--sse-run",
+        required=True,
+        type=_validate_run_id,
+        help="run id of the stream run whose sse_*.jsonl files are analysed",
+    )
+
+
+def _add_reconcile_arguments(sub: argparse.ArgumentParser) -> None:
+    _add_sse_run_argument(sub)
+    sub.add_argument(
+        "--rest-run",
+        default=None,
+        type=_validate_run_id,
+        help="run id whose last recorded trades response is used (default: query trades now)",
+    )
+
+
+def _reconcile(args: argparse.Namespace, cfg: P1Config, run_dir: Path) -> int:
+    return run_reconcile(cfg, args.sse_run, args.rest_run, run_dir)
+
+
+def _stats(args: argparse.Namespace, cfg: P1Config, run_dir: Path) -> int:
+    return run_stats(cfg, args.sse_run, run_dir)
+
+
 def _not_implemented(args: argparse.Namespace, _cfg: P1Config, _run_dir: Path) -> int:
     logging.getLogger("p1rec.cli").error("%s: not implemented yet", args.command)
     return 1
@@ -95,8 +130,8 @@ _SUBCOMMANDS: dict[str, Subcommand] = {
     "preflight": Subcommand(add_arguments=_add_scenarios_argument, handler=_not_implemented),
     "stream": Subcommand(add_arguments=_no_extra_arguments, handler=_not_implemented),
     "orders": Subcommand(add_arguments=_add_scenarios_argument, handler=_not_implemented),
-    "reconcile": Subcommand(add_arguments=_no_extra_arguments, handler=_not_implemented),
-    "stats": Subcommand(add_arguments=_no_extra_arguments, handler=_not_implemented),
+    "reconcile": Subcommand(add_arguments=_add_reconcile_arguments, handler=_reconcile),
+    "stats": Subcommand(add_arguments=_add_sse_run_argument, handler=_stats),
     "history": Subcommand(add_arguments=_no_extra_arguments, handler=_not_implemented),
     "scrub": Subcommand(add_arguments=_no_extra_arguments, handler=_not_implemented),
 }

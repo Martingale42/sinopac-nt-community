@@ -59,7 +59,45 @@ class OrdersConfig:
 
 @dataclass(frozen=True)
 class EventFields:
-    """Placeholder, filled in once order/trade event field names are defined."""
+    """Where order reports, the trades list and stream timing live in recorded JSON."""
+
+    # SSE event name carrying OrderEvent frames, and the OrderEvent state
+    # values that mark an order report or a deal report.
+    order_event_name: str
+    order_states: tuple[str, ...]
+    deal_states: tuple[str, ...]
+
+    # JSON pointers into the report an OrderEvent holds at data/<state>
+    event_id: str
+    order_key: str
+    op_type: str
+    op_code: str
+    order_qty: str
+    cancel_qty: str
+    deal_key: str
+    deal_qty: str
+
+    # op_code of an accepted operation
+    op_code_success: str
+
+    # JSON pointers into the trades response: the list ("" for a bare
+    # array), then key, status and filled quantity within each item.
+    rest_list: str
+    rest_key: str
+    rest_status: str
+    rest_filled_qty: str
+
+    # Pointers into a frame's data giving the exchange time, empty to skip
+    # latency: one numeric epoch-seconds value when exchange_ts_format is
+    # None, otherwise strings joined by a space and parsed with it as
+    # Taipei local time.
+    exchange_ts_pointers: tuple[str, ...]
+    exchange_ts_format: str | None
+
+    heartbeat_event: str
+
+    # Silence between consecutive frames of one file that stats reports
+    gap_threshold_s: float
 
 
 @dataclass(frozen=True)
@@ -323,8 +361,66 @@ def _parse_orders(data: Mapping[str, Any], config_dir: Path) -> OrdersConfig:
 
 
 def _parse_events(data: Mapping[str, Any], config_dir: Path) -> EventFields:
-    _optional_table(data, "events")
-    return EventFields()
+    table = _optional_table(data, "events")
+
+    def name(key: str) -> str:
+        value = _get_str(data, f"events.{key}")
+        if not value:
+            raise ConfigError(f"config key events.{key} must not be empty")
+        return value
+
+    def names(key: str) -> tuple[str, ...]:
+        value = _lookup(data, f"events.{key}")
+        if not isinstance(value, list) or not value or not all(isinstance(item, str) and item for item in value):
+            raise ConfigError(f"config key events.{key} must be a non-empty array of non-empty strings")
+        return tuple(value)
+
+    def pointer(key: str, *, allow_root: bool = False) -> str:
+        return _get_pointer(data, f"events.{key}", allow_root=allow_root)
+
+    order_states = names("order_states")
+    deal_states = names("deal_states")
+    if set(order_states) & set(deal_states):
+        raise ConfigError("config keys events.order_states and events.deal_states must not share a state")
+
+    exchange_ts_pointers: tuple[str, ...] = ()
+    if "exchange_ts_pointers" in table:
+        exchange_ts_pointers = names("exchange_ts_pointers")
+        for index, item in enumerate(exchange_ts_pointers):
+            if not is_valid_pointer_syntax(item):
+                raise ConfigError(f"config key events.exchange_ts_pointers[{index}] is not a valid JSON pointer")
+    exchange_ts_format = name("exchange_ts_format") if "exchange_ts_format" in table else None
+    if exchange_ts_format is None and len(exchange_ts_pointers) > 1:
+        raise ConfigError("config key events.exchange_ts_format is required with more than one exchange_ts_pointers")
+    if exchange_ts_format is not None and not exchange_ts_pointers:
+        raise ConfigError("config key events.exchange_ts_format needs events.exchange_ts_pointers")
+
+    gap_threshold_s = _get_number(data, "events.gap_threshold_s")
+    if not 0 < gap_threshold_s < float("inf"):
+        raise ConfigError("config key events.gap_threshold_s must be a positive finite number")
+
+    return EventFields(
+        order_event_name=name("order_event_name"),
+        order_states=order_states,
+        deal_states=deal_states,
+        event_id=pointer("event_id"),
+        order_key=pointer("order_key"),
+        op_type=pointer("op_type"),
+        op_code=pointer("op_code"),
+        order_qty=pointer("order_qty"),
+        cancel_qty=pointer("cancel_qty"),
+        deal_key=pointer("deal_key"),
+        deal_qty=pointer("deal_qty"),
+        op_code_success=name("op_code_success"),
+        rest_list=pointer("rest_list", allow_root=True),
+        rest_key=pointer("rest_key"),
+        rest_status=pointer("rest_status"),
+        rest_filled_qty=pointer("rest_filled_qty"),
+        exchange_ts_pointers=exchange_ts_pointers,
+        exchange_ts_format=exchange_ts_format,
+        heartbeat_event=name("heartbeat_event"),
+        gap_threshold_s=gap_threshold_s,
+    )
 
 
 def _parse_history(data: Mapping[str, Any], config_dir: Path) -> HistoryConfig:
