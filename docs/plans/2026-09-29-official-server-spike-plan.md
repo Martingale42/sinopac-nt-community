@@ -814,7 +814,7 @@ git commit -m "Scrub fixtures and scan for leaked identifiers"
 
 **Tests:**
 
-- `test_full_pipeline_against_stub` — 每一步結束碼符合預期，`reconcile.json` 三份清單皆空，`stats.json` 記到斷線間隔，`MANIFEST.toml` 有兩筆，掃描回 0。
+- `test_full_pipeline_against_stub` — 每一步結束碼符合預期，`reconcile.json` 的 `only_in_rest`、`only_in_sse`、`mismatched` 與 `missing_events_by_client` 皆空（假 server 的 trades 項目要帶 `status.order_ts`），`stats.json` 記到斷線間隔，`MANIFEST.toml` 有兩筆，掃描回 0。
 - `test_mode_flip_stops_orders` — 劇本中途切到 Production 後，假 server 收到的下單請求數不再增加，`orders` 回 3。
 - `test_scan_catches_planted_leak` — 在匯出的 fixture 植入假帳號的原始值後，`scrub --scan-only` 回 2。
 
@@ -894,8 +894,8 @@ git commit -m "Calibrate recorder settings from the first live session"
 
 **Verification:**
 
-Run: `jq '(.only_in_rest | length), (.only_in_sse | length), (.mismatched | length)' results/p1/<當日 reconcile run>/reconcile.json`
-Expected: 產出三個數字並抄入契約文件；GO 準則 4、5 依此判定，不要求為 0。
+Run: `jq '(.only_in_rest | length), (.only_in_sse | length), (.mismatched | length), ([.missing_events_by_client[] | length] | add)' results/p1/<當日 reconcile run>/reconcile.json`
+Expected: 產出四個數字並抄入契約文件；GO 準則 4、5 依此判定，不要求為 0。
 
 Run: `jq -c 'select(.op=="place_stock")' results/p1/*-orders-harness/rest.jsonl | wc -l`
 Expected: `1`。
