@@ -800,6 +800,7 @@ git commit -m "Rehearse the full recorder pipeline against a stub server"
 - 08:00 前：`p1rec stream --clients a,b --until <下週二 09:30 +08:00>` 於 tmux 啟動，即為 soak 起點；預先排入週五 10:30 取消 2330 tick 訂閱的動作（§6 D2：訂閱為全域，看兩個 client 是否同時停止收到 2330）。
 - 09:00 後：`p1rec orders --only <第一個生命週期案例>`，量出延遲後填入 `step_wait_s`、`fill_poll_s`、`fill_timeout_s`，再以 `p1rec orders` 跑其餘案例；從第一批真實事件填入 `EventFields`。同時確認四件事：IOC／FOK 未成交時交易所自動刪單的事件形狀（是否以 Cancel 事件送出）、部分成交後刪單時 REST 的狀態字串、成交事件的 `deal_key` 與 `deal_qty`、改量後刪單時 `cancel_quantity` 是累計值還是單次值；與 `derive_status` 的規則不符時先修正，再進 Task 13。
 - 13:45 後：`p1rec reconcile --sse-run <stream run_id>` 對當日委託對帳。
+- 收盤後：以 `p1rec scrub --scan-only` 的 log 確認每個類別的原始值長度都不低於 `MIN_SUBSTRING_MATCH_LEN`（log 只列類別與數量），有低於門檻的類別就先檢查對應的 JSON 指標再調整。
 - 14:00 後：`p1rec history`；`p1rec stats --sse-run <stream run_id>` 取心跳最大間隔，設定 `gap_threshold_s`。
 - 之後由持續運行的 `stream` 錄下夜盤；當日不再觸碰官方 server。
 
