@@ -427,7 +427,7 @@ git commit -m "Add scenario model, price references and funds preflight"
 - 訂閱是 server 全域（契約文件 §1）：所有 recorder 首次連上後，依序送出 `startup_requests`（例如每個帳戶的 `subscribe_trade`），再對 `instruments` 的每個商品與報價類型送出一次訂閱（本體由 `subscribe_body` 代入 `{code}`、`{exchange}`、`{security_type}`、`{quote_type}`、`{intraday_odd}`）。
 - 之後只有「主 recorder」（第一個 client 的第一條串流）重連時，才重送 `startup_requests` 與目前有效的全部訂閱，並記一次 INFO；其他 recorder 重連不重送。訂閱失敗記 ERROR 並繼續其餘訂閱。
 - `[[stream.action]]` 在指定時間送出 `subscribe` 或 `unsubscribe` 並更新有效訂閱集合；啟動時已過期的動作記 WARN 並跳過。
-- 到 `--until` 或收到 SIGINT／SIGTERM 時，所有 client 寫出 `stopped` 後以 0 結束。對每個 recorder 的 join 最多等 `http_timeout_s`；逾時仍未結束的 recorder（例如卡在等待 response header）記 WARN 並列出名稱，結束碼仍為 0。
+- 到 `--until` 或收到 SIGINT／SIGTERM 時，所有 client 寫出 `stopped` 後以 0 結束。對每個 recorder 的 join 最多等 `sse.SSE_READ_TIMEOUT_S`（三個心跳間隔，契約文件 §2；卡在等待 response header 的 recorder 最晚在這個時間放棄）；逾時仍未結束的 recorder（例如卡在等待 response header）記 WARN 並列出名稱，結束碼仍為 0。
 
 **Interface:**
 
