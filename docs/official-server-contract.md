@@ -38,7 +38,7 @@ P1 spike 的產出文件（設計：`docs/plans/2026-09-29-official-server-spike
 **環境**
 
 - 官方 CLI：`shioaji` 1.7.6，以 `uv tool` 安裝；wheel 為 PyPI 的 `cp37-abi3-manylinux_2_17_x86_64`，sha256 與 PyPI 公布值一致。
-- 設定：`~/.sinopac-p1/env`（0600），`SJ_HOME_PATH=~/.sinopac-p1/home`，綁 `127.0.0.1:8080`，另開 UDS `~/.sinopac-p1/home/server-8080.sock`。
+- 設定：`~/.sinopac-p1/env`（0600），`SJ_HOME_PATH=~/.sinopac-p1/home`，綁 `127.0.0.1:18080`（本機另一個位址的 8080 已有其他程序 listen，改用 18080 避免混淆），另開 UDS `~/.sinopac-p1/home/server-18080.sock`。
 - 啟動：`shioaji server start --no-open` 於前景執行，log 寫到 stdout／stderr，由呼叫端導向 `results/p1/<run_id>/server-start.log`；`shioaji server status` 只追蹤 daemon 模式，前景執行時顯示 `running: false`。
 - 本機 `127.0.0.1:8081` 已被其他程序佔用，harness 實例改用 `18081`。
 

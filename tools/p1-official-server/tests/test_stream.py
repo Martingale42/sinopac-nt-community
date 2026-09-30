@@ -1147,7 +1147,8 @@ def test_real_p1_toml_stream_section() -> None:
     assert [request.account_type for request in cfg.startup_requests] == ["S", "F"]
     assert cfg.daily_resend_at == wall_time(8, 35)
     assert any(instrument.intraday_odd for instrument in cfg.instruments)
-    assert cfg.actions == ()
+    codes = {instrument.code for instrument in cfg.instruments}
+    assert all(action.code in codes and action.at.tzinfo is not None for action in cfg.actions)
 
 
 def _set_secret_env(monkeypatch: pytest.MonkeyPatch) -> None:

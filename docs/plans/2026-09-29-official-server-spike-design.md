@@ -52,7 +52,7 @@ P1 是 spike，只回答一個問題：**NT adapter 能不能直接接官方 ser
 | `SJ_CA_PATH` | 本機 `.pfx` 憑證的實際路徑（舊 `.env` 的 `CA_PATH` 已失效，不可沿用） |
 | `SJ_CA_PASSWD` | CA 密碼 |
 | `SJ_HOME_PATH` | `~/.sinopac-p1/home`，隔離 token pool、合約與快取 |
-| `SJ_HTTP_ADDR` | `127.0.0.1:8080` |
+| `SJ_HTTP_ADDR` | `127.0.0.1:18080` |
 | `SJ_PRODUCTION` | 不設定 |
 
 舊 gateway 的 `~/.shioaji-server/.env` 不動。

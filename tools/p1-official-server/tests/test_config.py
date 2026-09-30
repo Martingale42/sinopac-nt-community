@@ -139,7 +139,7 @@ def test_load_real_p1_toml() -> None:
 
     cfg = load_config(repo_p1_toml)
 
-    assert cfg.base_url == "http://127.0.0.1:8080"
+    assert cfg.base_url == "http://127.0.0.1:18080"
     assert "place_stock" in cfg.endpoints
     assert "stream_connect" not in cfg.endpoints  # left to the stream section
     assert cfg.interlock == InterlockConfig(endpoint_op="mode", pointer="/simulation")

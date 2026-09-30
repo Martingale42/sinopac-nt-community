@@ -5,7 +5,7 @@
 # Relative paths (results_root, fixtures_root) resolve against the
 # directory that holds this file.
 
-base_url = "http://127.0.0.1:8080"
+base_url = "http://127.0.0.1:18080"
 
 # Longer than the server's default SJ_HTTP_TIMEOUT (30s), so the client
 # sees the server's own timeout response instead of timing out first.
@@ -135,28 +135,26 @@ pointer = "/simulation"
 # KBarsRequest's start/end are dates only (`shioaji data kbars --help`:
 # kbars are stored per day), not a time-of-day range.
 #
-# calibrate: Task 12 sets every date/start/end to the actual previous
-# trading day, the futures codes to that day's near-month contracts, and
-# adds the near-month at-the-money TXO call/put codes to the snapshots
-# query below, before running `p1rec history` live.
+# Dates are the trading day before the first live run, and the codes are
+# that day's near-month contracts and at-the-money TXO call and put.
 [history]
 usage_bytes_pointer = "/bytes"
 
 [[history.query]]
 op = "ticks"
-body = '{"contract": {"security_type": "STK", "exchange": "TSE", "code": "2330"}, "date": "2026-09-29", "query_type": "AllDay"}'
+body = '{"contract": {"security_type": "STK", "exchange": "TSE", "code": "2330"}, "date": "2026-09-30", "query_type": "AllDay"}'
 
 [[history.query]]
 op = "kbars"
-body = '{"contract": {"security_type": "STK", "exchange": "TSE", "code": "2330"}, "start": "2026-09-29", "end": "2026-09-29"}'
+body = '{"contract": {"security_type": "STK", "exchange": "TSE", "code": "2330"}, "start": "2026-09-30", "end": "2026-09-30"}'
 
 [[history.query]]
 op = "kbars"
-body = '{"contract": {"security_type": "FUT", "exchange": "TAIFEX", "code": "TMFJ6"}, "start": "2026-09-29", "end": "2026-09-29"}'
+body = '{"contract": {"security_type": "FUT", "exchange": "TAIFEX", "code": "TMFJ6"}, "start": "2026-09-30", "end": "2026-09-30"}'
 
 [[history.query]]
 op = "snapshots"
-body = '{"contracts": [{"security_type": "STK", "exchange": "TSE", "code": "2330"}, {"security_type": "STK", "exchange": "TSE", "code": "0050"}, {"security_type": "STK", "exchange": "TSE", "code": "2890"}, {"security_type": "STK", "exchange": "TSE", "code": "00981A"}, {"security_type": "STK", "exchange": "TSE", "code": "00631L"}, {"security_type": "FUT", "exchange": "TAIFEX", "code": "TXFJ6"}, {"security_type": "FUT", "exchange": "TAIFEX", "code": "MXFJ6"}, {"security_type": "FUT", "exchange": "TAIFEX", "code": "TMFJ6"}]}'
+body = '{"contracts": [{"security_type": "STK", "exchange": "TSE", "code": "2330"}, {"security_type": "STK", "exchange": "TSE", "code": "0050"}, {"security_type": "STK", "exchange": "TSE", "code": "2890"}, {"security_type": "STK", "exchange": "TSE", "code": "00981A"}, {"security_type": "STK", "exchange": "TSE", "code": "00631L"}, {"security_type": "FUT", "exchange": "TAIFEX", "code": "TXFJ6"}, {"security_type": "FUT", "exchange": "TAIFEX", "code": "MXFJ6"}, {"security_type": "FUT", "exchange": "TAIFEX", "code": "TMFJ6"}, {"security_type": "OPT", "exchange": "TAIFEX", "code": "TXO47900J6"}, {"security_type": "OPT", "exchange": "TAIFEX", "code": "TXO47900V6"}]}'
 
 # Contract price limits: contracts_stock's record and each element of
 # contracts_futures' array are both ContractInfoRecord, with these fields
@@ -293,8 +291,8 @@ retry_s = 1.0
 # send. It keeps two retry rounds out of the same 5-second window of the
 # account-query limit of 25 requests per 5 seconds noted in the old gateway
 # (shioaji-server, session.py); whether subscriptions count toward any
-# broker rate limit is unknown (design section 6 F). A full resend, about
-# 22 requests now and 26 with the TXO pair, is not bounded by it.
+# broker rate limit is unknown (design section 6 F). A full resend, one
+# request per subscription, is not bounded by it.
 request_retry_s = 60.0
 
 # Asia/Taipei time of the daily full resend: just after the server's daily
@@ -381,9 +379,9 @@ security_type = "STK"
 quote_types = ["Tick", "BidAsk"]
 intraday_odd = true
 
-# calibrate: on the run date, set the near-month TXF, MXF and TMF codes
-# from the server's contract list, and add the near-month at-the-money
-# TXO call and put.
+# Near-month futures from the server's contract list, and the near-month
+# TXO call and put whose strike is closest to the TAIEX close the day
+# before the soak.
 [[stream.instrument]]
 code = "TXFJ6"
 exchange = "TAIFEX"
@@ -405,9 +403,30 @@ security_type = "FUT"
 quote_types = ["Tick", "BidAsk"]
 intraday_odd = false
 
+[[stream.instrument]]
+code = "TXO47900J6"
+exchange = "TAIFEX"
+security_type = "OPT"
+quote_types = ["Tick", "BidAsk"]
+intraday_odd = false
+
+[[stream.instrument]]
+code = "TXO47900V6"
+exchange = "TAIFEX"
+security_type = "OPT"
+quote_types = ["Tick", "BidAsk"]
+intraday_odd = false
+
 # Scheduled subscription changes go in [[stream.action]] tables: at (a time
 # with a UTC offset), op (subscribe or unsubscribe), code and quote_type. An
 # action applies to every instrument entry with that code.
+
+# Whether one client's unsubscribe stops the quotes every client receives
+[[stream.action]]
+at = 2026-10-02T10:30:00+08:00
+op = "unsubscribe"
+code = "2330"
+quote_type = "Tick"
 
 # Order scenarios for `p1rec orders` (openapi.json PlaceOrderRequest,
 # UpdatePriceRequest, UpdateQtyRequest and CancelOrderRequest). In each
