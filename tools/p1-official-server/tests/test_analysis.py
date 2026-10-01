@@ -620,15 +620,13 @@ def test_client_missing_reports_fails(
     assert report["only_in_rest"] == []
 
 
-# Candidate shapes of New(2) -> UpdatePrice -> UpdateQty to 1 -> Cancel,
+# New(2) -> UpdatePrice -> UpdateQty to 1 -> Cancel in the recorded shape,
 # as (UpdateQty's order.quantity, its cancel_quantity, Cancel's
 # order.quantity, its cancel_quantity).
 @pytest.mark.parametrize(
     ("update_qty_size", "update_qty_cancel", "cancel_size", "cancel_cancel", "expected"),
     [
-        (1, 1, 1, 2, "Cancelled"),  # reduced size, cumulative cancel_quantity
-        (2, 1, 2, 2, "Cancelled"),  # placed size kept, cumulative cancel_quantity
-        (2, 1, 2, 1, "Cancelled"),  # placed size kept, per-operation cancel_quantity: the recorded shape
+        (2, 1, 2, 1, "Cancelled"),
     ],
 )
 def test_lifecycle_case_under_candidate_shapes(

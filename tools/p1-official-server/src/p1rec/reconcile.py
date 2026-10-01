@@ -236,8 +236,9 @@ def derive_status(
                 status is claimed for it.
                 calibrate: these rules rest on assumptions about events and
                 REST statuses not yet recorded, each of which shows up as a
-                mismatch if wrong: REST reads Filled for an order whose
-                quantity was reduced and whose remainder then fills; an IOC
+                mismatch if wrong: REST reads Filled once the filled
+                quantity reaches the placed quantity less what accepted
+                UpdateQty operations removed, in either order; an IOC
                 or FOK order that expires arrives as an accepted Cancel; and
                 a Reject operation leaves the status unchanged.
     Returns:    One of Failed, Filled, Cancelled, PartFilled, Submitted or
