@@ -27,6 +27,11 @@
 | P1REC-15 | open | 外洩掃描漏掉以 JSON 數字寫出的前導零帳號，以及 `*_b64` 欄位以外的 base64 token | `scrub/_matching.py` | final review（safety） |
 | P1REC-16 | open | `account_id_keys` 只列 `subaccount`；加入 `account_id`、`person_id`、`username` 作為縱深防護，先確認文件不會誤報 | `p1.toml` `[scrub]` | final review（safety） |
 | P1REC-24 | open | 沒給 `--trading-day` 且 `trades` 為空時，各 client 的 SSE 委託不計入任何欄位；改記未依日期過濾的數量，或計入 `excluded_other_days` | `reconcile.py` `run_reconcile` | final review（fb 複核） |
+| P1REC-26 | open | 模擬模式的帳務查詢由 SDK 回傳寫死的 0，preflight 的資金比對在模擬下沒有意義；改為模擬時只記錄不比對，並修改設計與計畫 | `preflight.py`、計畫 Task 5 | live 10/1 |
+| P1REC-27 | open | 模擬撮合不會讓未成交的 IOC／FOK 到期，遠價 IOC／FOK 案例停在 `Submitted` 而判為 `order_may_rest`；逾時後應主動刪單並記錄 | `orders.py` `_settle_fill` 與劇本 | live 10/1 |
+| P1REC-28 | open | `exceed_funds_stock_2890` 掛跌停價會被模擬環境以價格範圍退回，且模擬不檢查資金；改用帶內價格或移除此案例 | `scenarios.toml`、`orders.py` `check_cases` | live 10/1 |
+| P1REC-29 | open | 賣出案例的平倉買單仍掛 `limit_up`，會被模擬環境以價格範圍退回；目前劇本沒有賣出案例 | `orders.py` `_Runner._prepare` | live 10/1 |
+| P1REC-30 | open | 對外 IP 會變動，錄製檔裡會出現多個 IP，但 scrub 只認一個 `P1_EGRESS_IP`；改為可列多個 | `config.py` `[secrets]`、`scrub/_map.py` | live 10/1 |
 
 ## P1REC — P2（整理；不改行為）
 
