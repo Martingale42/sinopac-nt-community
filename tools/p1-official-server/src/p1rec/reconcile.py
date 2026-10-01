@@ -2,8 +2,9 @@
 
 Official order events carry no status string, so each order's final
 status on the SSE side is derived from its operations and deals by
-derive_status. The trades list comes from an earlier run's rest.jsonl,
-or is queried live after the simulation-mode check.
+derive_status. The REST side is the union of the trades lists of every
+account type trades.account_types names, taken from an earlier run's
+rest.jsonl or queried live after the simulation-mode check.
 """
 
 from __future__ import annotations
@@ -20,8 +21,9 @@ from pathlib import Path
 
 import httpx
 
+from p1rec.broker import BrokerError, account_request, fetch_accounts
 from p1rec.capture import CapturingClient
-from p1rec.config import EventFields, P1Config, TradeFields
+from p1rec.config import ACCOUNTS_OP, EventFields, P1Config, TradeFields
 from p1rec.interlock import assert_simulation
 from p1rec.jsonpointer import JsonPointerError, resolve_pointer
 from p1rec.order_status import (
@@ -62,11 +64,11 @@ _OPS_QUANTITY_ONLY = frozenset({"UpdatePrice", "UpdateQty"})
 # which is no value of the OpenAPI Status enum and so never matches REST.
 STATUS_UNKNOWN = "Unknown"
 
-# The trades request names no account, since every AccountRequest field
-# is optional and the endpoint returns all trades, and spells out refresh
-# so REST is brought up to date before it is compared.
+# Each trades request names one account, since without one trades lists
+# the stock account's orders alone, and spells out refresh so REST is
+# brought up to date before it is compared.
 _TRADES_OP = "trades"
-_TRADES_BODY: dict[str, object] = {"refresh": True}
+_TRADES_REFRESH: dict[str, object] = {"refresh": True}
 
 # TAIFEX's night session runs from 15:00 to 05:00 the next day, Taipei
 # time, and its orders belong to the next TAIFEX trading day rather than
@@ -528,9 +530,14 @@ def orders_from_rest(payload: object, fields: TradeFields, trading_day: date | N
     is only meaningful against the whole list; a repeated key keeps its
     last item, with a WARNING.
     """
+    return _orders_from_items(_rest_items(payload, fields), fields, trading_day)
+
+
+def _orders_from_items(items: Sequence[object], fields: TradeFields, trading_day: date | None) -> RestOrders:
+    """Return the orders among Trade items keyed by order key, as orders_from_rest describes."""
     orders: dict[str, OrderView] = {}
     excluded = 0
-    for index, item in enumerate(_rest_items(payload, fields)):
+    for index, item in enumerate(items):
         try:
             key = _pointer_str(item, fields.id)
             status = normalize_status(_pointer_str(item, fields.status))
@@ -563,11 +570,12 @@ def trading_day_of(payload: object, fields: TradeFields) -> date:
     has one, or when they span more than one date, since the snapshot
     then names no single date and one must be given.
     """
-    days = {
-        taipei_date(order_ns)
-        for item in _rest_items(payload, fields)
-        if (order_ns := _rest_order_ns(item, fields)) is not None
-    }
+    return _trading_day_of_items(_rest_items(payload, fields), fields)
+
+
+def _trading_day_of_items(items: Sequence[object], fields: TradeFields) -> date:
+    """Return the Asia/Taipei calendar date every order time among Trade items falls on, as trading_day_of describes."""
+    days = {taipei_date(order_ns) for item in items if (order_ns := _rest_order_ns(item, fields)) is not None}
     if len(days) != 1:
         found = ", ".join(sorted(day.isoformat() for day in days)) or "none"
         raise AnalysisError(f"trades order times give no single date (found: {found}); pass --trading-day")
@@ -617,48 +625,114 @@ def reconcile(sse: Mapping[str, ClientOrders], rest_orders: RestOrders) -> Recon
     )
 
 
-def last_trades_payload(rest_log: Path) -> object:
-    """Return the parsed body of the last trades response recorded in rest_log.
+def last_trades_payloads(rest_log: Path, account_types: Sequence[str]) -> dict[str, object]:
+    """Return, for each of account_types, the parsed body of the last trades response rest_log records for it.
 
-    Lines for requests that got no response are passed over; the last
-    response must be a 2xx JSON body, since falling back to an older
-    snapshot would compare SSE against a stale list.
+    Each response belongs to the account type its recorded request body
+    names. Lines for requests that got no response are passed over; each
+    account type's last response must be a 2xx JSON body, since falling
+    back to an older snapshot would compare SSE against a stale list.
+    Raises AnalysisError if no trades response is recorded, if any names
+    no account, since such a request lists the stock account's orders
+    alone, or if an account type has none.
     """
-    last: tuple[int, dict[str, object]] | None = None
+    last: dict[str, tuple[int, dict[str, object]]] = {}
+    recorded = False
     for number, record in read_jsonl(rest_log):
-        if record.get("op") == _TRADES_OP and "status" in record:
-            last = (number, record)
-    if last is None:
+        if record.get("op") != _TRADES_OP or "status" not in record:
+            continue
+        recorded = True
+        account_type = _requested_account_type(record)
+        if account_type is None:
+            raise AnalysisError(
+                f"{rest_log}:{number}: {_TRADES_OP} request names no account, the single-query shape that lists "
+                "the stock account's orders alone; reconcile without --rest-run to query every account"
+            )
+        last[account_type] = (number, record)
+    if not recorded:
         raise AnalysisError(f"{rest_log}: no {_TRADES_OP} response recorded")
+    missing = [account_type for account_type in account_types if account_type not in last]
+    if missing:
+        raise AnalysisError(f"{rest_log}: no {_TRADES_OP} response recorded for account type {', '.join(missing)}")
+    return {
+        account_type: _recorded_trades_body(rest_log, *last[account_type], account_type)
+        for account_type in account_types
+    }
 
-    number, record = last
+
+def _requested_account_type(record: Mapping[str, object]) -> str | None:
+    """Return the account_type a recorded request body names, or None if it names none."""
+    text = record.get("req_body")
+    if not isinstance(text, str):
+        return None
+    try:
+        body = json.loads(text)
+    except ValueError:
+        return None
+    account_type = body.get("account_type") if isinstance(body, dict) else None
+    return account_type if isinstance(account_type, str) and account_type else None
+
+
+def _recorded_trades_body(rest_log: Path, number: int, record: Mapping[str, object], account_type: str) -> object:
+    """Return the parsed body of the trades response at rest_log:number, which must be a 2xx JSON body."""
+    what = f"{rest_log}:{number}: last {_TRADES_OP} response for account type {account_type}"
     status = record["status"]
     if isinstance(status, bool) or not isinstance(status, int) or not httpx.codes.is_success(status):
-        raise AnalysisError(f"{rest_log}:{number}: last {_TRADES_OP} response is HTTP {status}")
+        raise AnalysisError(f"{what} is HTTP {status}")
     try:
         if isinstance(record.get("resp_body"), str):
             return json.loads(str(record["resp_body"]))
         return json.loads(base64.b64decode(str(record["resp_body_b64"]), validate=True))
     except (KeyError, ValueError) as exc:
-        raise AnalysisError(f"{rest_log}:{number}: last {_TRADES_OP} body is not JSON: {exc}") from exc
+        raise AnalysisError(f"{what} is not JSON: {exc}") from exc
 
 
-def _query_trades(cfg: P1Config, run_dir: Path, transport: httpx.BaseTransport | None) -> object:
-    """Check simulation mode, then fetch and record the trades list in run_dir/rest.jsonl."""
+def _query_trades(cfg: P1Config, run_dir: Path, transport: httpx.BaseTransport | None) -> dict[str, object]:
+    """Check simulation mode, then fetch the trades list of each of trades.account_types.
+
+    Each request carries that account's AccountRequest, taken from the
+    live accounts response, and every exchange is recorded in
+    run_dir/rest.jsonl. Raises AnalysisError if an endpoint is not
+    configured, accounts lists no account of a configured type, or a
+    trades response is not a 2xx JSON body.
+    """
     endpoint = cfg.endpoints.get(_TRADES_OP)
     if endpoint is None:
         raise AnalysisError(f"no [endpoints.{_TRADES_OP}] configured")
+    if ACCOUNTS_OP not in cfg.endpoints:
+        raise AnalysisError(f"no [endpoints.{ACCOUNTS_OP}] configured")
+
+    payloads: dict[str, object] = {}
     with CapturingClient(
         cfg.base_url, "reconcile", run_dir / "rest.jsonl", cfg.http_timeout_s, transport=transport
     ) as client:
         assert_simulation(client, cfg)
-        response = client.request(_TRADES_OP, endpoint, json_body=_TRADES_BODY)
-    if not httpx.codes.is_success(response.status):
-        raise AnalysisError(f"{_TRADES_OP} returned HTTP {response.status}")
-    try:
-        return response.json()
-    except ValueError as exc:
-        raise AnalysisError(f"{_TRADES_OP} response is not JSON: {exc}") from exc
+        try:
+            accounts = fetch_accounts(client, cfg)
+        except BrokerError as exc:
+            raise AnalysisError(str(exc)) from exc
+        bodies = {
+            account_type: {**account_request(_account_of_type(accounts, account_type)), **_TRADES_REFRESH}
+            for account_type in cfg.trades.account_types
+        }
+        for account_type, body in bodies.items():
+            response = client.request(_TRADES_OP, endpoint, json_body=body)
+            if not httpx.codes.is_success(response.status):
+                raise AnalysisError(f"{_TRADES_OP} for account type {account_type} returned HTTP {response.status}")
+            try:
+                payloads[account_type] = response.json()
+            except ValueError as exc:
+                what = f"{_TRADES_OP} response for account type {account_type}"
+                raise AnalysisError(f"{what} is not JSON: {exc}") from exc
+    return payloads
+
+
+def _account_of_type(accounts: Sequence[Mapping[str, object]], account_type: str) -> Mapping[str, object]:
+    """Return the first account of account_type, raising AnalysisError if accounts lists none."""
+    for account in accounts:
+        if account.get("account_type") == account_type:
+            return account
+    raise AnalysisError(f"{ACCOUNTS_OP} lists no account of type {account_type!r}, which trades.account_types names")
 
 
 def run_reconcile(
@@ -672,30 +746,33 @@ def run_reconcile(
 ) -> int:
     """Write run_dir/reconcile.json and return 0 if SSE and REST agree, 2 if not or if nothing was compared.
 
-    Without rest_run, the trades list is fetched live after the
-    simulation-mode check, and recorded in run_dir; with it, the last
-    trades response in that run's rest.jsonl is used. REST is read
-    before the SSE files, so an order placed meanwhile shows up as only
-    in SSE rather than silently widening the comparison. On both sides
-    only the orders of trading_day take part: an Asia/Taipei calendar
-    date, not a TAIFEX trading day, so a night-session order counts on the
-    date it was placed. It defaults to the date of the snapshot's order
-    times, except that an empty snapshot gives no date, so no SSE order
-    is compared either and reconcile.json records trading_day as null.
-    When REST lists no order on the day, nothing was compared, which is
-    logged as an ERROR and returns 2. InterlockError propagates; any
-    other failure to analyse is logged and returns 1.
+    REST is the union of the trades lists of every account type in
+    trades.account_types. Without rest_run, each is fetched live after
+    the simulation-mode check, and recorded in run_dir; with it, each
+    account type's last trades response in that run's rest.jsonl is used.
+    REST is read before the SSE files, so an order placed meanwhile shows
+    up as only in SSE rather than silently widening the comparison. On
+    both sides only the orders of trading_day take part: an Asia/Taipei
+    calendar date, not a TAIFEX trading day, so a night-session order
+    counts on the date it was placed. It defaults to the date of the
+    union's order times, except that an empty union gives no date, so no
+    SSE order is compared either and reconcile.json records trading_day
+    as null. When REST lists no order on the day, nothing was compared,
+    which is logged as an ERROR and returns 2. InterlockError propagates;
+    any other failure to analyse is logged and returns 1.
     """
     try:
         sse_dir = resolve_run_dir(cfg.results_root, sse_run)
         if rest_run is None:
-            payload = _query_trades(cfg, run_dir, transport)
+            payloads = _query_trades(cfg, run_dir, transport)
         else:
-            payload = last_trades_payload(resolve_run_dir(cfg.results_root, rest_run) / "rest.jsonl")
+            rest_log = resolve_run_dir(cfg.results_root, rest_run) / "rest.jsonl"
+            payloads = last_trades_payloads(rest_log, cfg.trades.account_types)
+        items = [item for payload in payloads.values() for item in _rest_items(payload, cfg.trades)]
         day = trading_day
-        if day is None and _rest_items(payload, cfg.trades):
-            day = trading_day_of(payload, cfg.trades)
-        rest = orders_from_rest(payload, cfg.trades, day)
+        if day is None and items:
+            day = _trading_day_of_items(items, cfg.trades)
+        rest = _orders_from_items(items, cfg.trades, day)
         sse_files = discover_sse_files(sse_dir)
 
         # With no day to window SSE by, no SSE order takes part either

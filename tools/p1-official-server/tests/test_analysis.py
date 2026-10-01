@@ -6,6 +6,7 @@ import base64
 import dataclasses
 import json
 import logging
+from collections.abc import Mapping, Sequence
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -180,13 +181,26 @@ def _trade(
     }
 
 
-def _trades_record(trades: object, status: int = 200) -> dict[str, object]:
+# Made-up accounts in the shape of the official server's accounts list
+_ACCOUNTS: dict[str, dict[str, object]] = {
+    "S": {"account_type": "S", "broker_id": "0000", "account_id": "0000001", "person_id": "Z000000000"},
+    "F": {"account_type": "F", "broker_id": "F000000", "account_id": "0000000", "person_id": "Z000000000"},
+}
+
+
+def _trades_body(account_type: str | None) -> dict[str, object]:
+    """Return a trades request body naming the made-up account of account_type, or no account if None."""
+    account = {} if account_type is None else _ACCOUNTS[account_type]
+    return {**account, "refresh": True}
+
+
+def _trades_record(trades: object, status: int = 200, account_type: str | None = "F") -> dict[str, object]:
     return {
         "client": "orders",
         "op": "trades",
         "method": "POST",
         "url": "http://127.0.0.1:8080/api/v1/order/trades",
-        "req_body": '{"refresh":true}',
+        "req_body": json.dumps(_trades_body(account_type), separators=(",", ":")),
         "sent_ts_ns": T0_NS,
         "recv_ts_ns": T0_NS,
         "status": status,
@@ -770,26 +784,44 @@ def test_rest_run_uses_last_trades_response(tmp_path: Path, trade_fields: TradeF
         ],
     )
 
-    payload = reconciliation.last_trades_payload(rest_log)
+    payload = reconciliation.last_trades_payloads(rest_log, ("F",))["F"]
 
     assert set(orders_from_rest(payload, trade_fields).orders) == {"new"}
 
 
-def _live_transport(simulation: bool, trades: object, seen: list[httpx.Request]) -> httpx.MockTransport:
+def _live_transport(
+    simulation: bool,
+    trades: Mapping[str, object],
+    seen: list[httpx.Request],
+    accounts: Sequence[str] = ("S", "F"),
+) -> httpx.MockTransport:
+    """Return a transport answering mode, the accounts of each type in accounts, and trades by the requested account.
+
+    trades maps an account type to the trades list, or to the raw
+    httpx.Response, its account is answered with.
+    """
+
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(request)
         if request.method == "GET" and request.url.path == "/api/v1/info":
             return httpx.Response(200, json={"simulation": simulation})
+        if request.method == "GET" and request.url.path == "/api/v1/auth/accounts":
+            return httpx.Response(200, json=[_ACCOUNTS[account_type] for account_type in accounts])
         if request.method == "POST" and request.url.path == "/api/v1/order/trades":
-            return httpx.Response(200, json=trades)
+            answer = trades.get(json.loads(request.content).get("account_type"))
+            if answer is None:
+                return httpx.Response(422, json={"message": "no such account"})
+            return answer if isinstance(answer, httpx.Response) else httpx.Response(200, json=answer)
         return httpx.Response(404)
 
     return httpx.MockTransport(handler)
 
 
-def _live_cfg_lines() -> list[str]:
-    # MINIMAL_CONFIG_LINES already declares the trades endpoint live reconcile queries
-    return list(MINIMAL_CONFIG_LINES)
+def _live_cfg_lines(account_types: Sequence[str] = ("F",)) -> list[str]:
+    """Return MINIMAL_CONFIG_LINES with the accounts endpoint live reconcile also queries, reconciling account_types."""
+    lines = [*MINIMAL_CONFIG_LINES, "", "[endpoints.accounts]", 'method = "GET"', 'path = "/api/v1/auth/accounts"']
+    lines[lines.index('account_types = ["F"]')] = f"account_types = {json.dumps(list(account_types))}"
+    return lines
 
 
 def test_last_trades_payload_rejects_non_2xx(tmp_path: Path) -> None:
@@ -799,7 +831,7 @@ def test_last_trades_payload_rejects_non_2xx(tmp_path: Path) -> None:
     )
 
     with pytest.raises(AnalysisError, match=r"HTTP 503"):
-        reconciliation.last_trades_payload(rest_log)
+        reconciliation.last_trades_payloads(rest_log, ("F",))
 
 
 def test_last_trades_payload_decodes_base64_body(tmp_path: Path, trade_fields: TradeFields) -> None:
@@ -808,7 +840,7 @@ def test_last_trades_payload_decodes_base64_body(tmp_path: Path, trade_fields: T
     record["resp_body_b64"] = base64.b64encode(json.dumps([_trade("t1", "Submitted", 0)]).encode()).decode()
     rest_log = _write_jsonl(tmp_path / "rest.jsonl", [record])
 
-    payload = reconciliation.last_trades_payload(rest_log)
+    payload = reconciliation.last_trades_payloads(rest_log, ("F",))["F"]
 
     assert set(orders_from_rest(payload, trade_fields).orders) == {"t1"}
 
@@ -821,13 +853,18 @@ def test_live_reconcile_checks_interlock_then_records_trades(tmp_path: Path, wri
     run_dir.mkdir()
     seen: list[httpx.Request] = []
 
-    exit_code = run_reconcile(cfg, SSE_RUN, None, run_dir, transport=_live_transport(True, _MATCHING_TRADES, seen))
+    transport = _live_transport(True, {"F": _MATCHING_TRADES}, seen)
+    exit_code = run_reconcile(cfg, SSE_RUN, None, run_dir, transport=transport)
 
     assert exit_code == 0
-    assert [request.url.path for request in seen] == ["/api/v1/info", "/api/v1/order/trades"]
-    assert json.loads(seen[1].content) == {"refresh": True}
+    assert [request.url.path for request in seen] == ["/api/v1/info", "/api/v1/auth/accounts", "/api/v1/order/trades"]
+    assert json.loads(seen[2].content) == _trades_body("F")
     recorded = [record for _, record in read_jsonl(run_dir / "rest.jsonl")]
-    assert [(record["client"], record["op"]) for record in recorded] == [("reconcile", "mode"), ("reconcile", "trades")]
+    assert [(record["client"], record["op"]) for record in recorded] == [
+        ("reconcile", "mode"),
+        ("reconcile", "accounts"),
+        ("reconcile", "trades"),
+    ]
     assert json.loads((run_dir / "reconcile.json").read_text(encoding="utf-8"))["rest_run"] is None
 
 
@@ -839,9 +876,133 @@ def test_live_reconcile_aborts_before_trades_when_not_simulation(tmp_path: Path,
     seen: list[httpx.Request] = []
 
     with pytest.raises(InterlockError):
-        run_reconcile(cfg, SSE_RUN, None, run_dir, transport=_live_transport(False, _MATCHING_TRADES, seen))
+        run_reconcile(cfg, SSE_RUN, None, run_dir, transport=_live_transport(False, {"F": _MATCHING_TRADES}, seen))
 
     assert [request.url.path for request in seen] == ["/api/v1/info"]
+    assert not (run_dir / "reconcile.json").exists()
+
+
+# A stock order both clients see beside _EVENTS' futures orders, which
+# trades lists only when asked for the stock account.
+_STOCK_EVENTS = [_order("s1", event_id="es1", state="StockOrder")]
+_STOCK_TRADES = [_trade("s1", "Submitted", 0)]
+
+
+def _write_both_accounts_sse(results_root: Path) -> None:
+    for client in ("a", "b"):
+        events = [*_STOCK_EVENTS, *_EVENTS]
+        _write_sse(results_root / SSE_RUN, client, "order_event", _order_frames(client, events))
+
+
+def test_live_trades_queried_per_account(tmp_path: Path, write_config: WriteConfig) -> None:
+    cfg = load_config(write_config(_live_cfg_lines(("S", "F"))))
+    _write_both_accounts_sse(cfg.results_root)
+    run_dir = tmp_path / "reconcile-run"
+    run_dir.mkdir()
+    seen: list[httpx.Request] = []
+
+    transport = _live_transport(True, {"S": _STOCK_TRADES, "F": _MATCHING_TRADES}, seen)
+    exit_code = run_reconcile(cfg, SSE_RUN, None, run_dir, transport=transport)
+
+    report = json.loads((run_dir / "reconcile.json").read_text(encoding="utf-8"))
+    assert exit_code == 0
+    assert report["rest_order_count"] == 4
+    assert report["only_in_sse"] == []
+    assert report["per_client_keys"] == {client: ["s1", "t1", "t2", "t3"] for client in ("a", "b")}
+    trades_requests = [request for request in seen if request.url.path == "/api/v1/order/trades"]
+    assert [json.loads(request.content) for request in trades_requests] == [_trades_body("S"), _trades_body("F")]
+    recorded = [record for _, record in read_jsonl(run_dir / "rest.jsonl") if record["op"] == "trades"]
+    assert [json.loads(str(record["resp_body"])) for record in recorded] == [_STOCK_TRADES, _MATCHING_TRADES]
+
+
+@pytest.mark.parametrize("source", ["live", "rest_run"])
+def test_missing_account_type_fails(
+    tmp_path: Path, write_config: WriteConfig, caplog: pytest.LogCaptureFixture, source: str
+) -> None:
+    cfg = load_config(write_config(_live_cfg_lines(("S", "F"))))
+    _write_both_accounts_sse(cfg.results_root)
+    _write_jsonl(cfg.results_root / REST_RUN / "rest.jsonl", [_trades_record(_STOCK_TRADES, account_type="S")])
+    run_dir = tmp_path / "reconcile-run"
+    run_dir.mkdir()
+    seen: list[httpx.Request] = []
+
+    # The live server lists no futures account; the recorded run holds no futures trades response
+    transport = _live_transport(True, {"S": _STOCK_TRADES, "F": _MATCHING_TRADES}, seen, accounts=("S",))
+    rest_run = None if source == "live" else REST_RUN
+    with caplog.at_level(logging.ERROR, logger="p1rec.reconcile"):
+        exit_code = run_reconcile(cfg, SSE_RUN, rest_run, run_dir, transport=transport)
+
+    assert exit_code == 1
+    assert not (run_dir / "reconcile.json").exists()
+    if source == "live":
+        assert "accounts lists no account of type 'F'" in caplog.text
+        assert "/api/v1/order/trades" not in [request.url.path for request in seen]
+    else:
+        assert "no trades response recorded for account type F" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("answer", "message"),
+    [
+        (httpx.Response(503, json={"message": "busy"}), "trades for account type F returned HTTP 503"),
+        (httpx.Response(200, content=b"not json"), "trades response for account type F is not JSON"),
+    ],
+)
+def test_live_trades_unusable_response_fails(
+    tmp_path: Path, write_config: WriteConfig, caplog: pytest.LogCaptureFixture, answer: httpx.Response, message: str
+) -> None:
+    cfg = load_config(write_config(_live_cfg_lines(("S", "F"))))
+    _write_both_accounts_sse(cfg.results_root)
+    run_dir = tmp_path / "reconcile-run"
+    run_dir.mkdir()
+
+    transport = _live_transport(True, {"S": _STOCK_TRADES, "F": answer}, [])
+    with caplog.at_level(logging.ERROR, logger="p1rec.reconcile"):
+        exit_code = run_reconcile(cfg, SSE_RUN, None, run_dir, transport=transport)
+
+    assert exit_code == 1
+    assert message in caplog.text
+    assert not (run_dir / "reconcile.json").exists()
+
+
+def test_rest_run_merges_accounts(tmp_path: Path, write_config: WriteConfig) -> None:
+    cfg = load_config(write_config(_live_cfg_lines(("S", "F"))))
+    _write_both_accounts_sse(cfg.results_root)
+    records = [
+        _trades_record([_trade("t1", "Submitted", 0)], account_type="F"),
+        _trades_record(_STOCK_TRADES, account_type="S"),
+        _trades_record(_MATCHING_TRADES, account_type="F"),
+    ]
+    _write_jsonl(cfg.results_root / REST_RUN / "rest.jsonl", records)
+    run_dir = tmp_path / "reconcile-run"
+    run_dir.mkdir()
+
+    exit_code = run_reconcile(cfg, SSE_RUN, REST_RUN, run_dir)
+
+    # Each account type's last response counts, so the earlier futures snapshot is passed over
+    report = json.loads((run_dir / "reconcile.json").read_text(encoding="utf-8"))
+    assert exit_code == 0
+    assert report["trading_day"] == "2026-10-01"
+    assert report["rest_order_count"] == 4
+    assert report["only_in_rest"] == []
+    assert report["only_in_sse"] == []
+    assert report["mismatched"] == []
+
+
+def test_rest_run_without_account_rejected(
+    tmp_path: Path, write_config: WriteConfig, caplog: pytest.LogCaptureFixture
+) -> None:
+    cfg = load_config(write_config())
+    _write_sse(cfg.results_root / SSE_RUN, "a", "order_event", _order_frames("a", _EVENTS))
+    _write_jsonl(cfg.results_root / REST_RUN / "rest.jsonl", [_trades_record(_MATCHING_TRADES, account_type=None)])
+    run_dir = tmp_path / "reconcile-run"
+    run_dir.mkdir()
+
+    with caplog.at_level(logging.ERROR, logger="p1rec.reconcile"):
+        exit_code = run_reconcile(cfg, SSE_RUN, REST_RUN, run_dir)
+
+    assert exit_code == 1
+    assert "rest.jsonl:1: trades request names no account, the single-query shape" in caplog.text
     assert not (run_dir / "reconcile.json").exists()
 
 

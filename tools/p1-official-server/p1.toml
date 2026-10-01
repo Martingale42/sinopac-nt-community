@@ -276,6 +276,11 @@ deal_quantity = "/status/deal_quantity"
 # futures API test carries 1790677936.694802.
 order_ts = "/status/order_ts"
 
+# Account types reconcile lists trades for, one request each with that
+# account's AccountRequest, since trades without an account lists the
+# stock account's orders alone.
+account_types = ["S", "F"]
+
 # Multi-client SSE recording (docs/official-server-contract.md sections 1
 # and 2). Stream subscriptions are server-global, so p1rec stream sends
 # them once for all clients, and again only when the leader stream, the

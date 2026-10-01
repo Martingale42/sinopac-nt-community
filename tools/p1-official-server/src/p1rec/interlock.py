@@ -194,7 +194,7 @@ def _self_test_cfg(interlock: InterlockConfig) -> P1Config:
             fill_poll_s=0.0,
             fill_timeout_s=0.0,
         ),
-        trades=TradeFields(list="", id="", status="", deal_quantity="", order_ts=""),
+        trades=TradeFields(list="", id="", status="", deal_quantity="", order_ts="", account_types=()),
         events=_UNUSED_EVENT_FIELDS,
         history=HistoryConfig(queries=(), usage_bytes_pointer="/bytes"),
         scrub=ScrubConfig(

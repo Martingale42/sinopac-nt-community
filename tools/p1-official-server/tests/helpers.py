@@ -45,7 +45,7 @@ UNUSED_ORDERS_CONFIG = OrdersConfig(
     fill_poll_s=0.0,
     fill_timeout_s=0.0,
 )
-UNUSED_TRADE_FIELDS = TradeFields(list="", id="", status="", deal_quantity="", order_ts="")
+UNUSED_TRADE_FIELDS = TradeFields(list="", id="", status="", deal_quantity="", order_ts="", account_types=())
 
 # A minimal but complete p1.toml, shared by tests that need a valid config
 # to load and mutate, independent of the real p1.toml.
@@ -139,13 +139,15 @@ MINIMAL_CONFIG_LINES = [
     'method = "POST"',
     'path = "/api/v1/order/trades"',
     "",
-    # [trades], shaped like the official server's trades list
+    # [trades], shaped like the official server's trades list, reconciling
+    # the futures account alone, which every order event fixture names.
     "[trades]",
     'list = ""',
     'id = "/order/id"',
     'status = "/status/status"',
     'deal_quantity = "/status/deal_quantity"',
     'order_ts = "/status/order_ts"',
+    'account_types = ["F"]',
     "",
     "[orders]",
     "step_wait_s = 3",

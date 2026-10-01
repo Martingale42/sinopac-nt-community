@@ -751,16 +751,25 @@ class StubBroker(FakeServer):
         return httpx.Response(200, json=self._trade(order))
 
     def _trades(self, body: object) -> httpx.Response:
-        """Answer TradesRequest: every order, or only the account's when the request names one."""
+        """Answer TradesRequest with the orders of the account it names, or of the stock account if it names none.
+
+        The official server lists the stock account's orders alone for a
+        request without an account, so the stub does too.
+        """
         request = body if isinstance(body, dict) else {}
-        account_type, account_id = request.get("account_type"), request.get("account_id")
+        if request.get("account_type") is None:
+            account = next((account for account in self.accounts if account.get("account_type") == "S"), None)
+        else:
+            account = self._find_account(request)
+        if account is None:
+            return _error(422, "no such account")
         return httpx.Response(
             200,
             json=[
                 self._trade(order)
                 for order in self._orders.values()
-                if account_type is None
-                or (order.account.get("account_type") == account_type and order.account.get("account_id") == account_id)
+                if order.account.get("account_type") == account["account_type"]
+                and order.account.get("account_id") == account["account_id"]
             ],
         )
 

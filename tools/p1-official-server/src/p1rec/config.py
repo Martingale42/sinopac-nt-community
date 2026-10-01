@@ -158,7 +158,7 @@ class OrdersConfig:
 
 @dataclass(frozen=True)
 class TradeFields:
-    """JSON pointers into the trades response and into one Trade.
+    """JSON pointers into the trades response and into one Trade, and the accounts reconcile lists trades for.
 
     The place, update and cancel responses are each one Trade too, so
     orders and reconcile read every Trade through these same pointers.
@@ -178,6 +178,10 @@ class TradeFields:
     # The order time in epoch seconds, which dates a trades snapshot when
     # no --trading-day is given and windows the REST side by calendar date.
     order_ts: str
+
+    # Account types whose trades reconcile queries one account at a time,
+    # since trades without an account lists the stock account's orders alone.
+    account_types: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -934,7 +938,7 @@ def _parse_orders(data: Mapping[str, Any], config_dir: Path) -> OrdersConfig:
 
 
 # Every key [trades] may hold, so a misspelt one fails at load
-_TRADES_KEYS = frozenset({"list", "id", "status", "deal_quantity", "order_ts"})
+_TRADES_KEYS = frozenset({"list", "id", "status", "deal_quantity", "order_ts", "account_types"})
 
 
 def _parse_trades(data: Mapping[str, Any], config_dir: Path) -> TradeFields:
@@ -945,7 +949,19 @@ def _parse_trades(data: Mapping[str, Any], config_dir: Path) -> TradeFields:
         status=_get_trade_pointer(data, "trades.status"),
         deal_quantity=_get_trade_pointer(data, "trades.deal_quantity"),
         order_ts=_get_trade_pointer(data, "trades.order_ts"),
+        account_types=_get_account_types(data, "trades.account_types"),
     )
+
+
+def _get_account_types(data: Mapping[str, Any], dotted_key: str) -> tuple[str, ...]:
+    """Read dotted_key as a non-empty array of distinct, non-empty account type strings."""
+    value = _lookup(data, dotted_key)
+    if not isinstance(value, list) or not value or not all(isinstance(item, str) and item for item in value):
+        raise ConfigError(f"config key {dotted_key} must be a non-empty array of non-empty strings")
+    repeated = sorted({item for item in value if value.count(item) > 1})
+    if repeated:
+        raise ConfigError(f"config key {dotted_key} repeats {', '.join(repeated)}")
+    return tuple(value)
 
 
 def _get_trade_pointer(data: Mapping[str, Any], dotted_key: str, *, allow_root: bool = False) -> str:

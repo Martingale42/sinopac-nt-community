@@ -90,6 +90,7 @@ def test_load_config_success(tmp_path: Path, write_config: WriteConfig) -> None:
         status="/status/status",
         deal_quantity="/status/deal_quantity",
         order_ts="/status/order_ts",
+        account_types=("F",),
     )
     # These remaining placeholder types only need to construct and load here
     assert cfg.stream == StreamConfig()
@@ -531,6 +532,22 @@ def _with_trades_line(key: str, line: str | None) -> list[str]:
 def test_trades_pointers_validated(write_config: WriteConfig, key: str, line: str | None, message: str) -> None:
     with pytest.raises(ConfigError, match=message):
         load_config(write_config(_with_trades_line(key, line)))
+
+
+@pytest.mark.parametrize(
+    ("line", "message"),
+    [
+        (None, r"missing config key: trades\.account_types"),
+        ("account_types = []", r"trades\.account_types must be a non-empty array of non-empty strings"),
+        ('account_types = "F"', r"trades\.account_types must be a non-empty array of non-empty strings"),
+        ('account_types = ["S", 1]', r"trades\.account_types must be a non-empty array of non-empty strings"),
+        ('account_types = ["S", ""]', r"trades\.account_types must be a non-empty array of non-empty strings"),
+        ('account_types = ["S", "F", "S"]', r"trades\.account_types repeats S$"),
+    ],
+)
+def test_trades_account_types_validated(write_config: WriteConfig, line: str | None, message: str) -> None:
+    with pytest.raises(ConfigError, match=message):
+        load_config(write_config(_with_trades_line("account_types", line)))
 
 
 @pytest.mark.parametrize(
