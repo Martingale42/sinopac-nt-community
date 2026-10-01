@@ -71,6 +71,10 @@ P1 spike 的產出文件（設計：`docs/plans/2026-09-29-official-server-spike
 - 不帶帳戶的 `trades` 只回預設的證券帳戶：28 筆全為 `S`／`STK`，同日 16 筆期貨委託只出現在 SSE。改為逐帳戶查詢並依實測的數量語意推導狀態後，當日對帳 44 筆全數一致（REST 與兩個 client 皆 44 筆，無差異）。
 - 改量與刪單的數量欄位（股票與期貨生命週期案例各一筆，下 2 口、改價、減量 1、刪單，皆 `op_code` `00`）：`order.quantity` 始終為下單數量；`status.cancel_quantity` 是該次操作取消的量，不累計；`status.order_quantity` 是操作後仍有效的量（2→1→0）。REST 狀態為 `Cancelled`。
 - 有一筆期貨委託的成交事件（`FuturesDeal`）早於它的 New 事件送達。
+- `custom_field`：6 字元的委託被接受，委託事件原樣帶回同樣 6 字元（2 筆）；7 字元在下單時同步回 422「ensure this value has at most 6 characters」。
+- 股票委託的 MKP：6 筆 `place_order` 皆同步回 400 `parse http data failed`；期貨的 MKT、MKP 各委託條件皆成交。
+- 交易所拒單只以 `op_code` `88` 的事件送達：「價格超過漲跌幅範圍」2 筆、「價格檔數錯誤」3 筆（ETF 零股以 0.01 的 ETF tick 掛價；改用股票 tick 後被接受）。
+- 下單請求送出到 SSE 收到 New 事件：43 筆，中位數 70.8 ms、最大 557 ms。到第一筆成交事件：期貨多在 1 秒內，2890 與 00981A 多為數秒、最長 18.3 秒；推論：模擬撮合跟著真實成交發生。
 - 模擬撮合不會讓未成交的遠價 IOC／FOK 自動到期，委託停在 `Submitted`（P1REC-27）；以合約檔漲跌停掛價會被模擬環境以價格範圍退回。
 - 兩個 client 的各串流 frame 數完全相同（行情 284837、委託 353、合約事件 266），對帳時兩者之間沒有缺漏的報告。
 - 心跳：6 條串流約 2.2 小時，間隔 29.993–30.008 秒，沒有超過 60 秒的空白；`gap_threshold_s` 依此設為 60.1。
