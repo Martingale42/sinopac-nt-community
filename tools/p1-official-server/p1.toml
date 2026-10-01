@@ -186,12 +186,11 @@ futures_available_pointer = "/available_margin"
 [funds.stock_report_only]
 balance = "/acc_balance"
 
-# Futures contract code -> initial margin per contract in TWD, as an
-# integer or a quoted decimal string. calibrate: before preflight, fill in
-# TAIFEX's initial margin published for the run date, for every futures
-# code any futures case trades, resting or filling; preflight fails while
-# one is missing.
+# Futures contract code -> TAIFEX's initial margin per contract in TWD as
+# published on the run date, for every futures code any futures case
+# trades, resting or filling; preflight fails while one is missing.
 [funds.futures_margin_twd]
+TMFJ6 = 35050
 
 # Identifiers to scrub besides the secrets above: what each pointer finds
 # in every account of a recorded accounts response (an array) or in a
@@ -437,10 +436,11 @@ quote_type = "Tick"
 # since order_lot IntradayOdd marks it; board-lot stock uses Common.
 [orders]
 
-# Initial values only. calibrate: set from the submit-to-report latency the
-# first lifecycle case measures, before the remaining cases run.
-step_wait_s = 3
-fill_poll_s = 2
+# step_wait_s and fill_poll_s are about twice the slowest submit-to-report
+# latency the first live lifecycle case measured; fill_timeout_s stays at
+# its initial value until fills are measured.
+step_wait_s = 1
+fill_poll_s = 1
 fill_timeout_s = 60
 
 # ContractRequest.exchange per scenario market; every stock the scenarios
