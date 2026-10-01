@@ -64,6 +64,19 @@ P1 spike 的產出文件（設計：`docs/plans/2026-09-29-official-server-spike
 - 重啟 server 會沿用 `SJ_HOME_PATH` 下 token pool 的快取 token，不會重新登入；要強制重新登入須先 `shioaji utils token clean --slot <n>`。
 - server log 的 `Subscribed trade events for account …` 一行含帳號明文，引用 server log 前須去識別化。
 
+**10/1 live（Task 12；證據在本機 `results/p1/20261001T*`）**
+
+- soak 起點延到 12:09：前一晚對外 IP 換了，快取 token 過期後重新登入被白名單拒絕（`not allow`），改用登記當日 IP 的新 API key 後才啟動。浮動 IP 會讓每日重新登入失敗，正式上線前需要固定對外 IP。
+- 模擬模式的帳務查詢（`trading_limits`、`account_balance`、`margin`）可用額度皆回 0，preflight 的資金比對因此不成立（`funds_ok: false`，需求為股票 79914、期貨保證金 70100），下單照常被接受（P1REC-26）。
+- 不帶帳戶的 `trades` 只回預設的證券帳戶：28 筆全為 `S`／`STK`，同日 16 筆期貨委託只出現在 SSE。對帳須逐帳戶查詢。
+- 改量與刪單的數量欄位（股票與期貨生命週期案例各一筆，下 2 口、改價、減量 1、刪單，皆 `op_code` `00`）：`order.quantity` 始終為下單數量；`status.cancel_quantity` 是該次操作取消的量，不累計；`status.order_quantity` 是操作後仍有效的量（2→1→0）。REST 狀態為 `Cancelled`。
+- 有一筆期貨委託的成交事件（`FuturesDeal`）早於它的 New 事件送達。
+- 模擬撮合不會讓未成交的遠價 IOC／FOK 自動到期，委託停在 `Submitted`（P1REC-27）；以合約檔漲跌停掛價會被模擬環境以價格範圍退回。
+- 兩個 client 的各串流 frame 數完全相同（行情 284837、委託 353、合約事件 266），對帳時兩者之間沒有缺漏的報告。
+- 心跳：6 條串流約 2.2 小時，間隔 29.993–30.008 秒，沒有超過 60 秒的空白；`gap_threshold_s` 依此設為 60.1。
+- 行情尖峰 859 frame／秒（13:04:47 台北時間）；收到時間減交易所時間 p50 21.8 ms、p99 132.7 ms、最大 241 ms（本機時鐘與 NTP 差 −4.3 ms），170 筆時間無法解析。
+- 歷史查詢四筆（ticks、兩筆 kbars、snapshots）回應合計約 500 KB，`usage` 的 `bytes` 前後不變；推論：歷史查詢不計入當日額度，或計數不即時更新。
+
 **假設關卡**
 
 - A1 成立：`GET /api/v1/info` 的 `/simulation`。

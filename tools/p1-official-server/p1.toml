@@ -244,10 +244,9 @@ exchange_ts_format = "%Y-%m-%d %H:%M:%S.%f"
 
 heartbeat_event = "heartbeat"
 
-# calibrate: twice the largest heartbeat interval stats measures on the
-# first live day, and until then twice the 30 s heartbeat measured in
-# docs/official-server-contract.md section 2.
-gap_threshold_s = 60.0
+# Twice the largest heartbeat interval stats measured on the first live
+# day, rounded up.
+gap_threshold_s = 60.1
 
 # Pointers into the trades response and into one Trade (openapi.json
 # Trade), the shape the place, update and cancel responses share: orders
