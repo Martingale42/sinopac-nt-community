@@ -162,7 +162,7 @@ def _add_reconcile_arguments(sub: argparse.ArgumentParser) -> None:
         "--rest-run",
         default=None,
         type=_validate_run_id,
-        help="run id whose last recorded trades response is used (default: query trades now)",
+        help="run id whose last recorded trades response per account type is used (default: query trades now)",
     )
     sub.add_argument(
         "--trading-day",

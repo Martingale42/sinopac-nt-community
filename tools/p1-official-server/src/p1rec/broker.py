@@ -1,4 +1,4 @@
-"""Queries against the official server that preflight and the order runner share.
+"""Queries against the official server that preflight, the order runner and reconcile share.
 
 Every function sends through a CapturingClient, so each raw response is
 recorded in rest.jsonl, and reads numbers as Decimal, so no price or
@@ -38,7 +38,7 @@ _FUTURES_DELIVERY_CODE_LEN = 2
 
 
 class BrokerError(RuntimeError):
-    """Raised when a response lacks what preflight or the order runner needs."""
+    """Raised when a response lacks what the caller needs."""
 
 
 def parse_json_exact(op: str, response: CapturedResponse) -> object:

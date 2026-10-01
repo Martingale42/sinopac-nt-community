@@ -197,6 +197,7 @@ id = "/order/id"
 status = "/status/status"
 deal_quantity = "/status/deal_quantity"
 order_ts = "/status/order_ts"
+account_types = ["S", "F"]
 
 [stream]
 
