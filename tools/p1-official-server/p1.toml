@@ -223,8 +223,10 @@ op_type = "/operation/op_type"
 op_code = "/operation/op_code"
 op_code_success = "00"
 
-# The order's size comes from the order, since a Cancel's
-# status.order_quantity reads 0.
+# order.quantity stays the placed size through every operation, while
+# status.order_quantity is what remains open after the operation, so the
+# order's size comes from the order. status.cancel_quantity is what one
+# UpdateQty or Cancel removed, not a running total.
 order_qty = "/order/quantity"
 cancel_qty = "/status/cancel_quantity"
 

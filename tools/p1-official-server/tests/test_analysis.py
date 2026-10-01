@@ -68,14 +68,17 @@ def _order(
     cancel_qty: int = 0,
     exchange_ts: float = T0_S,
     state: str = "FuturesOrder",
+    order_quantity: int | None = None,
 ) -> dict[str, object]:
     """Return an OrderEvent with the keys of the official server's order reports, values fake.
 
-    The server reports the placed size in order.quantity, while a Cancel's
-    status.order_quantity reads 0, so here only an accepted New carries
+    The server reports the placed size in order.quantity and what remains
+    after the operation in status.order_quantity, which reconcile never
+    reads; unless order_quantity gives it, only an accepted New carries
     the size in status.
     """
-    status_order_qty = quantity if op_type == "New" and op_code == "00" else 0
+    if order_quantity is None:
+        order_quantity = quantity if op_type == "New" and op_code == "00" else 0
     return {
         "state": state,
         "data": {
@@ -102,7 +105,7 @@ def _order(
                     "exchange_ts": exchange_ts,
                     "modified_price": 0.0,
                     "cancel_quantity": cancel_qty,
-                    "order_quantity": status_order_qty,
+                    "order_quantity": order_quantity,
                     "web_id": "Z",
                 },
                 "contract": {"code": "TMFJ6"},
@@ -421,30 +424,40 @@ def test_stats_peak_second_and_gaps(
 
 
 @pytest.mark.parametrize(
-    ("new_ok", "cancel_ok", "order_qty", "cancel_qty", "filled_qty", "expected"),
+    ("new_ok", "cancel_ok", "order_qty", "reduced_qty", "cancel_qty", "filled_qty", "expected"),
     [
-        (False, False, 2, 0, 0, "Failed"),
-        (True, False, 2, 0, 0, "Submitted"),
-        (True, False, 2, 0, 1, "PartFilled"),
-        (True, False, 2, 0, 2, "Filled"),
-        (True, True, 2, 2, 0, "Cancelled"),
-        (True, True, 3, 2, 1, "Cancelled"),  # partly filled, remainder cancelled
-        (True, False, 3, 1, 1, "PartFilled"),  # quantity reduced without a Cancel
-        (True, True, 3, 1, 0, "Submitted"),  # a Cancel that left quantity working
-        (None, False, None, 0, 1, "Unknown"),  # deals seen, order events missed
-        (None, False, 2, 0, 0, "Unknown"),  # quantity known but no New seen
-        (True, False, 0, 0, 0, "Submitted"),  # a zero quantity alone never reads Filled
-        (None, True, 2, 2, 0, "Unknown"),  # a Cancel seen without its New
-        (None, False, 2, 0, 2, "Unknown"),  # deals seen without the New
+        (False, False, 2, 0, 0, 0, "Failed"),
+        (True, False, 2, 0, 0, 0, "Submitted"),
+        (True, False, 2, 0, 0, 1, "PartFilled"),
+        (True, False, 2, 0, 0, 2, "Filled"),
+        (True, True, 2, 0, 2, 0, "Cancelled"),
+        (True, True, 3, 0, 2, 1, "Cancelled"),  # partly filled, remainder cancelled
+        (True, False, 3, 1, 1, 1, "PartFilled"),  # quantity reduced without a Cancel
+        (True, True, 3, 0, 1, 0, "Submitted"),  # a Cancel that left quantity working
+        (None, False, None, 0, 0, 1, "Unknown"),  # deals seen, order events missed
+        (None, False, 2, 0, 0, 0, "Unknown"),  # quantity known but no New seen
+        (True, False, 0, 0, 0, 0, "Submitted"),  # a zero quantity alone never reads Filled
+        (None, True, 2, 0, 2, 0, "Unknown"),  # a Cancel seen without its New
+        (None, False, 2, 0, 0, 2, "Unknown"),  # deals seen without the New
+        (True, True, 2, 1, 2, 0, "Cancelled"),  # reduced, then the remainder cancelled
+        (True, False, 2, 1, 1, 0, "Submitted"),  # reduced, the remainder still working
+        (True, False, 2, 1, 1, 1, "Filled"),  # reduced, then the remainder filled
     ],
 )
 def test_derive_status_rules(
-    new_ok: bool | None, cancel_ok: bool, order_qty: int | None, cancel_qty: int, filled_qty: int, expected: str
+    new_ok: bool | None,
+    cancel_ok: bool,
+    order_qty: int | None,
+    reduced_qty: int,
+    cancel_qty: int,
+    filled_qty: int,
+    expected: str,
 ) -> None:
     status = derive_status(
         new_ok=new_ok,
         cancel_ok=cancel_ok,
         order_qty=None if order_qty is None else Decimal(order_qty),
+        reduced_qty=Decimal(reduced_qty),
         cancel_qty=Decimal(cancel_qty),
         filled_qty=Decimal(filled_qty),
     )
@@ -613,9 +626,9 @@ def test_client_missing_reports_fails(
 @pytest.mark.parametrize(
     ("update_qty_size", "update_qty_cancel", "cancel_size", "cancel_cancel", "expected"),
     [
-        (1, 1, 1, 2, "Cancelled"),  # the assumed shape: reduced size, cumulative cancel_quantity
+        (1, 1, 1, 2, "Cancelled"),  # reduced size, cumulative cancel_quantity
         (2, 1, 2, 2, "Cancelled"),  # placed size kept, cumulative cancel_quantity
-        (2, 1, 2, 1, "Submitted"),  # placed size kept, per-operation cancel_quantity: a known gap
+        (2, 1, 2, 1, "Cancelled"),  # placed size kept, per-operation cancel_quantity: the recorded shape
     ],
 )
 def test_lifecycle_case_under_candidate_shapes(
@@ -640,10 +653,49 @@ def test_lifecycle_case_under_candidate_shapes(
     assert views["a"].orders["t1"] == OrderView(key="t1", status=expected, filled_qty=Decimal(0))
 
 
+# The lifecycle case as the official server reported it for a stock and a
+# futures order: (op_type, order.quantity, status.order_quantity,
+# status.cancel_quantity), every operation accepted.
+_REDUCED_THEN_CANCELLED = [
+    ("New", 2, 2, 0),
+    ("UpdatePrice", 2, 2, 0),
+    ("UpdateQty", 2, 1, 1),
+    ("Cancel", 2, 0, 1),
+]
+
+
+@pytest.mark.parametrize("state", ["StockOrder", "FuturesOrder"])
+def test_cancel_after_qty_reduction_is_cancelled(
+    tmp_path: Path, fields: EventFields, trade_fields: TradeFields, state: str
+) -> None:
+    events = [
+        _order("t1", op_type, event_id=f"e{index}", quantity=size, order_quantity=left, cancel_qty=removed, state=state)
+        for index, (op_type, size, left, removed) in enumerate(_REDUCED_THEN_CANCELLED)
+    ]
+    path = _write_sse(tmp_path, "a", "order_event", _order_frames("a", events))
+
+    sse = orders_from_sse({"a": [path]}, fields)
+
+    assert sse["a"].orders["t1"] == OrderView(key="t1", status="Cancelled", filled_qty=Decimal(0))
+    assert reconcile(sse, orders_from_rest([_trade("t1", "Cancelled", 0)], trade_fields)).clean
+
+
+def test_partial_cancel_is_not_cancelled(tmp_path: Path, fields: EventFields) -> None:
+    events = [
+        _order("t1", event_id="e1", quantity=2),
+        _order("t1", "UpdateQty", event_id="e2", quantity=2, order_quantity=1, cancel_qty=1),
+    ]
+    path = _write_sse(tmp_path, "a", "order_event", _order_frames("a", events))
+
+    views = orders_from_sse({"a": [path]}, fields)
+
+    assert views["a"].orders["t1"] == OrderView(key="t1", status="Submitted", filled_qty=Decimal(0))
+
+
 def test_reduced_order_filling_its_remainder_is_filled(tmp_path: Path, fields: EventFields) -> None:
     events = [
         _order("t1", event_id="e1", quantity=2),
-        _order("t1", "UpdateQty", event_id="e2", quantity=1, cancel_qty=1),
+        _order("t1", "UpdateQty", event_id="e2", quantity=2, cancel_qty=1, order_quantity=1),
         _deal("t1", 1, event_id="e3"),
     ]
     path = _write_sse(tmp_path, "a", "order_event", _order_frames("a", events))

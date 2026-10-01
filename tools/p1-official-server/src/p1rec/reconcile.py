@@ -54,11 +54,13 @@ from p1rec.sse import SseFrame
 
 logger = logging.getLogger(__name__)
 
-# The OpenAPI OpType values that change an order's derived status; the
-# update operations only refresh its quantities.
+# The OpenAPI OpType values derive_status reads: New places the order,
+# UpdateQty and Cancel each remove quantity from it, and UpdatePrice
+# changes nothing it reads.
 _OP_NEW = "New"
+_OP_UPDATE_QTY = "UpdateQty"
 _OP_CANCEL = "Cancel"
-_OPS_QUANTITY_ONLY = frozenset({"UpdatePrice", "UpdateQty"})
+_OP_UPDATE_PRICE = "UpdatePrice"
 
 # The status derive_status gives an order whose events cannot place it,
 # which is no value of the OpenAPI Status enum and so never matches REST.
@@ -202,6 +204,7 @@ def derive_status(
     new_ok: bool | None,
     cancel_ok: bool,
     order_qty: Decimal | None,
+    reduced_qty: Decimal,
     cancel_qty: Decimal,
     filled_qty: Decimal,
 ) -> str:
@@ -213,29 +216,30 @@ def derive_status(
     Formula:    The first rule that holds wins:
                 Failed      if a New operation was rejected;
                 Unknown     if no accepted New was seen, or order_qty is None;
-                Filled      if filled_qty > 0 and filled_qty >= order_qty;
-                Cancelled   if cancel_ok and cancel_qty >= order_qty - filled_qty;
+                Filled      if filled_qty > 0 and filled_qty >= order_qty - reduced_qty;
+                Cancelled   if cancel_ok and cancel_qty + filled_qty >= order_qty;
                 PartFilled  if filled_qty > 0;
                 Submitted   otherwise.
     Domain:     new_ok is None when no New event was seen, else whether it
                 was accepted; cancel_ok is whether any Cancel was
-                accepted; order_qty is the latest non-zero order size an
-                accepted operation reported, None if none did; cancel_qty
-                is the largest cancel_quantity an accepted operation
-                reported; filled_qty is the sum of deal quantities.
+                accepted; order_qty is the placed size, the accepted New's
+                order.quantity, None if it reported none above 0;
+                reduced_qty is the sum of cancel_quantity over accepted
+                UpdateQty operations, and cancel_qty the same sum over
+                accepted UpdateQty and Cancel operations, since each
+                operation's cancel_quantity is what that operation alone
+                removed; filled_qty is the sum of deal quantities.
                 Quantities are non-negative and in the events' own units;
                 an overfill also reads Filled, and the filled quantity
                 compared with REST still shows it. Without the accepted
                 New the rest of an order's history is incomplete, so no
                 status is claimed for it.
-                calibrate: these rules rest on assumptions about events not
-                yet recorded, each of which shows up as a mismatch if wrong:
-                cancel_quantity is cumulative over an order's operations,
-                not per operation; after an accepted UpdateQty,
-                order.quantity reports the reduced size, so a reduced order
-                that fills its remainder reads Filled; an IOC or FOK order
-                that expires arrives as an accepted Cancel; and a Reject
-                operation leaves the status unchanged.
+                calibrate: these rules rest on assumptions about events and
+                REST statuses not yet recorded, each of which shows up as a
+                mismatch if wrong: REST reads Filled for an order whose
+                quantity was reduced and whose remainder then fills; an IOC
+                or FOK order that expires arrives as an accepted Cancel; and
+                a Reject operation leaves the status unchanged.
     Returns:    One of Failed, Filled, Cancelled, PartFilled, Submitted or
                 Unknown. All but Unknown are REST Status values; Unknown
                 never matches REST, so an order the events cannot place is
@@ -245,9 +249,9 @@ def derive_status(
         return STATUS_FAILED
     if not new_ok or order_qty is None:
         return STATUS_UNKNOWN
-    if filled_qty > 0 and filled_qty >= order_qty:
+    if filled_qty > 0 and filled_qty >= order_qty - reduced_qty:
         return STATUS_FILLED
-    if cancel_ok and cancel_qty >= order_qty - filled_qty:
+    if cancel_ok and cancel_qty + filled_qty >= order_qty:
         return STATUS_CANCELLED
     if filled_qty > 0:
         return STATUS_PART_FILLED
@@ -261,7 +265,12 @@ class _OrderProgress:
     new_ok: bool | None = None
     cancel_ok: bool = False
     order_qty: Decimal | None = None
+
+    # Quantity removed by accepted UpdateQty operations, and by those and
+    # accepted Cancels together.
+    reduced_qty: Decimal = Decimal(0)
     cancel_qty: Decimal = Decimal(0)
+
     filled_qty: Decimal = Decimal(0)
     identities: set[str] = field(default_factory=set)
 
@@ -275,6 +284,7 @@ class _OrderProgress:
             new_ok=self.new_ok,
             cancel_ok=self.cancel_ok,
             order_qty=self.order_qty,
+            reduced_qty=self.reduced_qty,
             cancel_qty=self.cancel_qty,
             filled_qty=self.filled_qty,
         )
@@ -375,15 +385,21 @@ def _apply_report(orders: dict[str, _OrderProgress], report: _Report, fields: Ev
 
     Definition: One step of the running state derive_status reads.
     Formula:    deal: filled_qty += deal_qty.
-                order operation accepted (op_code == op_code_success):
-                order_qty = its order_qty if that is > 0, else unchanged;
-                cancel_qty = max(cancel_qty, its cancel_qty).
-                New: new_ok = accepted and no New was rejected before.
-                Cancel: cancel_ok = cancel_ok or accepted.
-    Domain:     Reports arrive in recv_ts order, deduplicated. A rejected
-                operation changes no quantity, since it may carry the size
-                it asked for rather than the order's. A zero order size is
-                ignored, since a Cancel's status.order_quantity reads 0 and
+                New: new_ok = accepted and no New was rejected before;
+                if accepted, order_qty = its order_qty if that is > 0.
+                UpdateQty, if accepted: reduced_qty += its cancel_qty and
+                cancel_qty += its cancel_qty.
+                Cancel: cancel_ok = cancel_ok or accepted; if accepted,
+                cancel_qty += its cancel_qty.
+                Accepted means op_code == op_code_success.
+    Domain:     Reports arrive in recv_ts order, deduplicated by identity,
+                so each operation's cancel_quantity, which is what that
+                operation alone removed, is added once. order.quantity
+                stays the placed size through every operation, so only the
+                New sets order_qty, and status.order_quantity, what remains
+                open after the operation, is not read. A rejected operation
+                changes nothing, since it may carry the size it asked for
+                rather than the order's. A zero order size is ignored, since
                 no live order has size 0, and a missing or null quantity
                 leaves the running value unchanged.
     Returns:    None; orders is updated in place.
@@ -410,17 +426,20 @@ def _apply_report(orders: dict[str, _OrderProgress], report: _Report, fields: Ev
     progress = orders.setdefault(key, _OrderProgress())
     progress.identities.add(report.identity)
     _note_time(progress, report, fields.order_exchange_ts)
-    if accepted and order_qty is not None and order_qty > 0:
-        progress.order_qty = order_qty
-    if accepted and cancel_qty is not None:
-        progress.cancel_qty = max(progress.cancel_qty, cancel_qty)
+    removed = cancel_qty if accepted and cancel_qty is not None else Decimal(0)
 
     if op_type == _OP_NEW:
         # A rejection is final even if an accepted duplicate also arrives
         progress.new_ok = accepted and progress.new_ok is not False
+        if accepted and order_qty is not None and order_qty > 0:
+            progress.order_qty = order_qty
+    elif op_type == _OP_UPDATE_QTY:
+        progress.reduced_qty += removed
+        progress.cancel_qty += removed
     elif op_type == _OP_CANCEL:
         progress.cancel_ok = progress.cancel_ok or accepted
-    elif op_type not in _OPS_QUANTITY_ONLY:
+        progress.cancel_qty += removed
+    elif op_type != _OP_UPDATE_PRICE:
         logger.warning("%s: op_type %r of order %s does not change its derived status", report.where, op_type, key)
 
 

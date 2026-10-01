@@ -10,15 +10,16 @@ usage, and an SseHub that pushes quotes, order and deal reports and
 heartbeats, and can drop every stream for a while.
 
 Field names follow openapi.json and the shapes recorded in
-docs/official-server-contract.md section 2; every value is made up. Where
-the recording is silent the stub follows the shapes derive_status in
+docs/official-server-contract.md section 2; every value is made up. As
+recorded, an order report's order.quantity stays the placed size,
+status.order_quantity is what remains after the operation, and
+status.cancel_quantity is what that one operation removed. Where the
+recording is silent the stub follows the shapes derive_status in
 p1rec.reconcile assumes: order reports go out on the combined stream as
-well as on order_event, an accepted UpdateQty reports the reduced size in
-order.quantity and a cumulative status.cancel_quantity, and an IOC or FOK
-order that cannot fill ends with an accepted Cancel. Every order settles
-before its place response is sent, which still reads PendingSubmit as the
-official server's does, so the reports and trades are complete by the time
-the caller moves on.
+well as on order_event, and an IOC or FOK order that cannot fill ends with
+an accepted Cancel. Every order settles before its place response is
+sent, which still reads PendingSubmit as the official server's does, so
+the reports and trades are complete by the time the caller moves on.
 
 Order and deal times come from an exchange clock that starts at
 exchange_clock_start, inside the trading day, so a rehearsal's orders fall
@@ -322,12 +323,12 @@ class _Order:
     limit_up: Decimal
     order_ts: float
     ca: str
-    quantity: int  # Current size, which an accepted UpdateQty reduces
+    quantity: int  # Placed size, which no operation changes
     status: str = "PendingSubmit"
     status_code: str = _OP_CODE_OK
     msg: str = ""
     deal_quantity: int = 0
-    cancel_quantity: int = 0
+    cancel_quantity: int = 0  # Removed by UpdateQty and Cancel so far
     modified_price: float | int = 0
     modified_ts: float | None = None
     deals: list[dict[str, Any]] = field(default_factory=list)
@@ -339,6 +340,16 @@ class _Order:
     @property
     def state(self) -> str:
         return "StockOrder" if self.is_stock else "FuturesOrder"
+
+    @property
+    def order_quantity(self) -> int:
+        """Return the size left after every UpdateQty and Cancel, which status.order_quantity reports."""
+        return self.quantity - self.cancel_quantity
+
+    @property
+    def open_quantity(self) -> int:
+        """Return what can still fill or be cancelled."""
+        return self.order_quantity - self.deal_quantity
 
 
 def _default_trading_limits() -> dict[str, object]:
@@ -689,7 +700,7 @@ class StubBroker(FakeServer):
         return price >= order.reference if order.fields["action"] == "Buy" else price <= order.reference
 
     def _fill(self, order: _Order) -> None:
-        quantity = order.quantity - order.deal_quantity
+        quantity = order.open_quantity
         price = float(order.reference)
         ts = self._exchange_now()
         seq = f"{self._next('deal'):06d}"
@@ -699,11 +710,10 @@ class StubBroker(FakeServer):
         self._deal_report(order, seq, price, quantity, ts)
 
     def _cancel_remaining(self, order: _Order) -> None:
-        order.cancel_quantity += order.quantity - order.deal_quantity
+        removed = order.open_quantity
+        order.cancel_quantity += removed
         order.status = "Cancelled"
-
-        # A recorded Cancel report reads status.order_quantity 0 (docs/official-server-contract.md section 2)
-        self._report(order, "Cancel", _OP_CODE_OK, "", order_quantity=0)
+        self._report(order, "Cancel", _OP_CODE_OK, "", removed=removed)
 
     def _live_order(self, body: object) -> _Order | httpx.Response:
         """Return the live order body's trade_id names, or the rejection of a request naming another."""
@@ -735,12 +745,11 @@ class StubBroker(FakeServer):
         if isinstance(order, httpx.Response):
             return order
         reduce_by = body.get("quantity") if isinstance(body, dict) else None
-        remaining = order.quantity - order.deal_quantity
+        remaining = order.open_quantity
         if not isinstance(reduce_by, int) or isinstance(reduce_by, bool) or not 0 < reduce_by < remaining:
             return _error(422, f"quantity must reduce the order by 1 to {remaining - 1}")
-        order.quantity -= reduce_by
         order.cancel_quantity += reduce_by
-        self._report(order, "UpdateQty", _OP_CODE_OK, "")
+        self._report(order, "UpdateQty", _OP_CODE_OK, "", removed=reduce_by)
         return httpx.Response(200, json=self._trade(order))
 
     def _cancel(self, body: object) -> httpx.Response:
@@ -793,7 +802,7 @@ class StubBroker(FakeServer):
                 "order_ts": order.order_ts,
                 "modified_ts": order.modified_ts,
                 "modified_price": order.modified_price,
-                "order_quantity": order.quantity,
+                "order_quantity": order.order_quantity,
                 "deal_quantity": order.deal_quantity,
                 "cancel_quantity": order.cancel_quantity,
                 "deals": list(order.deals),
@@ -803,10 +812,11 @@ class StubBroker(FakeServer):
 
     # Order and deal reports
 
-    def _report(
-        self, order: _Order, op_type: str, op_code: str, op_msg: str, *, order_quantity: int | None = None
-    ) -> None:
-        """Publish a StockOrderEvent or FuturesOrderEvent, if the order's account has trade reports on."""
+    def _report(self, order: _Order, op_type: str, op_code: str, op_msg: str, *, removed: int = 0) -> None:
+        """Publish a StockOrderEvent or FuturesOrderEvent for an operation that took removed out of the order.
+
+        Nothing is published unless the order's account has trade reports on.
+        """
         if order.account.get("account_type") not in self._trade_subscribed:
             return
         fields = order.fields
@@ -836,8 +846,8 @@ class StubBroker(FakeServer):
             "status": {
                 "id": order.id,
                 "exchange_ts": self._exchange_now(),
-                "order_quantity": order.quantity if order_quantity is None else order_quantity,
-                "cancel_quantity": order.cancel_quantity,
+                "order_quantity": order.order_quantity,
+                "cancel_quantity": removed,
                 "modified_price": order.modified_price,
                 "web_id": _WEB_ID,
             },
