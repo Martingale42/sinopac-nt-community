@@ -113,10 +113,11 @@ def test_limit_down_plus_tick() -> None:
     assert price == Decimal("9.96")
 
 
-def test_far_below_futures() -> None:
+def test_far_below() -> None:
     # 47781 * 0.95 = 45391.95, floored to a whole point
     assert resolve_price(PriceRef.FAR_BELOW, _TMF, Market.FUTURES, is_etf=False) == Decimal("45391")
-    assert resolve_price(PriceRef.FAR_BELOW, _STOCK, Market.STOCK, is_etf=False) == Decimal("9.95")
+    # 11.05 * 0.95 = 10.4975, floored to the 0.05 grid
+    assert resolve_price(PriceRef.FAR_BELOW, _STOCK, Market.STOCK, is_etf=False) == Decimal("10.45")
 
 
 def test_far_below_futures_from_float_formatted_reference() -> None:
@@ -133,7 +134,7 @@ def test_far_below_futures_from_float_formatted_reference() -> None:
 
 def test_far_below_plus_tick() -> None:
     assert resolve_price(PriceRef.FAR_BELOW_PLUS_TICK, _TMF, Market.FUTURES, is_etf=False) == Decimal("45392")
-    assert resolve_price(PriceRef.FAR_BELOW_PLUS_TICK, _STOCK, Market.ODD, is_etf=False) == Decimal("9.96")
+    assert resolve_price(PriceRef.FAR_BELOW_PLUS_TICK, _STOCK, Market.ODD, is_etf=False) == Decimal("10.50")
 
 
 def test_direct_references_return_contract_values() -> None:
@@ -164,9 +165,9 @@ def test_required_funds_resting_order_dominates_fill() -> None:
 
     requirement = required_funds(cases, _LIMITS, {}, etf_codes=_NO_ETFS)
 
-    # The resting 2 lots reserve 2 * 1000 * 20.7 = 41400 at placement, more than the
-    # 25300 fill; 41400 * 1.001425 = 41458.995, rounded up to 41459
-    assert requirement.stock_twd == Decimal("41459")
+    # The resting 2 lots reserve 2 * 1000 * 21.85 = 43700 at placement, more than the
+    # 25300 fill; 43700 * 1.001425 = 43762.2725, rounded up to 43763
+    assert requirement.stock_twd == Decimal("43763")
 
 
 def test_required_funds_update_price_raises_reservation() -> None:
@@ -174,8 +175,8 @@ def test_required_funds_update_price_raises_reservation() -> None:
 
     requirement = required_funds([case], _LIMITS, {}, etf_codes=_NO_ETFS)
 
-    # far_below 20.7 plus one 0.05 tick on 2 * 1000 shares is 41500, 41559.1375 with commission
-    assert requirement.stock_twd == Decimal("41560")
+    # far_below 21.85 plus one 0.05 tick on 2 * 1000 shares is 43800, 43862.415 with commission
+    assert requirement.stock_twd == Decimal("43863")
 
 
 def test_required_funds_resting_market_order_reserves_limit_up() -> None:

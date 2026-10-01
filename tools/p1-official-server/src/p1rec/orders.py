@@ -108,9 +108,9 @@ _FUTURES_OCTYPE = "Auto"
 _CLOSE_PRICE_TYPE = "LMT"
 _CLOSE_ORDER_TYPE = "ROD"
 
-# Prices a buy not meant to fill may use: far_below (limit_down for stock
-# and odd lots, reference * 0.95 for futures), limit_down, or one tick
-# above either, all far enough below the market to rest without a seller.
+# Prices a buy not meant to fill may use: far_below (reference * 0.95 on
+# the tick grid), limit_down, or one tick above either, all far enough
+# below the market to rest without a seller.
 _RESTING_PRICE_REFS = frozenset(
     {PriceRef.FAR_BELOW, PriceRef.FAR_BELOW_PLUS_TICK, PriceRef.LIMIT_DOWN, PriceRef.LIMIT_DOWN_PLUS_TICK}
 )
@@ -269,8 +269,8 @@ def check_cases(cases: Sequence[Case]) -> None:
     """Raise ConfigError naming the case unless every case can run without leaving a position.
 
     A case that does not expect a fill must be a limit buy priced, at place
-    and at every update_price, at far_below (limit_down for stock and odd
-    lots, reference * 0.95 for futures), at limit_down, or one tick above
+    and at every update_price, at far_below (reference * 0.95 on the tick
+    grid), at limit_down, or one tick above
     either, so it rests without meeting a seller. If it is ROD it must end
     with cancel, since its order would otherwise still rest when the next
     case starts and the funds preflight counts one case at a time, while
@@ -539,7 +539,11 @@ class _Runner:
                 step_prices={
                     ref: json_number(resolve_price(ref, limits, case.market, is_etf=is_etf)) for ref in step_refs
                 },
-                close_price=json_number(limits.limit_down if case.action == "Buy" else limits.limit_up),
+                close_price=json_number(
+                    resolve_price(PriceRef.FAR_BELOW, limits, case.market, is_etf=is_etf)
+                    if case.action == "Buy"
+                    else limits.limit_up
+                ),
             )
         except (BrokerError, ValueError, httpx.RequestError) as exc:
             logger.error("case %s not prepared, nothing sent: %s", case.id, describe_exception(exc))

@@ -37,10 +37,10 @@ _ETF_TOP_TICK = Decimal("0.05")
 # TAIFEX contract specifications for TXF, MXF and TMF
 _FUTURES_TICK = Decimal("1")
 
-# The simulated matcher accepted a futures buy at this fraction of
-# reference where it rejected one at the contract file's limit_down
-# (docs/official-server-contract.md section 2).
-_FUTURES_FAR_BELOW_RATIO = Decimal("0.95")
+# The simulated matcher accepted a buy at this fraction of reference where
+# it rejected one at the contract file's limit_down, for futures and stock
+# alike (docs/official-server-contract.md section 2).
+_FAR_BELOW_RATIO = Decimal("0.95")
 
 # TWSE maximum brokerage commission rate, added to every stock requirement
 # since a buy reserves its commission along with its price.
@@ -96,13 +96,11 @@ def resolve_price(ref: PriceRef, limits: ContractLimits, market: Market, *, is_e
                 contract's limits.
     Formula:    limit_down, limit_up, reference: the contract's own value;
                 limit_down_plus_tick = limit_down + tick(limit_down);
-                far_below = limit_down for stock and odd lots,
-                floor(reference * 0.95 / tick) * tick for futures;
+                far_below = floor(reference * 0.95 / tick) * tick;
                 far_below_plus_tick = far_below + tick(far_below).
     Domain:     limits from the live contract response that passed
                 check_limits; is_etf selects the ETF tick table for stock and
-                odd lots. See _far_below for why futures do not use
-                limit_down.
+                odd lots. See _far_below for why it is not limit_down.
     Returns:    Price in TWD (stock, odd lot) or index points (futures); a
                 far_below price is meant to rest without filling.
     """
@@ -152,23 +150,20 @@ def _far_below(limits: ContractLimits, market: Market, *, is_etf: bool) -> Decim
 
     Definition: The lowest price a resting buy can use that the simulated
                 matcher is known to accept.
-    Formula:    stock and odd lot: limit_down;
-                futures: floor(reference * 0.95 / tick) * tick.
-    Domain:     limits passed check_limits. The contract file's limits are
-                the day session's, and a night-session futures order is
-                checked against limits derived from that day's settlement
-                (inferred from the futures API test,
-                docs/official-server-contract.md section 2), so futures
-                scenario orders run in the day session only. Even there a
-                fraction of reference, which the matcher accepted, is used
-                rather than limit_down, which it rejected.
+    Formula:    floor(reference * 0.95 / tick) * tick, the tick taken at
+                reference * 0.95 from the stock table, ETF or not.
+    Domain:     limits passed check_limits. The simulated matcher rejected
+                a buy at the contract file's limit_down as outside the price
+                band, a futures buy in the night session and a stock buy in
+                the day session alike, and accepted one at this fraction of
+                reference (docs/official-server-contract.md section 2).
     Returns:    Price in TWD (stock, odd lot) or index points (futures), on
                 the tick grid.
     """
-    if market is not Market.FUTURES:
-        return limits.limit_down
-    target = limits.reference * _FUTURES_FAR_BELOW_RATIO
-    tick = tick_size(market, target, is_etf=is_etf)
+    target = limits.reference * _FAR_BELOW_RATIO
+    # The stock table's tick is a multiple of the ETF table's at every price,
+    # and the simulated matcher rejected an ETF odd-lot price off its grid.
+    tick = tick_size(market, target, is_etf=False)
     return (target / tick).to_integral_value(rounding=ROUND_FLOOR) * tick
 
 

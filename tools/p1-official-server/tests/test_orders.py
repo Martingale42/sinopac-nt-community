@@ -402,7 +402,7 @@ def test_place_bodies_carry_typed_values_and_full_account(tmp_path: Path, write_
         "contract": {"security_type": "STK", "exchange": "TSE", "code": "2890"},
         "stock_order": {
             "action": "Buy",
-            "price": 20.7,
+            "price": 21.85,
             "quantity": 2,
             "price_type": "LMT",
             "order_type": "ROD",
@@ -411,7 +411,7 @@ def test_place_bodies_carry_typed_values_and_full_account(tmp_path: Path, write_
             "account": STOCK_ACCOUNT,
         },
     }
-    assert update_price == {"trade_id": "000001", "price": 20.75}
+    assert update_price == {"trade_id": "000001", "price": 21.9}
     assert update_qty == {"trade_id": "000001", "quantity": 1}
     assert odd["stock_order"]["order_lot"] == "IntradayOdd"
     assert odd["stock_order"]["quantity"] == 5
@@ -430,7 +430,7 @@ def test_place_bodies_carry_typed_values_and_full_account(tmp_path: Path, write_
         },
     }
     place_requests = [r for r in server.requests if r.url.path == _PLACE_PATH]
-    assert b'"price":20.7,' in place_requests[0].content
+    assert b'"price":21.85,' in place_requests[0].content
 
 
 def test_render_template_substitutes_typed_values() -> None:
@@ -481,7 +481,7 @@ def test_fill_then_close_sequence(tmp_path: Path, write_config: WriteConfig) -> 
         ("filled", "000004"),
     ]
     close = server.mutations()[1][1]["stock_order"]
-    assert (close["action"], close["price"], close["price_type"], close["order_type"]) == ("Sell", 20.7, "LMT", "ROD")
+    assert (close["action"], close["price"], close["price_type"], close["order_type"]) == ("Sell", 21.85, "LMT", "ROD")
     assert summary["cases"][0]["close_trade_id"] == "000002"
 
 
