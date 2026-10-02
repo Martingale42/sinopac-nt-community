@@ -81,6 +81,14 @@ P1 spike 的產出文件（設計：`docs/plans/2026-09-29-official-server-spike
 - 行情尖峰 859 frame／秒（13:04:47 台北時間）；收到時間減交易所時間 p50 21.8 ms、p99 132.7 ms、最大 241 ms（本機時鐘與 NTP 差 −4.3 ms），170 筆時間無法解析。
 - 歷史查詢四筆（ticks、兩筆 kbars、snapshots）回應合計約 500 KB，`usage` 的 `bytes` 前後不變；推論：歷史查詢不計入當日額度，或計數不即時更新。
 
+**10/2 soak（證據在本機 `results/p1/20261001T040917Z-stream` 與 `results/p1/2026-10-01-server/server.log`）**
+
+- 開始後約 29 小時內，6 條 SSE 從未斷線重連，錄製器沒有 WARN 或 ERROR，對外 IP 未變。
+- 每日維護在 08:15:17 執行：server 自行重新登入取得新 token，並在約 1 秒內重放 24 個行情、2 個委託回報與 2 個 Contract V2 訂閱；錄製器 08:35 的全量重送（2 個 `subscribe_trade`、24 個訂閱）皆回 200。
+- §6 D2：10:30 單一一次取消 2330 tick 訂閱後，client a、b 同時不再收到 2330 tick（之前各 1849 筆，之後皆 0），訂閱是 server 全域的。
+- 夜盤（15:00 至次日 05:00）每個 client 約 26 萬筆期貨與選擇權 tick。
+- server log 待 Task 14 歸類的三類：`/order/trades` 的「Conflicting reconciliation deal payload」WARN 854 筆，全在 10/1 密集查詢 `trades` 的時段；帳務查詢的「simulation mode, returning default」WARN 3 筆；10/2 14:50:05 的 `Syntax("too_short")` 解析 ERROR 2 筆，內容開頭像 TMF、TXF 訊息。
+
 **假設關卡**
 
 - A1 成立：`GET /api/v1/info` 的 `/simulation`。

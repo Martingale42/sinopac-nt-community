@@ -980,7 +980,7 @@ git commit -m "Rehearse the full recorder pipeline against a stub server"
 
 **Behaviour:**
 
-- 排程：2026-10-01（四）開始，soak 至 10-06（二）09:30；證交所 115 年開休市日期查證四個營業日皆開市，前後的休市日（9/28、10/9）都在範圍外，前一個交易日為 9/30。
+- 排程：2026-10-01（四）開始，soak 至 10-06（二）09:30；證交所 115 年開休市日期查證四個營業日皆開市，前後的休市日（9/28、10/9）都在範圍外，前一個交易日為 9/30。Task 13 改在 10/5（一）。
 - 離線演練（Task 11）沒有涵蓋、只能在本日驗證的路徑，逐項觀察並記入契約文件：委託在下單回應之後才結算（等待成交、`PendingSubmit` 時刪單、`step_wait_s` 等時間的實際值）、部分成交與多筆成交、成交事件的 `deal_key` 與 `deal_qty`、IOC／FOK 到期的事件形狀、以事件回報的改單或刪單拒絕、不帶帳戶的 `trades` 是否列出所有帳戶的委託、斷線後訂閱是否需要重送、串流流量是否計入每日額度、夜盤與跨日。
 - 改動 `p1.toml` 的指標、範本、`[events]` 或 `[trades]` 時，同步改 `tests/data/p1.toml`，否則離線測試的設定比對會失敗。
 - 前一個交易日：依當日合約清單校準 `p1.toml` 的近月期貨代號（TXFJ6、MXFJ6、TMFJ6 於 2026-10-21 到期，soak 跨過該日就改用下一個月份）與近月價平 TXO 買權、賣權各一檔，同步更新 `[stream]` 商品、`[history]` 的 snapshots 查詢與 `scenarios.toml`。
@@ -1019,14 +1019,14 @@ git commit -m "Calibrate recorder settings from the first live session"
 
 ---
 
-### Task 13（live，週五）：多 client、harness 實例、重啟與對帳
+### Task 13（live，週一 10/5）：多 client、harness 實例、重啟與對帳
 
 **Files:**
 - Modify: `docs/official-server-contract.md`（§2 執行紀錄）
 
 **Behaviour:**
 
-- 10:30 的排程動作自動執行；之後確認 client a 的 2330 tick 仍持續進來。
+- 10/2（五）10:30 的排程動作已自動執行：兩個 client 的 2330 tick 同時停止（§6 D2），不必重做。其餘步驟原定週五，因排程未觸發改在 10/5（一）同樣時段執行，soak 結束時間不變。
 - 11:00：先查 soak 實例的 `usage`；`connections` 加 1（一個官方實例的量測值）超過 5 時，不開 harness 實例，F2 只以文件與模擬模式預設值作答並在契約文件註明。未超過時，以另一份 env（`SJ_HTTP_ADDR=127.0.0.1:18081`、`SJ_AGENT_HARNESS=all`、獨立的 `SJ_HOME_PATH`）啟動第二個官方 server 實例；執行 `p1rec orders --tag harness --only harness_probe --base-url http://127.0.0.1:18081`，錄下回應後停止該實例。soak 實例不受影響。
 - 11:30：經 soak 實例本身執行 `p1rec orders --tag pre-restart --only lifecycle_futures_tmf,<週四確認會成交的一個 market_futures_tmf_* 案例>`，讓重啟前的當日委託同時有未成交與成交兩種（設計 §9.1 第 8 步要求重啟時當日已有委託）；harness 實例的委託走另一個實例，不能代替。
 - 12:00（重啟排在當日主動測試的最後）：停止並重啟 soak 實例，`stream` 會記下斷線與重連；重啟後執行 `p1rec reconcile --sse-run <stream run_id> --trading-day <當日>`；明確指定日期，重啟後查無委託時才會寫出 `reconcile.json` 並回 2，而不是因推斷不出日期回 1。
@@ -1037,7 +1037,7 @@ git commit -m "Calibrate recorder settings from the first live session"
 
 - `18081`：Task 1 確認未被佔用。
 - 一個官方實例佔 1 條連線：Task 1 與複查時 `usage.connections` 的量測值（兩次皆與舊 gateway 同時登入，合計 2）；上限 5 條：設計 §4。
-- 各時間點：週五交易時段內，重啟排在最後（設計 §9.1 第 8 步、§9.2）。
+- 各時間點：10/5（一）交易時段內，重啟排在最後（設計 §9.1 第 8 步、§9.2）。
 - 11:30：落在 harness 實例（11:00）與重啟（12:00）之間，且在期交所日盤 08:45–13:45 內（`orders` 只在日盤下期貨單）。
 
 **Verification:**
