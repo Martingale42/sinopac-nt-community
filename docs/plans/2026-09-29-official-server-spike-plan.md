@@ -1070,6 +1070,7 @@ git commit -m "Record multi-client, harness and restart runs"
 
 **Behaviour:**
 
+- soak 分兩段 run：`20261001T040917Z-stream`（10/1 12:09 至 10/3 16:19，主機重開機中斷）與 `20261003T205132Z-stream`（10/4 04:51 起）；`stats` 兩段各跑一次，server log 涵蓋 `2026-10-01-server/` 與 `2026-10-04-server/`。Task 13 的對帳用後者。
 - 09:30 `stream` 自動結束；停止官方 server；以 `p1rec stats --sse-run <stream run_id>` 涵蓋整個 soak。對帳只在下單當日做（Task 12、13）：`trades` 是否只回當日委託（§6 C7）尚未確認，跨日對帳可能把前幾日的委託誤報為遺漏。
 - 官方 server log 與全部 `recorder.log` 中的每一類 WARN／ERROR／CRITICAL（依訊息樣板歸類）各記：次數、首末次時間、處置（接受並說明原因，或記為契約發現並寫明對 go/no-go 的影響）；IP 白名單的 `not allow` 為必列類別（設計 §4）。
 - 從 server log 量出 session 過期的實際週期與次數，寫入契約文件，作為 P2 watchdog 依據（設計 §9.2 的 `calibrate:`）。

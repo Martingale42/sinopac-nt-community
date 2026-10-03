@@ -89,6 +89,12 @@ P1 spike 的產出文件（設計：`docs/plans/2026-09-29-official-server-spike
 - 夜盤（15:00 至次日 05:00）每個 client 約 26 萬筆期貨與選擇權 tick。
 - server log 待 Task 14 歸類的三類：`/order/trades` 的「Conflicting reconciliation deal payload」WARN 854 筆，全在 10/1 密集查詢 `trades` 的時段；帳務查詢的「simulation mode, returning default」WARN 3 筆；10/2 14:50:05 的 `Syntax("too_short")` 解析 ERROR 2 筆，內容開頭像 TMF、TXF 訊息。
 
+**10/3–10/4 中斷與續錄**
+
+- 10/3 08:15 的每日維護與 08:35 的全量重送照常完成。
+- 10/3 約 16:20 主機重開機（與官方 server 無關），soak 的錄製停在 16:19:17；各錄製檔最後一行皆為完整 JSON、無 NUL 位元組。中斷期間為週末休市，沒有漏錄交易時段。
+- 10/4 04:51 以新的 run `20261003T205132Z-stream` 續錄到 10-06 09:30：快取 token 已失效，server 以原本登記的對外 IP 重新登入成功；啟動時的 2 個 `subscribe_trade` 與 24 個訂閱皆回 200。週五 10:30 的排程動作因已過期而跳過（WARNING）。
+
 **假設關卡**
 
 - A1 成立：`GET /api/v1/info` 的 `/simulation`。
