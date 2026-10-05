@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
-from helpers import MINIMAL_CONFIG_LINES, SECRET_ENV_VARS, WriteConfig
+from helpers import FAKE_SECRET_ENV, MINIMAL_CONFIG_LINES, WriteConfig
 from mock_official import ENDPOINT_LINES, FUTURES_ACCOUNT, STOCK_ACCOUNT, FakeServer, preflight_config
 
 from p1rec import capture, cli
@@ -288,8 +288,8 @@ def _run_summary(caplog: pytest.LogCaptureFixture) -> str:
 
 
 def _set_secret_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    for var in SECRET_ENV_VARS:
-        monkeypatch.setenv(var, "fake-value-0123456789")
+    for var, value in FAKE_SECRET_ENV.items():
+        monkeypatch.setenv(var, value)
 
 
 # Interlock

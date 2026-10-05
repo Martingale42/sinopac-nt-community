@@ -30,8 +30,8 @@ from zoneinfo import ZoneInfo
 import httpx
 import pytest
 from helpers import (
+    FAKE_SECRET_ENV,
     MINIMAL_CONFIG_LINES,
-    SECRET_ENV_VARS,
     UNUSED_EVENT_FIELDS,
     UNUSED_ORDERS_CONFIG,
     UNUSED_TRADE_FIELDS,
@@ -201,6 +201,7 @@ def _cfg(
             selection=Path("."),
             contract_doc=Path("."),
             extra_scan_paths=(),
+            ipv4_allow=frozenset(),
         ),
     )
 
@@ -750,10 +751,10 @@ class _AccountQuotingApi(_FakeApi):
 def test_subscribe_trade_failure_message_not_logged(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     account_id, username = str(ACCOUNTS[0]["account_id"]), str(ACCOUNTS[0]["username"])
     made_up_secrets = {
-        "api_key": "FakeApiKey0123456789abcdef",
-        "sec_key": "FakeSecKey9876543210zyxwv",
-        "ca_passwd": "fake-ca-passwd-q7",
-        "egress_ip": "203.0.113.77",
+        "api_key": ("FakeApiKey0123456789abcdef",),
+        "sec_key": ("FakeSecKey9876543210zyxwv",),
+        "ca_passwd": ("fake-ca-passwd-q7",),
+        "egress_ip": ("203.0.113.77",),
     }
     setup_logging(tmp_path, redaction_values(made_up_secrets), "INFO")
     api = _AccountQuotingApi()
@@ -1152,8 +1153,8 @@ def test_real_p1_toml_stream_section() -> None:
 
 
 def _set_secret_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    for var in SECRET_ENV_VARS:
-        monkeypatch.setenv(var, "fake-value-0123456789")
+    for var, value in FAKE_SECRET_ENV.items():
+        monkeypatch.setenv(var, value)
 
 
 def test_cli_passes_clients_and_until(
@@ -1199,7 +1200,7 @@ def test_stream_process_stops_on_process_sigterm(
 ) -> None:
     lines = [*MINIMAL_CONFIG_LINES, *STREAM_CONFIG_LINES]
     lines = [f'base_url = "{fake_server.base_url}"' if line.startswith("base_url") else line for line in lines]
-    env = {**os.environ, **dict.fromkeys(SECRET_ENV_VARS, "fake-value-0123456789")}
+    env = {**os.environ, **FAKE_SECRET_ENV}
     until = (datetime.now(timezone.utc) + timedelta(seconds=SAFETY_UNTIL_S)).isoformat()
     command = [sys.executable, "-m", "p1rec.cli", "stream", "--config", str(write_config(lines))]
     process = subprocess.Popen(

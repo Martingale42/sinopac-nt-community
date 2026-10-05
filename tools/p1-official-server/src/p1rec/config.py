@@ -10,6 +10,7 @@ without touching load_config itself.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import math
 import os
@@ -263,6 +264,9 @@ class ScrubConfig:
     contract_doc: Path
     extra_scan_paths: tuple[Path, ...]
 
+    # Dotted-quad strings the scan accepts although they read as IPv4 addresses, such as version numbers
+    ipv4_allow: frozenset[str]
+
 
 @dataclass(frozen=True)
 class P1Config:
@@ -271,7 +275,8 @@ class P1Config:
     results_root: Path
     fixtures_root: Path
 
-    # Role -> env var name: api_key, sec_key, ca_passwd, person_id, egress_ip
+    # Role -> env var name: api_key, sec_key, ca_passwd, person_id, egress_ip,
+    # the last holding a comma-separated list of IPv4 addresses.
     secret_env: dict[str, str]
 
     # Keyed by the logical operation name (mode, place_stock, ...)
@@ -290,6 +295,10 @@ class P1Config:
 
 # Roles read via read_secrets(); see P1Config.secret_env above
 _SECRET_ROLES = ("api_key", "sec_key", "ca_passwd", "person_id", "egress_ip")
+
+# Roles whose variable holds a comma-separated list, since the host's public
+# IP can change and every address it has had must still be scrubbed.
+_LIST_ROLES = frozenset({"egress_ip"})
 
 # Keys that must never carry a literal secret value anywhere in p1.toml,
 # since inside [secrets] these same names are role -> env-var-name mappings
@@ -344,20 +353,45 @@ def load_config(path: Path) -> P1Config:
     )
 
 
-def read_secrets(cfg: P1Config) -> dict[str, str]:
-    """Read secret values from the environment variables named in cfg.secret_env.
+def read_secret_role(cfg: P1Config, role: str) -> tuple[str, ...]:
+    """Read one role's secret values from the environment variable cfg.secret_env names for it.
 
     An empty value is treated the same as a missing one, so an accidentally
     blank environment variable can never silently disable redaction or
-    scrubbing downstream.
+    scrubbing downstream. A role in _LIST_ROLES holds IPv4 addresses
+    separated by commas, returned stripped of surrounding blanks and
+    without repeats, in order of first appearance; any other role's value
+    is returned whole, commas included. Errors name the variable, never
+    its value.
     """
-    secrets: dict[str, str] = {}
-    for role, env_var in cfg.secret_env.items():
-        value = os.environ.get(env_var)
-        if not value:
-            raise ConfigError(f"missing environment variable {env_var} for secrets.{role}")
-        secrets[role] = value
-    return secrets
+    env_var = cfg.secret_env.get(role)
+    if env_var is None:
+        raise ConfigError(f"unknown secrets role {role!r}")
+    value = os.environ.get(env_var)
+    if not value:
+        raise ConfigError(f"missing environment variable {env_var} for secrets.{role}")
+    if role not in _LIST_ROLES:
+        return (value,)
+    items = [item.strip() for item in value.split(",")]
+    if not all(_is_ipv4(item) for item in items):
+        raise ConfigError(
+            f"environment variable {env_var} for secrets.{role} must list IPv4 addresses separated by commas"
+        )
+    return tuple(dict.fromkeys(items))
+
+
+def read_secrets(cfg: P1Config) -> dict[str, tuple[str, ...]]:
+    """Read every role's secret values, as read_secret_role does, keyed by role."""
+    return {role: read_secret_role(cfg, role) for role in cfg.secret_env}
+
+
+def _is_ipv4(text: str) -> bool:
+    """Return True if text is an IPv4 address in dotted decimal, such as 192.0.2.1."""
+    try:
+        ipaddress.IPv4Address(text)
+    except ValueError:
+        return False
+    return True
 
 
 def _reject_inline_secrets(data: Mapping[str, Any], path: str = "") -> None:
@@ -1234,4 +1268,16 @@ def _parse_scrub(data: Mapping[str, Any], config_dir: Path) -> ScrubConfig:
         extra_scan_paths=tuple(
             (config_dir / raw).resolve() for raw in _get_str_tuple(data, "scrub.extra_scan_paths")
         ),
+        ipv4_allow=_get_ipv4_allow(data),
     )
+
+
+def _get_ipv4_allow(data: Mapping[str, Any]) -> frozenset[str]:
+    """Read scrub.ipv4_allow as IPv4 addresses, or return an empty set when the key is absent."""
+    if "ipv4_allow" not in _optional_table(data, "scrub"):
+        return frozenset()
+    entries = _get_str_tuple(data, "scrub.ipv4_allow")
+    for index, entry in enumerate(entries):
+        if not _is_ipv4(entry):
+            raise ConfigError(f"config key scrub.ipv4_allow[{index}] must be an IPv4 address in dotted decimal")
+    return frozenset(entries)

@@ -19,6 +19,8 @@ api_key = "SJ_API_KEY"
 sec_key = "SJ_SEC_KEY"
 ca_passwd = "SJ_CA_PASSWD"
 person_id = "P1_PERSON_ID"
+
+# Every egress IP the recordings may hold, separated by commas
 egress_ip = "P1_EGRESS_IP"
 
 # Logical operation name -> method + path, from docs/official-server-contract.md
@@ -208,6 +210,8 @@ contract_doc = "../../docs/official-server-contract.md"
 
 # Every other committed file that could quote a recording
 extra_scan_paths = ["fixtures.toml", "p1.toml", "scenarios.toml", "../../docs", "../../ROADMAP.md"]
+
+ipv4_allow = ["7.33.0.3"]  # libsolclient version in the spike design's sources
 
 # Order reports and stream timing, from the order_event and tick frames
 # recorded in simulation mode on 2026-09-29. Report pointers are relative

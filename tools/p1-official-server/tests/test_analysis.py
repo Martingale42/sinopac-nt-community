@@ -13,7 +13,7 @@ from pathlib import Path
 
 import httpx
 import pytest
-from helpers import MINIMAL_CONFIG_LINES, SECRET_ENV_VARS, WriteConfig
+from helpers import FAKE_SECRET_ENV, MINIMAL_CONFIG_LINES, SECRET_ENV_VARS, WriteConfig
 
 from p1rec import reconcile as reconciliation
 from p1rec import stats
@@ -226,8 +226,8 @@ _MATCHING_TRADES = [_trade("t1", "Submitted", 0), _trade("t2", "Cancelled", 0), 
 
 
 def _set_secret_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    for var in SECRET_ENV_VARS:
-        monkeypatch.setenv(var, "fake-value-0123456789")
+    for var, value in FAKE_SECRET_ENV.items():
+        monkeypatch.setenv(var, value)
 
 
 def _only_new_run(results_root: Path, subcommand: str) -> Path:

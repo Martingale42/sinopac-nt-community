@@ -6,7 +6,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from helpers import MINIMAL_CONFIG_LINES, PLACE_FUTURES_TEMPLATE, PLACE_STOCK_TEMPLATE, WriteConfig
+from helpers import FAKE_SECRET_ENV, MINIMAL_CONFIG_LINES, PLACE_FUTURES_TEMPLATE, PLACE_STOCK_TEMPLATE, WriteConfig
 
 from p1rec.config import (
     ConfigError,
@@ -22,6 +22,7 @@ from p1rec.config import (
     StreamConfig,
     TradeFields,
     load_config,
+    read_secret_role,
     read_secrets,
 )
 
@@ -131,6 +132,7 @@ def test_load_config_success(tmp_path: Path, write_config: WriteConfig) -> None:
         selection=(tmp_path / "fixtures.toml").resolve(),
         contract_doc=(tmp_path / "contract.md").resolve(),
         extra_scan_paths=(),
+        ipv4_allow=frozenset(),
     )
 
 
@@ -428,12 +430,42 @@ def test_read_secrets_success(write_config: WriteConfig, monkeypatch: pytest.Mon
     secrets = read_secrets(cfg)
 
     assert secrets == {
-        "api_key": "fake-api-key-value",
-        "sec_key": "fake-sec-key-value",
-        "ca_passwd": "fake-ca-passwd",
-        "person_id": "A123456789",
-        "egress_ip": "203.0.113.1",
+        "api_key": ("fake-api-key-value",),
+        "sec_key": ("fake-sec-key-value",),
+        "ca_passwd": ("fake-ca-passwd",),
+        "person_id": ("A123456789",),
+        "egress_ip": ("203.0.113.1",),
     }
+
+
+def _set_fake_secrets(monkeypatch: pytest.MonkeyPatch, **values: str) -> None:
+    """Set every secret variable to a made-up value, with values overriding some by variable name."""
+    for var, value in {**FAKE_SECRET_ENV, **values}.items():
+        monkeypatch.setenv(var, value)
+
+
+def test_read_secrets_splits_egress_list(write_config: WriteConfig, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = load_config(write_config())
+    _set_fake_secrets(monkeypatch, P1_EGRESS_IP="203.0.113.1, 203.0.113.2,203.0.113.1")
+
+    assert read_secrets(cfg)["egress_ip"] == ("203.0.113.1", "203.0.113.2")
+    assert read_secret_role(cfg, "egress_ip") == ("203.0.113.1", "203.0.113.2")
+
+
+def test_read_secrets_rejects_non_ipv4_egress_item(write_config: WriteConfig, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = load_config(write_config())
+    _set_fake_secrets(monkeypatch, P1_EGRESS_IP="203.0.113.1,egress-host-q7")
+
+    with pytest.raises(ConfigError, match="P1_EGRESS_IP") as exc_info:
+        read_secrets(cfg)
+    assert "egress-host-q7" not in str(exc_info.value)
+
+
+def test_read_secrets_keeps_comma_in_other_roles(write_config: WriteConfig, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = load_config(write_config())
+    _set_fake_secrets(monkeypatch, SJ_CA_PASSWD="a,b")
+
+    assert read_secrets(cfg)["ca_passwd"] == ("a,b",)
 
 
 def _with_margins(*entries: str) -> list[str]:

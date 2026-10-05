@@ -10,7 +10,7 @@ from pathlib import Path
 
 import httpx
 import pytest
-from helpers import SECRET_ENV_VARS, UNUSED_ORDERS_CONFIG, UNUSED_TRADE_FIELDS, WriteConfig
+from helpers import FAKE_SECRET_ENV, UNUSED_ORDERS_CONFIG, UNUSED_TRADE_FIELDS, WriteConfig
 
 from p1rec import cli, interlock
 from p1rec.capture import CapturingClient
@@ -64,6 +64,7 @@ def _build_cfg(tmp_path: Path) -> P1Config:
             selection=Path("."),
             contract_doc=Path("."),
             extra_scan_paths=(),
+            ipv4_allow=frozenset(),
         ),
     )
 
@@ -269,8 +270,8 @@ def test_self_test_returns_3_when_abort_case_raises_unexpectedly(monkeypatch: py
 
 def test_cli_exit_code_3(write_config: WriteConfig, monkeypatch: pytest.MonkeyPatch, stub_subcommand: str) -> None:
     config_path = write_config()
-    for var in SECRET_ENV_VARS:
-        monkeypatch.setenv(var, "fake-value-0123456789")
+    for var, value in FAKE_SECRET_ENV.items():
+        monkeypatch.setenv(var, value)
 
     def _raising_handler(_args: object, _cfg: object, _run_dir: Path) -> int:
         raise InterlockError("official server did not report simulation mode")
@@ -287,8 +288,8 @@ def test_cli_exit_code_3_on_transport_error(
     write_config: WriteConfig, monkeypatch: pytest.MonkeyPatch, stub_subcommand: str
 ) -> None:
     config_path = write_config()
-    for var in SECRET_ENV_VARS:
-        monkeypatch.setenv(var, "fake-value-0123456789")
+    for var, value in FAKE_SECRET_ENV.items():
+        monkeypatch.setenv(var, value)
 
     def handler(_request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("[Errno 111] Connection refused")

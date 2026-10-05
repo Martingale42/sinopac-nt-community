@@ -8,7 +8,7 @@ import logging
 from pathlib import Path
 
 import pytest
-from helpers import MINIMAL_CONFIG_LINES, SECRET_ENV_VARS, WriteConfig
+from helpers import FAKE_SECRET_ENV, MINIMAL_CONFIG_LINES, WriteConfig
 from mock_official import (
     ENDPOINT_LINES,
     FUTURES_ACCOUNT,
@@ -328,8 +328,8 @@ def test_account_identifiers_redacted_from_log(tmp_path: Path, write_config: Wri
 def test_cli_preflight_passes_scenarios_path(
     tmp_path: Path, write_config: WriteConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    for var in SECRET_ENV_VARS:
-        monkeypatch.setenv(var, "fake-value-0123456789")
+    for var, value in FAKE_SECRET_ENV.items():
+        monkeypatch.setenv(var, value)
     config_path = write_config([*MINIMAL_CONFIG_LINES, *ENDPOINT_LINES])
     seen: list[Path] = []
 
@@ -348,8 +348,8 @@ def test_cli_preflight_passes_scenarios_path(
 def test_cli_malformed_scenarios_exits_1(
     tmp_path: Path, write_config: WriteConfig, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    for var in SECRET_ENV_VARS:
-        monkeypatch.setenv(var, "fake-value-0123456789")
+    for var, value in FAKE_SECRET_ENV.items():
+        monkeypatch.setenv(var, value)
     config_path = write_config([*MINIMAL_CONFIG_LINES, *ENDPOINT_LINES])
     scenarios = write_scenarios(tmp_path, "[[case]]\nid = 'only_an_id'\n")
 

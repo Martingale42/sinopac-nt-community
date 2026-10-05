@@ -122,7 +122,7 @@ def _add_scrub_arguments(sub: argparse.ArgumentParser) -> None:
         action="store_true",
         help=(
             "only scan fixtures_root's parent, scrub.contract_doc and scrub.extra_scan_paths "
-            "for original values, exiting 2 on any"
+            "for original values and IPv4 literals outside scrub.ipv4_allow, exiting 2 on any"
         ),
     )
 

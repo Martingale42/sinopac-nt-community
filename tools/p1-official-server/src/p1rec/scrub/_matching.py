@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import functools
+import ipaddress
 import json
 import re
 import unicodedata
 from collections import Counter
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Collection, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote
@@ -46,6 +47,23 @@ UNDECODABLE_B64 = "UNDECODABLE_B64"
 
 # How Python and JSON-style logs print a missing value, which holds nothing to leak
 _NULL_WORDS = frozenset({"None", "null"})
+
+# Any IPv4 literal may be a host's address that was never registered as an
+# original, so the scan reports one under this category unless it is allowed.
+IPV4_CATEGORY = "IPV4"
+
+# Four dotted decimal fields that are not part of a longer dotted run, such as the version 1.2.3.4.5
+_IPV4_RE = re.compile(
+    r"(?<![0-9])(?<![0-9]\.)([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})(?![0-9])(?!\.[0-9])"
+)
+
+# Loopback, the unspecified address and the RFC 5737 documentation ranges
+# name no particular host, while private and shared (CGNAT) ranges map out
+# a private network and stay reported.
+_UNREPORTED_IPV4_NETWORKS = tuple(
+    ipaddress.IPv4Network(network)
+    for network in ("127.0.0.0/8", "0.0.0.0/32", "192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24")
+)
 
 # Unicode's Supplementary Private Use Area-A, U+F0000 to U+FFFFD, which
 # recorded text has no reason to contain, lends one marker character to
@@ -228,17 +246,30 @@ def _field_patterns(keys: Iterable[str]) -> tuple[re.Pattern[str], ...]:
     )
 
 
+def _has_reported_ipv4(text: str, allow: frozenset[str]) -> bool:
+    """Return True if text holds an IPv4 literal outside _UNREPORTED_IPV4_NETWORKS and allow."""
+    for match in _IPV4_RE.finditer(text):
+        octets = [int(field) for field in match.groups()]
+        if max(octets) > 255:
+            continue
+        address = ipaddress.IPv4Address(bytes(octets))
+        if str(address) not in allow and not any(address in network for network in _UNREPORTED_IPV4_NETWORKS):
+            return True
+    return False
+
+
 class _Detector:
     """Report which originals occur in a line, in any form, including inside base64 fields.
 
     It also reports, under its key's category, the non-empty value of every
     field named in keys that is not a placeholder, since such a value may
-    be an identifier no known original names, and reports a *_b64 field
+    be an identifier no known original names, reports an IPv4 literal
+    _has_reported_ipv4 does not exempt as IPV4, and reports a *_b64 field
     that does not decode as UNDECODABLE_B64, since its content cannot be
     checked.
     """
 
-    def __init__(self, originals: Mapping[str, str], keys: Mapping[str, str]) -> None:
+    def __init__(self, originals: Mapping[str, str], keys: Mapping[str, str], ipv4_allow: Collection[str]) -> None:
         self._checks: list[tuple[str, re.Pattern[str], frozenset[bytes]]] = []
         for original, label in originals.items():
             if not original:
@@ -246,6 +277,7 @@ class _Detector:
             self._checks.append((category_of(label), original_pattern(original), _byte_forms(original)))
         self.key_categories = dict(keys)
         self._field_patterns = _field_patterns(keys)
+        self._ipv4_allow = frozenset(ipv4_allow)
 
     def kinds_in(self, data: bytes) -> set[str]:
         text = data.decode("utf-8", "surrogateescape")
@@ -263,6 +295,8 @@ class _Detector:
                     value = fields["value"] if fields["value"] is not None else fields.get("bare")
                     if value and value not in _NULL_WORDS and not is_placeholder(value):
                         found.add(self.key_categories[fields["key"]])
+        if any(_has_reported_ipv4(candidate, self._ipv4_allow) for candidate in texts):
+            found.add(IPV4_CATEGORY)
 
         # Decoded content is shorter than its base64 text, so the recursion ends
         for match in _B64_FIELD_RE.finditer(text):
@@ -292,7 +326,11 @@ def _iter_entries(paths: Iterable[Path]) -> Iterator[Path]:
 
 
 def scan(
-    paths: Iterable[Path], originals: Mapping[str, str], keys: Mapping[str, str] | None = None
+    paths: Iterable[Path],
+    originals: Mapping[str, str],
+    keys: Mapping[str, str] | None = None,
+    *,
+    ipv4_allow: Collection[str] = (),
 ) -> list[Leak]:
     """Return one Leak per line and category where an original occurs in paths.
 
@@ -302,11 +340,13 @@ def scan(
     and directory under a scanned directory, and of a scanned file, is
     checked too and reported as line 0. A non-empty "ca" field that is not
     a placeholder is reported as CA_SIGNATURE, and so is, under its own
-    category, a field named in keys (key -> category). Directories are
-    scanned recursively, and a path that does not exist raises
-    FileNotFoundError rather than passing unscanned.
+    category, a field named in keys (key -> category). An IPv4 literal is
+    reported as IPV4 unless it is loopback, 0.0.0.0, in a documentation
+    range or listed in ipv4_allow. Directories are scanned recursively, and
+    a path that does not exist raises FileNotFoundError rather than passing
+    unscanned.
     """
-    detector = _Detector(originals, {CA_KEY: CA_CATEGORY, **(keys or {})})
+    detector = _Detector(originals, {CA_KEY: CA_CATEGORY, **(keys or {})}, ipv4_allow)
     leaks: list[Leak] = []
     for entry in _iter_entries(paths):
         for kind in sorted(detector.kinds_in(entry.name.encode("utf-8", "surrogateescape"))):

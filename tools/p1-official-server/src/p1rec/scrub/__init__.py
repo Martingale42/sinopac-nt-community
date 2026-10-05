@@ -13,17 +13,20 @@ depth, percent-encoded in a URL, stripped of surrounding blanks, and
 inside base64 fields. scrub_text and scan match all of those forms,
 case-insensitively, so an upper-case \\uXXXX escape counts too, and scan
 also matches after NFKC normalization. An original shorter than
-MIN_SUBSTRING_MATCH_LEN matches only as a whole token.
+MIN_SUBSTRING_MATCH_LEN matches only as a whole token. scan also reports
+IPv4 literals outside scrub.ipv4_allow, so an address never registered
+as an original cannot pass either.
 """
 
 from p1rec.scrub._common import ScrubError, category_of
 from p1rec.scrub._discovery import discover, pointer_category
 from p1rec.scrub._export import FixtureEntry, LeakError, export_fixtures, load_selection
 from p1rec.scrub._map import build_map, categories, load_map, save_map
-from p1rec.scrub._matching import MIN_SUBSTRING_MATCH_LEN, UNDECODABLE_B64, Leak, scan, scrub_text
+from p1rec.scrub._matching import IPV4_CATEGORY, MIN_SUBSTRING_MATCH_LEN, UNDECODABLE_B64, Leak, scan, scrub_text
 from p1rec.scrub._run import run_scrub
 
 __all__ = [
+    "IPV4_CATEGORY",
     "MIN_SUBSTRING_MATCH_LEN",
     "UNDECODABLE_B64",
     "FixtureEntry",

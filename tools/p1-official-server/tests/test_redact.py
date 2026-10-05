@@ -52,17 +52,18 @@ def test_redacting_formatter_ignores_empty_secret() -> None:
 
 
 def test_redaction_values_includes_api_key_prefix() -> None:
+    api_key, sec_key = "abcdefghijklmnopqrstuvwx", "othersecretvalue"
     secrets = {
-        "api_key": "abcdefghijklmnopqrstuvwx",
-        "sec_key": "othersecretvalue",
-        "ca_passwd": "",  # empty values must never be redaction targets
+        "api_key": (api_key,),
+        "sec_key": (sec_key,),
+        "ca_passwd": ("",),  # empty values must never be redaction targets
     }
 
     values = redaction_values(secrets)
 
-    assert secrets["api_key"] in values
-    assert secrets["api_key"][:API_KEY_PREFIX_LEN] in values
-    assert secrets["sec_key"] in values
+    assert api_key in values
+    assert api_key[:API_KEY_PREFIX_LEN] in values
+    assert sec_key in values
     assert "" not in values
 
 
@@ -71,9 +72,23 @@ def test_redaction_values_without_api_key() -> None:
     assert redaction_values({}) == []
 
 
+def test_redaction_values_cover_every_egress_ip(tmp_path: Path) -> None:
+    egress_ips = ("203.0.113.1", "203.0.113.2")
+
+    values = redaction_values({"api_key": ("abcdefghijklmnopqrstuvwx",), "egress_ip": egress_ips})
+
+    assert set(egress_ips) <= set(values)
+    setup_logging(tmp_path, secrets=values, level="INFO")
+    logging.getLogger("p1rec.orders").info("login from %s, then from %s", *egress_ips)
+    for handler in logging.getLogger().handlers:
+        handler.flush()
+    log_text = (tmp_path / "recorder.log").read_text(encoding="utf-8")
+    assert "login from ***, then from ***" in log_text
+
+
 def test_log_redacts_secret_and_prefix(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    secrets = {"api_key": "abcdefghijklmnopqrstuvwx", "sec_key": "othersecretvalue"}
-    full_key = secrets["api_key"]
+    full_key = "abcdefghijklmnopqrstuvwx"
+    secrets = {"api_key": (full_key,), "sec_key": ("othersecretvalue",)}
     prefix = full_key[:API_KEY_PREFIX_LEN]
 
     setup_logging(tmp_path, secrets=redaction_values(secrets), level="INFO")

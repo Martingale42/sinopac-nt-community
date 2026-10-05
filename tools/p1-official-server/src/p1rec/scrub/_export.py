@@ -436,9 +436,9 @@ def export_fixtures(cfg: P1Config, mapping: Mapping[str, str]) -> list[Path]:
     is validated, and the output staged and scanned under results_root,
     before anything reaches fixtures_root: an invalid entry, or one with an
     original in a field that goes public, raises ConfigError, and output
-    that still holds an original raises LeakError, leaving fixtures_root
-    untouched and the staged copy in place for inspection. Returns the
-    written paths, MANIFEST.toml last.
+    that still holds an original or an IPv4 literal scan does not exempt
+    raises LeakError, leaving fixtures_root untouched and the staged copy
+    in place for inspection. Returns the written paths, MANIFEST.toml last.
     """
     entries = load_selection(cfg.scrub.selection)
     for entry in entries:
@@ -477,7 +477,7 @@ def export_fixtures(cfg: P1Config, mapping: Mapping[str, str]) -> list[Path]:
     for filename, data in outputs.items():
         (staging / filename).write_bytes(data)
         staged.append(staging / filename)
-    leaks = scan(staged, mapping, key_categories(cfg))
+    leaks = scan(staged, mapping, key_categories(cfg), ipv4_allow=cfg.scrub.ipv4_allow)
     if leaks:
         raise LeakError(leaks, staging)
 

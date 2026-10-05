@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 import sys
 import threading
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from types import TracebackType
 
@@ -47,12 +47,10 @@ _active_formatter: RedactingFormatter | None = None
 _QUIET_THIRD_PARTY_LOGGERS = ("httpx", "httpcore")
 
 
-def redaction_values(secrets: Mapping[str, str]) -> list[str]:
-    """Return every non-empty secret value, plus the api_key clientname prefix."""
-    values = [value for value in secrets.values() if value]
-    api_key = secrets.get("api_key")
-    if api_key:
-        values.append(api_key[:API_KEY_PREFIX_LEN])
+def redaction_values(secrets: Mapping[str, Sequence[str]]) -> list[str]:
+    """Return every non-empty value of every role, plus each api_key value's clientname prefix."""
+    values = [value for role_values in secrets.values() for value in role_values if value]
+    values += [api_key[:API_KEY_PREFIX_LEN] for api_key in secrets.get("api_key", ()) if api_key]
     return values
 
 

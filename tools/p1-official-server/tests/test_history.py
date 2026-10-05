@@ -10,7 +10,7 @@ from typing import NotRequired, TypedDict, cast
 
 import httpx
 import pytest
-from helpers import SECRET_ENV_VARS, UNUSED_EVENT_FIELDS, UNUSED_ORDERS_CONFIG, UNUSED_TRADE_FIELDS, WriteConfig
+from helpers import FAKE_SECRET_ENV, UNUSED_EVENT_FIELDS, UNUSED_ORDERS_CONFIG, UNUSED_TRADE_FIELDS, WriteConfig
 
 from p1rec import capture
 from p1rec.cli import main
@@ -78,6 +78,7 @@ def _build_cfg(tmp_path: Path, queries: tuple[HistoryQuery, ...]) -> P1Config:
             selection=Path("."),
             contract_doc=Path("."),
             extra_scan_paths=(),
+            ipv4_allow=frozenset(),
         ),
     )
 
@@ -267,8 +268,8 @@ def test_interlock_abort_via_cli_writes_no_history_json(
     # (helpers.py), so this exercises the real cli.py -> run_history wiring,
     # not a stand-in handler.
     config_path = write_config()
-    for var in SECRET_ENV_VARS:
-        monkeypatch.setenv(var, "fake-value-0123456789")
+    for var, value in FAKE_SECRET_ENV.items():
+        monkeypatch.setenv(var, value)
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "GET" and request.url.path == _INFO_PATH:

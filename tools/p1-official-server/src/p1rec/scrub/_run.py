@@ -99,12 +99,12 @@ def run_scrub(cfg: P1Config, *, scan_only: bool) -> int:
 
     Both first check that git ignores results_root, then extend and save the
     scrub map with the current secrets and newly discovered identifiers.
-    Returns 0 when no original was found, 2 when one was (each reported as
-    path:line:category, the path scrubbed, never the value) or when the
-    fixture directory holds files the selection did not produce, and 1 on
-    a configuration or scrubbing error, including when a category the
-    scrub pointers name has no known value, since its identifiers could
-    then pass unscrubbed.
+    Returns 0 when no original was found, 2 when one or an IPv4 literal
+    scan does not exempt was (each reported as path:line:category, the path
+    scrubbed, never the value) or when the fixture directory holds files
+    the selection did not produce, and 1 on a configuration or scrubbing
+    error, including when a category the scrub pointers name has no known
+    value, since its identifiers could then pass unscrubbed.
     """
     try:
         _require_git_ignored(cfg.results_root, cfg.scrub.map_path)
@@ -122,7 +122,7 @@ def run_scrub(cfg: P1Config, *, scan_only: bool) -> int:
 
         unselected: list[Path] = []
         if scan_only:
-            leaks = scan(_scan_targets(cfg), mapping, key_categories(cfg))
+            leaks = scan(_scan_targets(cfg), mapping, key_categories(cfg), ipv4_allow=cfg.scrub.ipv4_allow)
         else:
             try:
                 written = export_fixtures(cfg, mapping)

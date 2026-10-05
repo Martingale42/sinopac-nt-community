@@ -25,6 +25,7 @@ from p1rec.cli import main
 from p1rec.config import ConfigError, P1Config, load_config
 from p1rec.redact import API_KEY_PREFIX_LEN
 from p1rec.scrub import (
+    IPV4_CATEGORY,
     MIN_SUBSTRING_MATCH_LEN,
     UNDECODABLE_B64,
     Leak,
@@ -49,11 +50,18 @@ SEC_KEY = "FakeSecKey9876543210zyxwv"
 CA_PASSWD = "fake-ca-passwd-q7"
 PERSON_ID = "Z900000001"
 EGRESS_IP = "203.0.113.77"
+LATER_EGRESS_IP = "203.0.113.78"
 ACCOUNT_S = "0977001"
 ACCOUNT_F = "0977002"
 USERNAME = "測試甲"
 SUBACCOUNT_REST = "S0977009"
 SUBACCOUNT_SSE = "S0977010"
+
+# A global IPv4 address, built from its octets so that no global IPv4 literal is committed
+GLOBAL_IP = ".".join(map(str, (11, 22, 33, 44)))
+
+# A version string the live p1.toml allows although it reads as an IPv4 address
+VERSION_IP = "7.33.0.3"
 
 # A CA signature whose DER embeds the holder's name and national ID, which base64 hides from string matching
 FAKE_CA = base64.b64encode(b"0\x82FAKE-CERT CN=" + USERNAME.encode() + b" SERIALNUMBER=" + PERSON_ID.encode()).decode()
@@ -66,11 +74,11 @@ SECRET_ENV = {
     "P1_EGRESS_IP": EGRESS_IP,
 }
 SECRETS = {
-    "api_key": API_KEY,
-    "sec_key": SEC_KEY,
-    "ca_passwd": CA_PASSWD,
-    "person_id": PERSON_ID,
-    "egress_ip": EGRESS_IP,
+    "api_key": (API_KEY,),
+    "sec_key": (SEC_KEY,),
+    "ca_passwd": (CA_PASSWD,),
+    "person_id": (PERSON_ID,),
+    "egress_ip": (EGRESS_IP,),
 }
 ORIGINALS = (
     API_KEY,
@@ -312,8 +320,20 @@ def test_deterministic_placeholders() -> None:
     assert later["0977003"] == "ACCOUNT_ID_3"
 
 
+def test_build_map_numbers_each_egress_ip() -> None:
+    existing = build_map(SECRETS, {}, {})
+    assert existing[EGRESS_IP] == "EGRESS_IP_1"
+
+    # Listed after the new address, the mapped one still keeps its number
+    mapping = build_map({**SECRETS, "egress_ip": (LATER_EGRESS_IP, EGRESS_IP)}, {}, existing)
+
+    assert mapping[EGRESS_IP] == "EGRESS_IP_1"
+    assert mapping[LATER_EGRESS_IP] == "EGRESS_IP_2"
+    assert {original: mapping[original] for original in existing} == existing
+
+
 def test_credential_equal_to_identity_takes_identity_placeholder() -> None:
-    mapping = build_map({**SECRETS, "ca_passwd": PERSON_ID}, {}, {})
+    mapping = build_map({**SECRETS, "ca_passwd": (PERSON_ID,)}, {}, {})
 
     assert mapping[PERSON_ID] == "PERSON_ID_1"
     assert not any(placeholder.startswith("CA_PASSWD") for placeholder in mapping.values())
@@ -817,10 +837,10 @@ def test_short_identity_values_rejected() -> None:
             build_map(SECRETS, {category: ["00"]}, {})
         assert "00" not in str(exc_info.value)
     with pytest.raises(ScrubError, match="PERSON_ID"):
-        build_map({**SECRETS, "person_id": "Z9"}, {}, {})
+        build_map({**SECRETS, "person_id": ("Z9",)}, {}, {})
 
     # A short CA password or subaccount is legitimate and matches as a whole token only
-    mapping = build_map({**SECRETS, "ca_passwd": "1234"}, {"SUBACCOUNT": ["A1"]}, {})
+    mapping = build_map({**SECRETS, "ca_passwd": ("1234",)}, {"SUBACCOUNT": ["A1"]}, {})
     assert scrub_text("pin 1234 at 12345", mapping) == "pin CA_PASSWD_1 at 12345"
 
 
@@ -918,6 +938,52 @@ def test_scan_reports_undecodable_base64(tmp_path: Path) -> None:
     fixture.write_text('{"resp_body_b64": "not base64!"}\n{"resp_body_b64": "e30="}\n', encoding="utf-8")
 
     assert scan([fixture], {}) == [Leak(path=fixture, line=1, kind=UNDECODABLE_B64)]
+
+
+def test_scan_flags_unlisted_ipv4(tmp_path: Path) -> None:
+    fixture = tmp_path / "E1_server.log"
+    fixture.write_text(f"connected to {GLOBAL_IP}:443\nlibsolclient {VERSION_IP}\n", encoding="utf-8")
+
+    assert scan([fixture], {}) == [Leak(path=fixture, line=line, kind=IPV4_CATEGORY) for line in (1, 2)]
+
+    # Private and shared (CGNAT) addresses map out a private network, so they are reported too
+    private = tmp_path / "E1_private.log"
+    private.write_text("lan 10.1.2.3\ntailnet 100.64.1.2\n", encoding="utf-8")
+    assert scan([private], {}) == [Leak(path=private, line=line, kind=IPV4_CATEGORY) for line in (1, 2)]
+
+
+def test_scan_ignores_loopback_doc_ranges_and_allowed(tmp_path: Path) -> None:
+    fixture = tmp_path / "E1_server.log"
+    fixture.write_text(
+        "listening on http://127.0.0.1:18080, not 0.0.0.0\n"
+        "login from 203.0.113.5, 192.0.2.1 and 198.51.100.1\n"
+        f"libsolclient {VERSION_IP}\n",
+        encoding="utf-8",
+    )
+
+    assert scan([fixture], {}, ipv4_allow={VERSION_IP}) == []
+
+
+def test_scan_ignores_longer_dotted_runs(tmp_path: Path) -> None:
+    fixture = tmp_path / "E1_versions.log"
+
+    # A field above 255 does not make an address either
+    fixture.write_text("version 1.2.3.4.5\nbuild 1.2.3.456\n", encoding="utf-8")
+
+    assert scan([fixture], {}) == []
+
+
+def test_scan_only_exits_2_on_ipv4_leak(env: _Env, caplog: pytest.LogCaptureFixture) -> None:
+    contract = env.cfg.scrub.contract_doc
+    with contract.open("a", encoding="utf-8") as fh:
+        fh.write(f"the server connects to {GLOBAL_IP}\n")
+
+    assert scrub.run_scrub(env.cfg, scan_only=True) == 2
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert f"{contract}:2:{IPV4_CATEGORY}" in messages
+    assert "found 1 leaks and 0 files the selection did not produce" in messages
+    assert GLOBAL_IP not in caplog.text
 
 
 def test_export_reports_unselected_files_without_removing_them(
@@ -1024,6 +1090,7 @@ def test_real_p1_toml_scrub_section() -> None:
     assert cfg.scrub.contract_doc.is_file()
     assert cfg.fixtures_root.parent.name == "official"
     assert all(path.exists() for path in cfg.scrub.extra_scan_paths)
+    assert cfg.scrub.ipv4_allow == frozenset({"7.33.0.3"})
     assert scrub.load_selection(cfg.scrub.selection) == []
 
 
@@ -1038,4 +1105,4 @@ def test_committed_docs_and_config_scan_clean() -> None:
     # No real original is known here, so this checks the fields the scan reports by key alone
     mapping = build_map(SECRETS, {}, {})
 
-    assert scan(targets, mapping, _discovery.key_categories(cfg)) == []
+    assert scan(targets, mapping, _discovery.key_categories(cfg), ipv4_allow=cfg.scrub.ipv4_allow) == []

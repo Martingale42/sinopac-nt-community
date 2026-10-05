@@ -198,3 +198,7 @@ MINIMAL_CONFIG_LINES = [
 ]
 
 SECRET_ENV_VARS = ("SJ_API_KEY", "SJ_SEC_KEY", "SJ_CA_PASSWD", "P1_PERSON_ID", "P1_EGRESS_IP")
+
+# A made-up value for every secret variable, the egress IP taken from a
+# documentation range, since that variable must hold IPv4 addresses.
+FAKE_SECRET_ENV = {**dict.fromkeys(SECRET_ENV_VARS, "fake-value-0123456789"), "P1_EGRESS_IP": "203.0.113.1"}

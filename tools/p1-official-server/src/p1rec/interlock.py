@@ -205,6 +205,7 @@ def _self_test_cfg(interlock: InterlockConfig) -> P1Config:
             selection=Path("."),
             contract_doc=Path("."),
             extra_scan_paths=(),
+            ipv4_allow=frozenset(),
         ),
     )
 

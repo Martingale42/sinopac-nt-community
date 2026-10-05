@@ -167,6 +167,7 @@ map_path = "results/scrub-map.json"
 selection = "fixtures.toml"
 contract_doc = "contract.md"
 extra_scan_paths = ["fixtures.toml"]
+ipv4_allow = ["7.33.0.3"]  # libsolclient version in the spike design's sources
 
 [events]
 order_event_name = "order_event"

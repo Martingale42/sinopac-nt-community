@@ -40,18 +40,19 @@ def categories(mapping: Mapping[str, str]) -> dict[str, str]:
 
 
 def build_map(
-    secrets: Mapping[str, str], discovered: Mapping[str, Sequence[str]], existing: Mapping[str, str]
+    secrets: Mapping[str, Sequence[str]], discovered: Mapping[str, Sequence[str]], existing: Mapping[str, str]
 ) -> dict[str, str]:
     """Return the original -> placeholder map, extending existing without renumbering it.
 
-    secrets is role -> value, as read_secrets returns, and adds the API
-    key's clientname prefix under API_KEY_PREFIX. discovered is category ->
-    values in order of first appearance. A value already mapped, whether in
-    existing or from an earlier source, keeps its placeholder, and each new
-    value takes the next free number in its category. Raises ScrubError if
-    a placeholder is shared or would itself contain an original, or if an
-    identity value, such as an account ID, is shorter than
-    MIN_SUBSTRING_MATCH_LEN.
+    secrets is role -> values, as read_secrets returns, each value claimed
+    under the role's category, such as every egress IP under EGRESS_IP, and
+    adds the API key's clientname prefix under API_KEY_PREFIX. discovered is
+    category -> values in order of first appearance. A value already mapped,
+    whether in existing or from an earlier source, keeps its placeholder,
+    and each new value takes the next free number in its category. Raises
+    ScrubError if a placeholder is shared or would itself contain an
+    original, or if an identity value, such as an account ID, is shorter
+    than MIN_SUBSTRING_MATCH_LEN.
     """
     mapping = {original: placeholder for original, placeholder in existing.items() if original}
     next_number: dict[str, int] = {}
@@ -77,8 +78,9 @@ def build_map(
     roles = [role for role in _ROLE_ORDER if role in secrets]
     roles += sorted(role for role in secrets if role not in _ROLE_ORDER)
     for role in roles:
-        claim(secrets[role], role.upper())
-    held = set(secrets.values())
+        for value in secrets[role]:
+            claim(value, role.upper())
+    held = {value for values in secrets.values() for value in values}
     for value in redaction_values(secrets):
         if value not in held:
             claim(value, _DERIVED_CATEGORY)

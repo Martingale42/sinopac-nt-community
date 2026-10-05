@@ -8,15 +8,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from helpers import MINIMAL_CONFIG_LINES, SECRET_ENV_VARS, WriteConfig
+from helpers import FAKE_SECRET_ENV, MINIMAL_CONFIG_LINES, SECRET_ENV_VARS, WriteConfig
 
 from p1rec import cli
 from p1rec.cli import main
 
 
 def _set_all_secret_env_vars(monkeypatch: pytest.MonkeyPatch) -> None:
-    for var in SECRET_ENV_VARS:
-        monkeypatch.setenv(var, "fake-value-0123456789")
+    for var, value in FAKE_SECRET_ENV.items():
+        monkeypatch.setenv(var, value)
 
 
 def _delete_all_secret_env_vars(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -76,9 +76,9 @@ def test_handler_exception_is_redacted(
 ) -> None:
     config_path = write_config()
     secret_value = "abcdefghijklmnopqrstuvwx"
+    for var, value in FAKE_SECRET_ENV.items():
+        monkeypatch.setenv(var, value)
     monkeypatch.setenv("SJ_API_KEY", secret_value)
-    for var in SECRET_ENV_VARS[1:]:
-        monkeypatch.setenv(var, "fake-value-0123456789")
 
     def _raising_handler(_args: object, _cfg: object, _run_dir: Path) -> int:
         raise KeyError(secret_value)
