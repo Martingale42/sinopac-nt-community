@@ -176,7 +176,7 @@ egress_check_interval_s = 3600
 egress_url = "https://checkip.amazonaws.com"
 ```
 
-`status.json`：`checked_at`（UTC ISO）、`ok`、`anomalies`（`name`、`since`、`detail`）、`health`（`status`、`token_stale`、`session_recovering`、`session_recovery_attempts`、`next_maintenance`、`token_expires_in_seconds`、`has_recovery_error`）、`units`（每個 unit 的 `active`、`n_restarts`、`memory_bytes`）、`stream_run`、`data_frame_age_s`（client → 秒）、`egress_matches`（`true`／`false`／`null`）。狀態檔 `state.json` 存位移、計數與上次查詢時間。
+`status.json`：`checked_at`（UTC ISO）、`ok`、`anomalies`（`name`、`since`、`detail`）、`health`（`status`、`token_stale`、`session_recovering`、`session_recovery_attempts`、`next_maintenance`、`token_expires_in_seconds`、`has_recovery_error`）、`units`（每個 unit 的 `active`、`n_restarts`、`memory_bytes`）、`resources`（`disk_free_bytes`、`mem_available_bytes`、`swap_used_bytes`，探測失敗時為 `null` 並成立 `resources` 異常）、`stream_run`、`data_frame_age_s`（client → 秒）、`egress_matches`（`true`／`false`／`null`）。狀態檔 `state.json` 存位移、計數與上次查詢時間。
 
 **Tests:**
 
