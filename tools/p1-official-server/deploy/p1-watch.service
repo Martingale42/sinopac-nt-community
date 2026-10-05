@@ -11,5 +11,8 @@ UMask=0077
 WorkingDirectory=~
 EnvironmentFile=@HOME@/.sinopac-p1/host.env
 
+# Under the timer interval, so a hung run cannot block the next trigger
+TimeoutStartSec=4min
+
 # The braces keep an empty P1_MARKET_HOLIDAYS as one empty argument
-ExecStart=@HOME@/.local/bin/uv run --project sinopac-nt-community/tools/p1-official-server p1watch --config sinopac-nt-community/tools/p1-official-server/p1.toml --state-dir @HOME@/.sinopac-p1/watch --server-log ${P1_SERVER_LOG} --holidays ${P1_MARKET_HOLIDAYS} --disk-path @HOME@/sinopac-nt-community/results
+ExecStart=@HOME@/.local/bin/uv run --frozen --project sinopac-nt-community/tools/p1-official-server p1watch --config sinopac-nt-community/tools/p1-official-server/p1.toml --state-dir @HOME@/.sinopac-p1/watch --server-log ${P1_SERVER_LOG} --holidays ${P1_MARKET_HOLIDAYS} --disk-path @HOME@/sinopac-nt-community/results

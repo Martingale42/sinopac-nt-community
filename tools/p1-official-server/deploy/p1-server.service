@@ -4,7 +4,7 @@
 [Unit]
 Description=Official shioaji server for the P1 soak
 
-# A login that fails before the network is up can leave the process running, which Restart= does not catch
+# A login attempted before the network is up fails without exiting
 Wants=network-online.target
 After=network-online.target
 
