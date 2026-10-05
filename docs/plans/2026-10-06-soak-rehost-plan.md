@@ -257,7 +257,7 @@ git commit -m "Add systemd units for the soak host"
 
 **Files:**
 - Modify: `docs/official-server-contract.md`（§2 新增「固定 IP 主機」小節）
-- 不進版控：家用主機 `~/.sinopac-p1/` 下的 `rotate-key.py`、`push-secrets.sh`、`p1-poll.sh`、`p1-pull.sh` 與其 user timer；VPS 的 `host.env`、`secrets.env`、`ca.pfx`；雲端主機維運 repo 的 `BACKLOG.md`
+- 不進版控：家用主機 `~/.sinopac-p1/` 下的 `rotate-key.py`、`push-secrets.sh`、`p1-poll.py`、`p1-pull.sh` 與其 user timer；VPS 的 `host.env`、`secrets.env`、`ca.pfx`；雲端主機維運 repo 的 `BACKLOG.md`
 
 **Behaviour:**
 
@@ -272,7 +272,7 @@ git commit -m "Add systemd units for the soak host"
 - 由 `host.env.example` 以同一個 `sed` 代入 `@HOME@` 後填值寫成 `host.env`（`P1_STREAM_UNTIL=2026-10-14T20:00:00+08:00`、`P1_SERVER_LOG` 為當日的 `<日期>-server/server.log`、`P1_MARKET_HOLIDAYS=2026-10-09,2026-10-10`）；R3 的 unit 以 `sed` 代入後安裝並 `daemon-reload`。
 - **停下來問使用者**後才 `systemctl start p1-server`：health 為 Simulation、`usage.connections` 記下、出口等於固定 IP；log 出現 `not allow` 即以 `systemctl stop p1-stream p1-server` 兩個一起停止，不重試；只停 server 時，錄製器的下一次啟動會經 `Wants=` 把它拉起來。
 - 通過後 enable 並啟動 `p1-stream` 與 `p1-watch.timer`，確認 `status.json` 的 `ok`。
-- 家用主機：`p1-poll.sh` 每 10 分鐘讀 `status.json`，新的異常類別與恢復各發一則 Telegram（token 在執行時讀取），`checked_at` 超過 15 分鐘未更新發 `watch_stale`，連續 3 次 SSH 失敗發 `unreachable`，14:15 發日摘要（各類次數、磁碟、`MemoryCurrent`、以 `aws cloudwatch get-metric-statistics` 查的 `CPUCreditBalance`）；`p1-pull.sh` 於 14:10 與 05:30 執行 `rsync -a --append-verify -z` 拉回 `results/p1/`。
+- 家用主機：`p1-poll.py` 每 10 分鐘讀 `status.json` 與上次之後新增的 `watch.jsonl` 行，新的異常類別與恢復各發一則 Telegram（token 在執行時讀取），只持續一輪的異常與 `state_reset` 也各發一則，`checked_at` 超過 15 分鐘未更新發 `watch_stale`，連續 3 次 SSH 失敗發 `unreachable`，14:15 發日摘要（各類次數、磁碟、`MemoryCurrent`、以 `aws cloudwatch get-metric-statistics` 查的 `CPUCreditBalance`）；`p1-pull.sh` 於 14:10 與 05:30 執行 `rsync -a --append-verify -z` 拉回 `results/p1/`。
 - 雲端主機維運 repo 的 `BACKLOG.md` 加一列：Free Plan 在 credits 用完或到期日自動關閉，長期使用前決定升級或遷移；本機 commit。
 - 契約文件 §2 記錄：主機規格、服務方式、新 key 只綁固定 IP、第一次登入結果與 `connections`；不寫 IP、主機名或 instance ID。
 
@@ -311,7 +311,7 @@ git commit -m "Record the fixed-IP host setup and first login"
 
 - 完成設計 §11.1 第 1–6 項，各記結果與時間：
   1. 非交易時段 `sudo reboot`，兩個服務自行啟動、錄製器開新 run，Telegram 收到 `service_down` 與恢復。
-  2. 非交易時段 `systemctl stop p1-stream` 一次，收到通知後啟動；`p1-poll.sh` 指向錯誤目標一次，收到 `unreachable`。
+  2. 非交易時段 `systemctl stop p1-stream` 一次，收到通知後啟動；`p1-poll.py` 指向錯誤目標一次，收到 `unreachable`。
   3. health 的 `next_maintenance` 與 server log 的 `Starting daily maintenance` 時間落在台北 08:12–08:30。
   4. 拉回後兩端 sha256 一致；一致的試跑 run 從 VPS 刪除。
   5. 每日 14:15 摘要的 `MemoryCurrent` 與 `CPUCreditBalance` 抄入契約文件。
