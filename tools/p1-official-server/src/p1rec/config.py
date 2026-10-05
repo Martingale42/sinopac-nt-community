@@ -1,11 +1,11 @@
 """Load and validate p1.toml into a P1Config.
 
 Each of InterlockConfig, ContractFields, FundsConfig, StreamConfig,
-OrdersConfig, TradeFields, EventFields, HistoryConfig and ScrubConfig is
-filled in by its own `_parse_<section>` function below, which receives
-the whole parsed document plus the config file's directory, so a full
-dotted key (for validation errors) or a relative path can be resolved
-without touching load_config itself.
+OrdersConfig, TradeFields, EventFields, HistoryConfig, ScrubConfig and
+WatchConfig is filled in by its own `_parse_<section>` function below,
+which receives the whole parsed document plus the config file's
+directory, so a full dotted key (for validation errors) or a relative
+path can be resolved without touching load_config itself.
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ from datetime import datetime, time
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Literal, cast
+from urllib.parse import urlsplit
 
 from p1rec.jsonpointer import is_valid_pointer_syntax
 
@@ -269,6 +270,39 @@ class ScrubConfig:
 
 
 @dataclass(frozen=True)
+class WatchConfig:
+    """The [watch] section: what p1watch checks and the thresholds that make an anomaly.
+
+    Every time of day is Asia/Taipei wall-clock time, and every window is
+    a (start, end) pair whose end comes before its start when it runs past
+    midnight.
+    """
+
+    health_op: str  # A GET operation in [endpoints] answering HealthResponse
+    healthy_status: str
+    maintenance_window: tuple[time, time]
+    degraded_after_checks: int
+
+    # The [stream.streams] entry whose recording carries the quotes
+    data_stream: str
+    quotes_stale_s: float
+    day_session: tuple[time, time]
+    night_session: tuple[time, time]
+
+    # Substrings of a server log line that mark a failed re-login
+    failure_patterns: tuple[str, ...]
+
+    services: tuple[str, ...]  # systemd unit names
+    disk_free_min_gib: float
+    mem_available_min_mib: float
+    swap_used_max_mib: float
+    egress_check_interval_s: float
+
+    # Answers with the caller's public IPv4 address as plain text
+    egress_url: str
+
+
+@dataclass(frozen=True)
 class P1Config:
     base_url: str
     http_timeout_s: float
@@ -291,6 +325,9 @@ class P1Config:
     events: EventFields
     history: HistoryConfig
     scrub: ScrubConfig
+
+    # None for a p1.toml without a [watch] section, which only p1watch needs
+    watch: WatchConfig | None = None
 
 
 # Roles read via read_secrets(); see P1Config.secret_env above
@@ -350,6 +387,7 @@ def load_config(path: Path) -> P1Config:
         events=_parse_events(data, config_dir),
         history=_parse_history(data, config_dir),
         scrub=_parse_scrub(data, config_dir),
+        watch=_parse_watch(data, config_dir),
     )
 
 
@@ -1281,3 +1319,111 @@ def _get_ipv4_allow(data: Mapping[str, Any]) -> frozenset[str]:
         if not _is_ipv4(entry):
             raise ConfigError(f"config key scrub.ipv4_allow[{index}] must be an IPv4 address in dotted decimal")
     return frozenset(entries)
+
+
+# Every key [watch] may hold, so a misspelt one fails at load
+_WATCH_KEYS = frozenset(
+    {
+        "health_op",
+        "healthy_status",
+        "maintenance_window",
+        "degraded_after_checks",
+        "data_stream",
+        "quotes_stale_s",
+        "day_session",
+        "night_session",
+        "failure_patterns",
+        "services",
+        "disk_free_min_gib",
+        "mem_available_min_mib",
+        "swap_used_max_mib",
+        "egress_check_interval_s",
+        "egress_url",
+    }
+)
+
+
+def _parse_watch(data: Mapping[str, Any], config_dir: Path) -> WatchConfig | None:
+    if "watch" not in data:
+        return None
+    _reject_unknown_keys(_optional_table(data, "watch"), _WATCH_KEYS, "watch")
+
+    health_op = _get_str(data, "watch.health_op")
+    known_endpoints = _lookup(data, "endpoints")
+    if not isinstance(known_endpoints, Mapping):
+        raise ConfigError("config key endpoints must be a table")
+    _require_endpoint_method(known_endpoints, health_op, "GET", "watch.health_op")
+
+    data_stream = _get_str(data, "watch.data_stream")
+    streams = _optional_table(data, "stream").get("streams")
+    if not isinstance(streams, Mapping) or data_stream not in streams:
+        raise ConfigError(f"config key watch.data_stream names no [stream.streams] entry: {data_stream!r}")
+
+    return WatchConfig(
+        health_op=health_op,
+        healthy_status=_get_nonempty_str(data, "watch.healthy_status"),
+        maintenance_window=_get_wall_window(data, "watch.maintenance_window"),
+        degraded_after_checks=_get_positive_int(data, "watch.degraded_after_checks"),
+        data_stream=data_stream,
+        quotes_stale_s=_get_interval(data, "watch.quotes_stale_s"),
+        day_session=_get_wall_window(data, "watch.day_session"),
+        night_session=_get_wall_window(data, "watch.night_session"),
+        failure_patterns=_get_nonempty_str_tuple(data, "watch.failure_patterns"),
+        services=_get_nonempty_str_tuple(data, "watch.services"),
+        disk_free_min_gib=_get_positive(data, "watch.disk_free_min_gib"),
+        mem_available_min_mib=_get_positive(data, "watch.mem_available_min_mib"),
+        swap_used_max_mib=_get_positive(data, "watch.swap_used_max_mib"),
+        egress_check_interval_s=_get_interval(data, "watch.egress_check_interval_s"),
+        egress_url=_get_http_url(data, "watch.egress_url"),
+    )
+
+
+def _get_nonempty_str(data: Mapping[str, Any], dotted_key: str) -> str:
+    value = _get_str(data, dotted_key)
+    if not value:
+        raise ConfigError(f"config key {dotted_key} must not be empty")
+    return value
+
+
+def _get_nonempty_str_tuple(data: Mapping[str, Any], dotted_key: str) -> tuple[str, ...]:
+    value = _lookup(data, dotted_key)
+    if not isinstance(value, list) or not value or not all(isinstance(item, str) and item for item in value):
+        raise ConfigError(f"config key {dotted_key} must be a non-empty array of non-empty strings")
+    return tuple(value)
+
+
+def _get_positive(data: Mapping[str, Any], dotted_key: str) -> float:
+    value = _get_number(data, dotted_key)
+    if not math.isfinite(value) or value <= 0:
+        raise ConfigError(f"config key {dotted_key} must be a positive, finite number, got {value!r}")
+    return value
+
+
+def _get_positive_int(data: Mapping[str, Any], dotted_key: str) -> int:
+    value = _lookup(data, dotted_key)
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ConfigError(f"config key {dotted_key} must be a positive integer, got {value!r}")
+    return value
+
+
+def _get_wall_window(data: Mapping[str, Any], dotted_key: str) -> tuple[time, time]:
+    """Read dotted_key as a [start, end] pair of distinct HH:MM times."""
+    value = _lookup(data, dotted_key)
+    if (
+        not isinstance(value, list)
+        or len(value) != 2
+        or not all(isinstance(item, str) and _WALL_TIME_RE.fullmatch(item) for item in value)
+    ):
+        raise ConfigError(f"config key {dotted_key} must be a [start, end] pair of HH:MM times, such as 08:00")
+    start, end = (time.fromisoformat(item) for item in value)
+    if start == end:
+        raise ConfigError(f"config key {dotted_key} must not start and end at the same time")
+    return start, end
+
+
+def _get_http_url(data: Mapping[str, Any], dotted_key: str) -> str:
+    value = _get_str(data, dotted_key)
+    parts = urlsplit(value)
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        raise ConfigError(f"config key {dotted_key} must be an http or https URL, got {value!r}")
+    return value

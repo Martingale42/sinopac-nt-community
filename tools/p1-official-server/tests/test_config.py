@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import time
 from decimal import Decimal
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from p1rec.config import (
     ScrubConfig,
     StreamConfig,
     TradeFields,
+    WatchConfig,
     load_config,
     read_secret_role,
     read_secrets,
@@ -602,3 +604,74 @@ def test_old_trades_keys_rejected(write_config: WriteConfig, table: str, line: s
 
     with pytest.raises(ConfigError, match=rf"unknown config key: {table}\.{key}$"):
         load_config(write_config(lines))
+
+
+_REAL_P1_TOML = Path(__file__).resolve().parent.parent / "p1.toml"
+
+
+def test_watch_section_is_optional(write_config: WriteConfig) -> None:
+    assert load_config(write_config()).watch is None
+
+
+def test_real_p1_toml_watch_section() -> None:
+    cfg = load_config(_REAL_P1_TOML)
+
+    assert cfg.endpoints["health"] == Endpoint(method="GET", path="/api/v1/health")
+    assert cfg.watch == WatchConfig(
+        health_op="health",
+        healthy_status="healthy",
+        maintenance_window=(time(8, 0), time(8, 45)),
+        degraded_after_checks=2,
+        data_stream="data",
+        quotes_stale_s=300.0,
+        day_session=(time(8, 46), time(13, 44)),
+        night_session=(time(15, 1), time(4, 59)),
+        failure_patterns=("not allow", "Daily maintenance failed", "Daily maintenance exhausted"),
+        services=("p1-server.service", "p1-stream.service"),
+        disk_free_min_gib=5.0,
+        mem_available_min_mib=100.0,
+        swap_used_max_mib=256.0,
+        egress_check_interval_s=3600.0,
+        egress_url="https://checkip.amazonaws.com",
+    )
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "message"),
+    [
+        ('health_op = "health"', 'health_op = "trades"', r"watch\.health_op must name a GET endpoint"),
+        ('data_stream = "data"', 'data_stream = "quotes"', r"watch\.data_stream names no \[stream\.streams\] entry"),
+        (
+            'day_session = ["08:46", "13:44"]',
+            'day_session = ["08:46"]',
+            r"watch\.day_session must be a \[start, end\] pair of HH:MM times",
+        ),
+        (
+            'maintenance_window = ["08:00", "08:45"]',
+            'maintenance_window = ["08:00", "08:00"]',
+            r"watch\.maintenance_window must not start and end at the same time",
+        ),
+        ("degraded_after_checks = 2", "degraded_after_checks = 0", r"watch\.degraded_after_checks must be a positive"),
+        ("quotes_stale_s = 300", "quotes_stale_s = -1", r"watch\.quotes_stale_s must be a positive"),
+        ("disk_free_min_gib = 5", 'disk_free_min_gib = "5"', r"watch\.disk_free_min_gib must be a number"),
+        ('services = ["p1-server.service", "p1-stream.service"]', "services = []", r"watch\.services must be a non"),
+        (
+            'egress_url = "https://checkip.amazonaws.com"',
+            'egress_url = "checkip.amazonaws.com"',
+            r"watch\.egress_url must be an http or https URL",
+        ),
+        (
+            "egress_check_interval_s = 3600",
+            "egress_check_interval_s = 3600\negress_check_s = 60",
+            r"unknown config key: watch\.egress_check_s$",
+        ),
+    ],
+)
+def test_watch_section_validated(tmp_path: Path, old: str, new: str, message: str) -> None:
+    text = _REAL_P1_TOML.read_text(encoding="utf-8")
+    assert text.count(old) == 1
+    config = tmp_path / "p1.toml"
+    config.write_text(text.replace(old, new), encoding="utf-8")
+
+    with pytest.raises(ConfigError, match=message):
+        load_config(config)
