@@ -31,7 +31,7 @@
 | P1REC-27 | open | 模擬撮合不會讓未成交的 IOC／FOK 到期，遠價 IOC／FOK 案例停在 `Submitted` 而判為 `order_may_rest`；逾時後應主動刪單並記錄 | `orders.py` `_settle_fill` 與劇本 | live 10/1 |
 | P1REC-28 | open | `exceed_funds_stock_2890` 掛跌停價會被模擬環境以價格範圍退回，且模擬不檢查資金；改用帶內價格或移除此案例 | `scenarios.toml`、`orders.py` `check_cases` | live 10/1 |
 | P1REC-29 | open | 賣出案例的平倉買單仍掛 `limit_up`，會被模擬環境以價格範圍退回；目前劇本沒有賣出案例 | `orders.py` `_Runner._prepare` | live 10/1 |
-| P1REC-30 | open | 對外 IP 會變動，錄製檔裡會出現多個 IP，但 scrub 只認一個 `P1_EGRESS_IP`；改為可列多個 | `config.py` `[secrets]`、`scrub/_map.py` | live 10/1 |
+| P1REC-30 | closed @0fcc0e3 | 對外 IP 會變動，錄製檔裡會出現多個 IP，但 scrub 只認一個 `P1_EGRESS_IP`；改為可列多個 | `config.py` `[secrets]`、`scrub/_map.py` | live 10/1 |
 
 ## P1REC — P2（整理；不改行為）
 
