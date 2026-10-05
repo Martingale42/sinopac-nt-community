@@ -268,8 +268,9 @@ git commit -m "Add systemd units for the soak host"
 - `rotate-key.py` 加 `--only-p1`（只改 `~/.sinopac-p1/env`）與 `--egress-ip`（逗號分隔的清單，直接寫入 `P1_EGRESS_IP`，不查目前出口）；清單為 `egress-ip-history.tsv` 的全部家用 IP 加 VPS 固定 IP，由腳本讀檔產生，不印出。
 - `push-secrets.sh`：從家用主機的 env 取四個密鑰變數與 `SJ_CA_PATH` 指向的檔案，經 tailnet 以 `install -m 600` 寫成 VPS 的 `secrets.env` 與 `ca.pfx`，輸出只有兩端 sha256 前 8 碼是否一致。
 - **停下來交給使用者**：在永豐建立白名單只含固定 IP 的新 key；執行 `rotate-key.py --only-p1 --egress-ip …`；執行 `push-secrets.sh`。
-- 寫 `host.env`（`P1_STREAM_UNTIL=2026-10-14T20:00:00+08:00`、`P1_SERVER_LOG` 為當日的 `<日期>-server/server.log`、`P1_MARKET_HOLIDAYS=2026-10-09,2026-10-10`）；R3 的 unit 以 `sed` 代入後安裝並 `daemon-reload`。
-- **停下來問使用者**後才 `systemctl start p1-server`：health 為 Simulation、`usage.connections` 記下、出口等於固定 IP；log 出現 `not allow` 即停止，不重試。
+- `uv` 與 `uv tool` 安裝的 `shioaji` 都在 `~/.local/bin`；`~`、`/home` 與 `/` 都沒有 `.env`，因為官方 CLI 會從工作目錄往上讀 `.env`，多出的檔案可能補上 `SJ_PRODUCTION` 之類的變數。
+- 由 `host.env.example` 以同一個 `sed` 代入 `@HOME@` 後填值寫成 `host.env`（`P1_STREAM_UNTIL=2026-10-14T20:00:00+08:00`、`P1_SERVER_LOG` 為當日的 `<日期>-server/server.log`、`P1_MARKET_HOLIDAYS=2026-10-09,2026-10-10`）；R3 的 unit 以 `sed` 代入後安裝並 `daemon-reload`。
+- **停下來問使用者**後才 `systemctl start p1-server`：health 為 Simulation、`usage.connections` 記下、出口等於固定 IP；log 出現 `not allow` 即以 `systemctl stop p1-stream p1-server` 兩個一起停止，不重試；只停 server 時，錄製器的下一次啟動會經 `Wants=` 把它拉起來。
 - 通過後 enable 並啟動 `p1-stream` 與 `p1-watch.timer`，確認 `status.json` 的 `ok`。
 - 家用主機：`p1-poll.sh` 每 10 分鐘讀 `status.json`，新的異常類別與恢復各發一則 Telegram（token 在執行時讀取），`checked_at` 超過 15 分鐘未更新發 `watch_stale`，連續 3 次 SSH 失敗發 `unreachable`，14:15 發日摘要（各類次數、磁碟、`MemoryCurrent`、以 `aws cloudwatch get-metric-statistics` 查的 `CPUCreditBalance`）；`p1-pull.sh` 於 14:10 與 05:30 執行 `rsync -a --append-verify -z` 拉回 `results/p1/`。
 - 雲端主機維運 repo 的 `BACKLOG.md` 加一列：Free Plan 在 credits 用完或到期日自動關閉，長期使用前決定升級或遷移；本機 commit。
@@ -321,6 +322,7 @@ git commit -m "Record the fixed-IP host setup and first login"
   - 依當日合約清單校準近月期貨（J6 於 10/21 到期，窗口在其前結束）與價平 TXO 買權、賣權各一檔；`futures_margin_twd` 填期交所當日公布值；同步 `[stream]`、`[history]` 與 `scenarios.toml`。
   - `P1_MARKET_HOLIDAYS` 清空（窗口內沒有休市日）。
 - 10/8 晚上若沒有夜盤，`quotes_stale` 的一次誤報記為已知並寫入契約文件。
+- 10/14 20:00 錄製器到期結束後執行 `systemctl disable p1-stream`，到 R6 再啟用；過了 `--until` 的錄製器每次啟動都會失敗並重啟。
 
 **Verification:**
 
@@ -348,9 +350,9 @@ git commit -m "Calibrate the soak watch and contracts from the trial week"
 
 **Behaviour:**
 
-- 07:30：shell 先 `umask 077`；`timedatectl` 與 `chronyc tracking` 存入 `results/p1/2026-10-15-ntp.txt`；`host.env` 改 `P1_SERVER_LOG=…/results/p1/2026-10-15-server/server.log`、`P1_STREAM_UNTIL=2026-10-20T09:30:00+08:00`；`systemctl restart p1-server`。
+- 07:30：shell 先 `umask 077`；`timedatectl` 與 `chronyc tracking` 存入 `results/p1/2026-10-15-ntp.txt`；`host.env` 改 `P1_SERVER_LOG=…/results/p1/2026-10-15-server/server.log`、`P1_STREAM_UNTIL=2026-10-20T09:30:00+08:00`，並在同一個指令內 `systemctl restart p1-server`，監看才不會盯著沒人寫的舊 log。
 - `p1rec self-test-interlock` 回 0；`p1rec preflight` 回 0，或只因資金比對回 2（P1REC-26，記錄後繼續）；其他非 0 即停止。
-- 08:00：`systemctl restart p1-stream`，記下新的 stream run ID，即 soak 起點。
+- 08:00：`systemctl enable --now p1-stream`，記下新的 stream run ID，即 soak 起點。
 - 08:30 後（每日維護之後）：再跑一次 `p1rec preflight`，判讀同上。
 - 此後到 10/20 09:30，除 R7 外不碰兩個服務。
 
