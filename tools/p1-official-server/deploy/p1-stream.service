@@ -1,0 +1,33 @@
+# @HOME@ stands for the trader home directory and is replaced by sed at
+# install time, since %h in a system unit resolves to root's home.
+
+[Unit]
+Description=P1 multi-client SSE recorder
+
+# Wants= rather than Requires=, so restarting the server does not stop the
+# recorder and it can record the disconnect and the reconnect.
+Wants=p1-server.service
+After=p1-server.service
+
+[Service]
+User=trader
+UMask=0077
+WorkingDirectory=~
+EnvironmentFile=@HOME@/.sinopac-p1/host.env
+EnvironmentFile=@HOME@/.sinopac-p1/secrets.env
+
+# The braces keep the value one argument
+ExecStart=@HOME@/.local/bin/uv run --project sinopac-nt-community/tools/p1-official-server p1rec stream --config sinopac-nt-community/tools/p1-official-server/p1.toml --clients a,b --until ${P1_STREAM_UNTIL}
+
+# A clean exit at --until is not restarted
+Restart=on-failure
+RestartSec=60
+KillSignal=SIGTERM
+
+# Covers the SSE read timeout plus one retry interval, the longest a stop
+# can wait for the reader threads.
+TimeoutStopSec=120
+OOMScoreAdjust=-500
+
+[Install]
+WantedBy=multi-user.target

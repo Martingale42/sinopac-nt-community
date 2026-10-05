@@ -1,0 +1,9 @@
+[Unit]
+Description=Run the P1 soak watch every five minutes
+
+[Timer]
+OnCalendar=*:0/5
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
