@@ -8,12 +8,13 @@ import os
 import stat
 import subprocess
 import sys
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from types import TracebackType
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, NoReturn
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -47,6 +48,10 @@ _PROCESS_TIMEOUT_S = 30.0
 def _at(day: int, hour: int, minute: int = 0) -> datetime:
     """Return a Taipei time in October 2026, the month of the soak."""
     return datetime(2026, 10, day, hour, minute, tzinfo=_TAIPEI)
+
+
+# A Thursday between the day and night sessions, when no recording is expected
+_BETWEEN_SESSIONS = _at(15, 14, 30)
 
 
 def _ns(moment: datetime) -> int:
@@ -252,7 +257,7 @@ def test_latest_data_frame_none_when_only_heartbeats_since_cutoff(
 def test_health_unhealthy_is_immediate(
     host: _Host, http_status: int | None, body: Mapping[str, object] | None
 ) -> None:
-    status = host.run(_FakeProbes(http_status=http_status, body=body), _at(15, 10))
+    status = host.run(_FakeProbes(http_status=http_status, body=body), _BETWEEN_SESSIONS)
 
     assert status["ok"] is False
     assert _names(status) == ["health_not_healthy"]
@@ -283,16 +288,16 @@ def test_anomaly_since_kept_while_it_holds_and_dropped_on_recovery(host: _Host) 
     down = _FakeProbes(http_status=503, body=_health_body(status="unhealthy"))
     up = _FakeProbes()
 
-    host.run(down, _at(15, 10))
-    held = host.run(down, _at(15, 10, 5))
-    assert _anomaly(held, "health_not_healthy")["since"] == "2026-10-15T02:00:00Z"
+    host.run(down, _at(15, 14, 20))
+    held = host.run(down, _at(15, 14, 25))
+    assert _anomaly(held, "health_not_healthy")["since"] == "2026-10-15T06:20:00Z"
 
-    recovered = host.run(up, _at(15, 10, 10))
+    recovered = host.run(up, _at(15, 14, 30))
     assert recovered["ok"] is True
     assert recovered["anomalies"] == []
 
-    again = host.run(down, _at(15, 10, 15))
-    assert _anomaly(again, "health_not_healthy")["since"] == "2026-10-15T02:15:00Z"
+    again = host.run(down, _at(15, 14, 35))
+    assert _anomaly(again, "health_not_healthy")["since"] == "2026-10-15T06:35:00Z"
 
 
 def test_status_never_copies_recovery_error_text(host: _Host) -> None:
@@ -325,7 +330,7 @@ def test_failure_patterns_counted_once(host: _Host) -> None:
     )
 
     first = host.run(probes, _at(15, 8, 20))
-    assert _anomaly(first, "relogin_failed")["detail"] == {"lines": 2}
+    assert _anomaly(first, "relogin_failed")["detail"] == {"lines": 2, "log_unreadable": False}
 
     assert "relogin_failed" not in _names(host.run(probes, _at(15, 8, 25)))
 
@@ -335,11 +340,13 @@ def test_failure_patterns_counted_once(host: _Host) -> None:
     assert "relogin_failed" not in _names(host.run(probes, _at(15, 8, 30)))
     with log.open("a", encoding="utf-8") as fh:
         fh.write("low\n")
-    assert _anomaly(host.run(probes, _at(15, 8, 35)), "relogin_failed")["detail"] == {"lines": 1}
+    completed = host.run(probes, _at(15, 8, 35))
+    assert _anomaly(completed, "relogin_failed")["detail"] == {"lines": 1, "log_unreadable": False}
 
     # A shorter file is a new log, read from its start
     log.write_text("ERROR Daily maintenance exhausted\n", encoding="utf-8")
-    assert _anomaly(host.run(probes, _at(15, 8, 40)), "relogin_failed")["detail"] == {"lines": 1}
+    shortened = host.run(probes, _at(15, 8, 40))
+    assert _anomaly(shortened, "relogin_failed")["detail"] == {"lines": 1, "log_unreadable": False}
 
     assert "203.0.113.9" not in host.written()
 
@@ -355,7 +362,24 @@ def test_failure_patterns_read_from_start_of_new_log_path(host: _Host, tmp_path:
     new_log.write_text("ERROR not allow\nINFO later\n", encoding="utf-8")
     moved = dataclasses.replace(host, server_log=new_log)
 
-    assert _anomaly(moved.run(probes, _at(15, 7, 35)), "relogin_failed")["detail"] == {"lines": 1}
+    status = moved.run(probes, _at(15, 7, 35))
+    assert _anomaly(status, "relogin_failed")["detail"] == {"lines": 1, "log_unreadable": False}
+
+
+@pytest.mark.parametrize("fault", ["missing", "mode-000"])
+def test_unreadable_server_log_is_an_anomaly(host: _Host, fault: str) -> None:
+    if fault == "missing":
+        host.server_log.unlink()
+    else:
+        if os.geteuid() == 0:
+            pytest.skip("root reads a file whatever its mode")
+        host.server_log.write_text("ERROR not allow\n", encoding="utf-8")
+        host.server_log.chmod(0)
+
+    status = host.run(_FakeProbes(), _BETWEEN_SESSIONS)
+
+    assert _names(status) == ["relogin_failed"]
+    assert _anomaly(status, "relogin_failed")["detail"] == {"lines": 0, "log_unreadable": True}
 
 
 def test_service_down_on_restart_count_increase(host: _Host) -> None:
@@ -414,6 +438,21 @@ def test_egress_query_failure_is_unknown(host: _Host) -> None:
     assert "egress_changed" not in _names(status)
 
 
+@pytest.mark.parametrize("recording", ["no-run", "empty-run", "no-data-stream"])
+def test_no_recording_in_session_is_stale(host: _Host, recording: str) -> None:
+    run_dir = host.cfg.results_root / "20261015T000000Z-stream"
+    if recording != "no-run":
+        run_dir.mkdir(parents=True)
+    if recording == "no-data-stream":
+        (run_dir / "sse_a_order_event.jsonl").write_text(_sse_line(_ns(_at(15, 10)), "order_event"), encoding="utf-8")
+
+    in_session = host.run(_FakeProbes(), _at(15, 10))
+
+    assert _anomaly(in_session, "quotes_stale")["detail"]["no_recording"] is True
+    assert in_session["stream_run"] == (None if recording == "no-run" else run_dir.name)
+    assert "quotes_stale" not in _names(host.run(_FakeProbes(), _BETWEEN_SESSIONS))
+
+
 def test_quotes_stale_only_in_session(host: _Host) -> None:
     now = _at(15, 9)
     now_ns = _ns(now)
@@ -444,7 +483,7 @@ def test_quotes_stale_only_in_session(host: _Host) -> None:
 
     assert status["stream_run"] == latest.name
     assert status["data_frame_age_s"] == {"a": None, "b": 10.0}
-    assert _anomaly(status, "quotes_stale")["detail"] == {"stale_clients": 1}
+    assert _anomaly(status, "quotes_stale")["detail"] == {"stale_clients": 1, "no_recording": False}
 
     # Hours later, between sessions, both are silent and that is expected
     closed = host.run(_FakeProbes(), _at(15, 14, 30))
@@ -470,6 +509,7 @@ def test_quotes_stale_only_in_session(host: _Host) -> None:
 )
 def test_resources_past_threshold(host: _Host, probes: _FakeProbes, measured: tuple[str, float]) -> None:
     roomy = host.run(_FakeProbes(), _at(15, 10))
+    assert roomy["state_reset"] is False
     assert "resources" not in _names(roomy)
     assert roomy["resources"] == {"disk_free_bytes": 40 * _GIB, "mem_available_bytes": 512 * _MIB, "swap_used_bytes": 0}
 
@@ -516,14 +556,28 @@ def test_resources_probe_failure_is_an_anomaly(
     assert "/" not in json.dumps(detail)
 
 
-def test_unreadable_state_starts_afresh(host: _Host) -> None:
+def test_corrupt_state_is_reported(host: _Host, monkeypatch: pytest.MonkeyPatch) -> None:
     host.state_dir.mkdir()
     (host.state_dir / "state.json").write_text("{not json", encoding="utf-8")
+    synced: list[int] = []
+    real_fsync = os.fsync
 
-    status = host.run(_FakeProbes(), _at(15, 10))
+    def fsync(fd: int) -> None:
+        synced.append(fd)
+        real_fsync(fd)
 
-    assert status["ok"] is True
+    monkeypatch.setattr(watch.os, "fsync", fsync)
+
+    reset = host.run(_FakeProbes(), _BETWEEN_SESSIONS)
+
+    assert reset["state_reset"] is True
+    assert reset["ok"] is True
     assert json.loads((host.state_dir / "state.json").read_text(encoding="utf-8"))["server_log_offset"] == 0
+
+    # status.json and state.json, each file and then its directory
+    assert len(synced) == 4
+
+    assert host.run(_FakeProbes(), _BETWEEN_SESSIONS + timedelta(minutes=5))["state_reset"] is False
 
 
 def test_unwritable_state_exits_1(host: _Host) -> None:
@@ -539,8 +593,10 @@ def test_unwritable_state_exits_1(host: _Host) -> None:
 
 def test_system_probes_over_http(host: _Host) -> None:
     egress_answer = httpx.Response(200, text=f"{_OTHER_IP}\n")
+    timeouts: list[dict[str, float | None]] = []
 
     def answer(request: httpx.Request) -> httpx.Response:
+        timeouts.append(request.extensions["timeout"])
         if request.url.path == "/api/v1/health":
             return httpx.Response(503, json=_health_body(status="unhealthy"))
         return egress_answer
@@ -551,6 +607,10 @@ def test_system_probes_over_http(host: _Host) -> None:
     assert http_status == 503
     assert body is not None and body["status"] == "unhealthy"
     assert probes.egress_ip() == _OTHER_IP
+
+    # Every phase of both requests is bounded by http_timeout_s
+    assert len(timeouts) == 2
+    assert all(set(timeout.values()) == {host.cfg.http_timeout_s} for timeout in timeouts)
 
     egress_answer = httpx.Response(200, text="<html>rate limited</html>")
     assert probes.egress_ip() is None
@@ -581,6 +641,27 @@ def test_system_probes_read_systemctl_and_meminfo(
     assert probes.unit(_SERVER) == {"NRestarts": "2", "MemoryCurrent": "[not set]", "ActiveState": "active"}
     assert commands[0][-2:] == ["--", _SERVER]
     assert probes.meminfo() == {"MemTotal": 1024000, "MemAvailable": 2097152, "HugePages_Total": 0}
+
+
+def test_systemctl_timeout_reads_as_down(host: _Host, monkeypatch: pytest.MonkeyPatch) -> None:
+    timeouts: list[float | None] = []
+
+    def hang(command: list[str], *, timeout: float | None = None, **_kwargs: object) -> NoReturn:
+        timeouts.append(timeout)
+        raise subprocess.TimeoutExpired(command, timeout or 0)
+
+    monkeypatch.setattr(watch.subprocess, "run", hang)
+    system = SystemProbes(host.cfg)
+
+    @dataclass
+    class _HungSystemctl(_FakeProbes):
+        def unit(self, name: str) -> Mapping[str, str]:
+            return system.unit(name)
+
+    status = host.run(_HungSystemctl(), _BETWEEN_SESSIONS)
+
+    assert timeouts == [30, 30]
+    assert _anomaly(status, "service_down")["detail"] == {"inactive": 2, "restarted": 0}
 
 
 def _config_text(base_url: str) -> str:
@@ -616,6 +697,11 @@ def test_main_against_stub_server(tmp_path: Path) -> None:
     state_dir = tmp_path / "home" / "watch"
     server_log = tmp_path / "server.log"
     server_log.write_text("INFO server started\n", encoding="utf-8")
+
+    # A quote just received under results_root, so quotes_stale holds at no time of day
+    stream_run = tmp_path / "results" / "20261015T000000Z-stream"
+    stream_run.mkdir(parents=True)
+    (stream_run / "sse_a_data.jsonl").write_text(_sse_line(time.time_ns(), "tick_fop"), encoding="utf-8")
 
     with StubServer() as stub:
         config = tmp_path / "p1.toml"
@@ -658,7 +744,9 @@ def test_main_against_stub_server(tmp_path: Path) -> None:
     assert isinstance(healthy["resources"]["disk_free_bytes"], int)
     assert isinstance(healthy["resources"]["mem_available_bytes"], int)
     assert healthy["egress_matches"] is None
-    assert healthy["stream_run"] is None
+    assert healthy["stream_run"] == stream_run.name
+    assert healthy["data_frame_age_s"]["a"] < _PROCESS_TIMEOUT_S
+    assert healthy["state_reset"] is False
     assert _anomaly(unhealthy, "health_not_healthy")["detail"]["http_status"] == 503
 
     assert len((state_dir / "watch.jsonl").read_text(encoding="utf-8").splitlines()) == 2

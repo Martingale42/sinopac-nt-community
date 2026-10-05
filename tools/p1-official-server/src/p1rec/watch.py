@@ -8,6 +8,11 @@ public egress IP. It then overwrites status.json, appends the same document
 to watch.jsonl, and keeps what the next run needs in state.json, all in
 --state-dir; it never creates a run directory.
 
+A check that cannot see what it checks raises its anomaly rather than
+passing: an unreadable server log, no recording during a session, a failed
+disk or memory probe, and a unit systemctl cannot report all count as
+faults. The egress check alone records a failed query as unknown.
+
 Nothing it writes or logs holds an IP address, a key or an account: the
 egress IP is only compared with [secrets] egress_ip, server log lines are
 only counted, and the health response's error texts are reduced to whether
@@ -34,6 +39,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import BinaryIO, NoReturn, Protocol
+from zoneinfo import ZoneInfoNotFoundError
 
 import httpx
 
@@ -79,6 +85,10 @@ _BYTES_PER_GIB = 1024**3
 
 _UNIT_PROPERTIES = ("ActiveState", "NRestarts", "MemoryCurrent")
 _ACTIVE = "active"
+
+# Short enough that both units and both HTTP probes finish well inside the
+# watch unit's own start timeout, so a hung systemctl reads as a unit down.
+_SYSTEMCTL_TIMEOUT_S = 30
 
 _MEMINFO = Path("/proc/meminfo")
 
@@ -169,9 +179,13 @@ class SystemProbes:
         properties = [arg for prop in _UNIT_PROPERTIES for arg in ("-p", prop)]
         try:
             result = subprocess.run(
-                ["systemctl", "show", *properties, "--", name], capture_output=True, text=True, check=False
+                ["systemctl", "show", *properties, "--", name],
+                capture_output=True,
+                text=True,
+                timeout=_SYSTEMCTL_TIMEOUT_S,
+                check=False,
             )
-        except OSError as exc:
+        except (OSError, subprocess.TimeoutExpired) as exc:
             logger.warning("cannot run systemctl for %s: %s", name, describe_exception(exc))
             return {}
         if result.returncode != 0:
@@ -410,19 +424,20 @@ def _iso(moment: datetime) -> str:
     return moment.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-def _load_state(path: Path) -> _State:
+def _load_state(path: Path) -> tuple[_State, bool]:
+    """Return the state the last run left, and whether a state file that exists had to be replaced by an empty one."""
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
-        return _State()
+        return _State(), False
     except OSError as exc:
         logger.warning("cannot read %s, starting from an empty state: %s", path, describe_exception(exc))
-        return _State()
+        return _State(), True
     try:
-        return _State.from_json(json.loads(text))
+        return _State.from_json(json.loads(text)), False
     except ValueError as exc:
         logger.warning("%s is unreadable, starting from an empty state: %s", path, exc)
-        return _State()
+        return _State(), True
 
 
 def run_watch(
@@ -449,7 +464,7 @@ def run_watch(
     except OSError as exc:
         logger.error("cannot create the state directory %s: %s", state_dir, describe_exception(exc))
         return EXIT_FAILED
-    state = _load_state(state_dir / STATE_FILE)
+    state, state_reset = _load_state(state_dir / STATE_FILE)
 
     health_detail, health = _check_health(probes, watch, now, state)
     stale_detail, stream_run, ages = _check_quotes(cfg, watch, holidays, now)
@@ -473,6 +488,9 @@ def run_watch(
     status: dict[str, object] = {
         "checked_at": _iso(now),
         "ok": not anomalies,
+
+        # Offsets, counts and since times started over, so this run may repeat or miss what came before
+        "state_reset": state_reset,
         "anomalies": [
             {"name": anomaly.name, "since": _iso(anomaly.since), "detail": dict(anomaly.detail)}
             for anomaly in anomalies
@@ -514,15 +532,22 @@ def _make_private_dirs(directory: Path) -> None:
 
 
 def _write_json_atomically(path: Path, document: Mapping[str, object]) -> None:
-    """Replace path with document as indented JSON through a temporary file, so no reader sees half of it."""
+    """Replace path with document as indented JSON, atomically and durably, so no reader or crash sees half of it."""
     fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(json.dumps(document, indent=2, ensure_ascii=False) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
         os.replace(temporary, path)
     except BaseException:
         Path(temporary).unlink(missing_ok=True)
         raise
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
 
 
 def _check_health(
@@ -584,16 +609,18 @@ def _typed(body: Mapping[str, object], key: str, kind: type) -> object:
 
 
 def _check_server_log(path: Path, patterns: Sequence[str], state: _State) -> dict[str, object] | None:
-    """Return relogin_failed's detail if a line added since the last run holds a failure pattern.
+    """Return relogin_failed's detail if a line added since the last run holds a failure pattern, or the log is unreadable.
 
     Reading starts where the last run stopped, or at the start when the
     path has changed or the file has become shorter, and stops before a
     last line still being written, which the next run reads whole. ANSI
-    escape sequences are removed before matching.
+    escape sequences are removed before matching. A log that is missing or
+    cannot be read holds too, since a failed re-login would go unseen.
     """
     offset = state.server_log_offset if state.server_log == str(path) else 0
     needles = [pattern.encode("utf-8") for pattern in patterns]
     matched = 0
+    unreadable = False
     try:
         with path.open("rb") as fh:
             if fh.seek(0, os.SEEK_END) < offset:
@@ -607,11 +634,12 @@ def _check_server_log(path: Path, patterns: Sequence[str], state: _State) -> dic
                 matched += any(needle in text for needle in needles)
     except FileNotFoundError:
         logger.warning("server log %s does not exist", path)
-        offset = 0
+        unreadable, offset = True, 0
     except OSError as exc:
         logger.warning("cannot read server log %s: %s", path, describe_exception(exc))
+        unreadable = True
     state.server_log, state.server_log_offset = str(path), offset
-    return {"lines": matched} if matched else None
+    return {"lines": matched, "log_unreadable": unreadable} if matched or unreadable else None
 
 
 def _check_quotes(
@@ -620,34 +648,37 @@ def _check_quotes(
     """Return quotes_stale's detail if it holds, the latest stream run's name, and each client's data frame age.
 
     An age is None when the client has had no data frame for
-    quotes_stale_s, which makes quotes_stale hold inside a session.
+    quotes_stale_s. Inside a session quotes_stale holds when any client's
+    age is None, or when there is no recording to read at all: no stream
+    run, or no data_stream file in the latest one.
     """
     run_dir = _latest_stream_run(cfg.results_root)
-    if run_dir is None:
-        return None, None, {}
-    try:
-        clients = discover_sse_files(run_dir)
-    except (AnalysisError, OSError) as exc:
-        logger.warning("no recording to check in %s: %s", run_dir.name, exc)
-        clients = {}
-
-    now_ns = _epoch_ns(now)
-    not_before_ns = now_ns - int(watch.quotes_stale_s * NS_PER_S)
     ages: dict[str, float | None] = {}
-    for client, paths in sorted(clients.items()):
-        path = run_dir / f"sse_{client}_{watch.data_stream}.jsonl"
-        latest = None
-        if path in paths:
-            try:
-                latest = latest_data_frame_ns(path, cfg.events.heartbeat_event, not_before_ns)
-            except OSError as exc:
-                logger.warning("cannot read %s: %s", path, describe_exception(exc))
-        ages[client] = None if latest is None else (now_ns - latest) / NS_PER_S
+    recorded = False
+    if run_dir is not None:
+        try:
+            clients = discover_sse_files(run_dir)
+        except (AnalysisError, OSError) as exc:
+            logger.warning("no recording to check in %s: %s", run_dir.name, exc)
+            clients = {}
+        now_ns = _epoch_ns(now)
+        not_before_ns = now_ns - int(watch.quotes_stale_s * NS_PER_S)
+        for client, paths in sorted(clients.items()):
+            path = run_dir / f"sse_{client}_{watch.data_stream}.jsonl"
+            latest = None
+            if path in paths:
+                recorded = True
+                try:
+                    latest = latest_data_frame_ns(path, cfg.events.heartbeat_event, not_before_ns)
+                except OSError as exc:
+                    logger.warning("cannot read %s: %s", path, describe_exception(exc))
+            ages[client] = None if latest is None else (now_ns - latest) / NS_PER_S
 
     stale = sum(age is None for age in ages.values())
-    if stale and session_open(now, holidays, watch):
-        return {"stale_clients": stale}, run_dir.name, ages
-    return None, run_dir.name, ages
+    run_name = None if run_dir is None else run_dir.name
+    if (stale or not recorded) and session_open(now, holidays, watch):
+        return {"stale_clients": stale, "no_recording": not recorded}, run_name, ages
+    return None, run_name, ages
 
 
 def _latest_stream_run(results_root: Path) -> Path | None:
@@ -824,10 +855,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     formatter = _setup_logging()
     try:
+        # Loaded now, so a host without tzdata fails its first run rather than only once a check needs it
+        exchange_tz()
         cfg = load_config(Path(args.config))
         _watch_config(cfg)
         egress_ips = read_secret_role(cfg, _EGRESS_ROLE)
-    except ConfigError as exc:
+    except (ConfigError, ZoneInfoNotFoundError) as exc:
         logger.error("%s", exc)
         return EXIT_FAILED
     formatter.add_secrets(egress_ips)
