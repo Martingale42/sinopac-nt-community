@@ -32,6 +32,10 @@
 | P1REC-28 | open | `exceed_funds_stock_2890` 掛跌停價會被模擬環境以價格範圍退回，且模擬不檢查資金；改用帶內價格或移除此案例 | `scenarios.toml`、`orders.py` `check_cases` | live 10/1 |
 | P1REC-29 | open | 賣出案例的平倉買單仍掛 `limit_up`，會被模擬環境以價格範圍退回；目前劇本沒有賣出案例 | `orders.py` `_Runner._prepare` | live 10/1 |
 | P1REC-30 | closed @0fcc0e3 | 對外 IP 會變動，錄製檔裡會出現多個 IP，但 scrub 只認一個 `P1_EGRESS_IP`；改為可列多個 | `config.py` `[secrets]`、`scrub/_map.py` | live 10/1 |
+| P1REC-31 | open | 匯出後的 IPv4 檢查只有讀程式確認接線，沒有測試；補一個選取含 global IPv4 錄製的匯出測試，斷言 `LeakError` 且未寫出 fixture | `tests/test_scrub.py`、`scrub/_export.py` | R1 review |
+| P1REC-32 | open | IPv4 掃描抓不到以破折號寫的位址（`ip-a-b-c-d`、`ec2-a-b-c-d.…` 主機名）與五段點分的 tcpdump 形式；貼主機 prompt 或 journal 進 `docs/` 前會漏掉 | `scrub/_matching.py` | R1 review |
+| P1REC-33 | open | 出口 IP 查詢失敗後要等滿一小時才重查；失敗時改為下一輪就重查 | `watch.py` egress 檢查 | R2 review |
+| P1REC-34 | open | server log 在同一路徑被換成新檔且 5 分鐘內長過舊位移時，新檔開頭的行會被跳過；比對 `st_ino` | `watch.py` `relogin_failed` | R2 review |
 
 ## P1REC — P2（整理；不改行為）
 
@@ -45,3 +49,8 @@
 | P1REC-22 | open | `scrub/_export.py` 重複定義 `records.py` 已有的時間常數與 `_iso_utc` | `scrub/_export.py` | final review（safety） |
 | P1REC-23 | open | 部分註解帶數字或歷史、少句點或位置不當 | `p1.toml`、`scrub/_matching.py`、`orders.py` `_Runner.run_case` | final review（safety） |
 | P1REC-25 | open | `p1rec` 沒有自己的 ruff 設定，套用根目錄給 adapter 的規則會報 101 項（多為 FURB157、UP017）；訂定此工具的規則集後修正或豁免 | `tools/p1-official-server/pyproject.toml` | final review（lint） |
+| P1REC-35 | open | `ScrubConfig.ipv4_allow` 沒有預設值，手動建構處都得補 `frozenset()`；給空集合預設 | `config.py`、`interlock.py`、測試 | R1 review |
+| P1REC-36 | open | 測試以迴圈設定 `FAKE_SECRET_ENV` 的寫法散在 8 個檔案，收成 `helpers` 的一個函式 | `tests/` | R1 review |
+| P1REC-37 | open | 原子寫入 JSON 有三份（`save_map`、`orders.py`、`watch.py`），`_is_ipv4`、私有目錄權限與 `_get_positive`／`_get_interval` 也各有重複 | `scrub/_map.py`、`orders.py`、`watch.py`、`config.py`、`rundir.py` | R2 review |
+| P1REC-38 | open | `watch.py` 約 880 行，同時有系統探測、交易日曆、檔尾讀取、狀態與 CLI；檔尾讀取移到 `records.py`、探測獨立成模組，`_check_*` 不再改寫傳入的狀態 | `watch.py` | R2 review |
+| P1REC-39 | open | `redaction_values`、`build_map` 的 `Sequence[str]` 也接受 `str`，改為 `tuple[str, ...]`；`_setup_logging` 每次呼叫都加 root handler；`probe_failed` 可由 `failed_probes` 推得 | `redact.py`、`scrub/_map.py`、`watch.py` | R1、R2 review |
