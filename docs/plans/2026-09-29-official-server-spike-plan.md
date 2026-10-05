@@ -980,7 +980,7 @@ git commit -m "Rehearse the full recorder pipeline against a stub server"
 
 **Behaviour:**
 
-- 排程：2026-10-01（四）開始，soak 至 10-06（二）09:30；證交所 115 年開休市日期查證四個營業日皆開市，前後的休市日（9/28、10/9）都在範圍外，前一個交易日為 9/30。Task 13 改在 10/5（一）。
+- 排程：soak 於 10/1–10/5 在家用網路執行，因浮動對外 IP 五天內換了兩次、每日重新登入被白名單擋下，10/5 14:45 暫停；改在有固定對外 IP 的 AWS 台北主機上重新執行 Task 12 的 soak 起點、Task 13 與 Task 14，日期待定。10/1–10/5 的紀錄保留為家用網路的證據。
 - 離線演練（Task 11）沒有涵蓋、只能在本日驗證的路徑，逐項觀察並記入契約文件：委託在下單回應之後才結算（等待成交、`PendingSubmit` 時刪單、`step_wait_s` 等時間的實際值）、部分成交與多筆成交、成交事件的 `deal_key` 與 `deal_qty`、IOC／FOK 到期的事件形狀、以事件回報的改單或刪單拒絕、不帶帳戶的 `trades` 是否列出所有帳戶的委託、斷線後訂閱是否需要重送、串流流量是否計入每日額度、夜盤與跨日。
 - 改動 `p1.toml` 的指標、範本、`[events]` 或 `[trades]` 時，同步改 `tests/data/p1.toml`，否則離線測試的設定比對會失敗。
 - 前一個交易日：依當日合約清單校準 `p1.toml` 的近月期貨代號（TXFJ6、MXFJ6、TMFJ6 於 2026-10-21 到期，soak 跨過該日就改用下一個月份）與近月價平 TXO 買權、賣權各一檔，同步更新 `[stream]` 商品、`[history]` 的 snapshots 查詢與 `scenarios.toml`。

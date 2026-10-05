@@ -95,6 +95,13 @@ P1 spike 的產出文件（設計：`docs/plans/2026-09-29-official-server-spike
 - 10/3 約 16:20 主機重開機（與官方 server 無關），soak 的錄製停在 16:19:17；各錄製檔最後一行皆為完整 JSON、無 NUL 位元組。中斷期間為週末休市，沒有漏錄交易時段。
 - 10/4 04:51 以新的 run `20261003T205132Z-stream` 續錄到 10-06 09:30：快取 token 已失效，server 以原本登記的對外 IP 重新登入成功；啟動時的 2 個 `subscribe_trade` 與 24 個訂閱皆回 200。週五 10:30 的排程動作因已過期而跳過（WARNING）。
 
+**10/5 對外 IP 變動、重新登入失敗與 soak 暫停**
+
+- 對外 IP 在 04:11 至 05:11 之間又換了一次（五天內第二次），新 IP 不在 API key 白名單內；server 照常運作到 token 過期為止，08:11 時 `health` 已轉 `degraded`（`token_stale`）。
+- 08:15 每日維護重新登入被拒（`not allow`），之後每隔 1、2、4、8 分鐘再每 10 分鐘重試，共 10 次皆失敗，09:20 後不再重試；`health` 回 503（`unhealthy`），與永豐的連線中斷且自行重連未恢復。server 不會自行脫離這個狀態。
+- 失敗期間 `/api/v1/info` 仍回 200；`stream/subscribe` 24 個請求皆回 200，但最後一筆 tick 停在 08:35:00，此後只有心跳；`subscribe_trade` 先回 401，錄製器每 60 秒重試，到 14:45 共回 741 次 500。SSE 連線本身沒有中斷。
+- Task 13 的三個步驟因 server 未登入而未執行；14:45 暫停錄製（run `20261003T205132Z-stream` 正常結束），14:48 停止 server。使用者決定改在有固定對外 IP 的 AWS 台北主機上重跑 soak。
+
 **假設關卡**
 
 - A1 成立：`GET /api/v1/info` 的 `/simulation`。
