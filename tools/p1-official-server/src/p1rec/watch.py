@@ -82,6 +82,10 @@ _ACTIVE = "active"
 
 _MEMINFO = Path("/proc/meminfo")
 
+# Names resources' detail gives a failed probe, never the path it measured
+_DISK_PROBE = "disk"
+_MEMINFO_PROBE = "meminfo"
+
 # Terminal control sequences, such as the colour codes around the server's log text
 _ANSI_ESCAPE_RE = re.compile(rb"\x1b\[[0-?]*[ -/]*[@-~]")
 
@@ -135,7 +139,9 @@ class SystemProbes:
     """Probes that ask the official server, systemctl, the egress service and the kernel.
 
     transport is None for real network I/O; a test passes an
-    httpx.MockTransport to answer both HTTP probes in-process.
+    httpx.MockTransport to answer both HTTP probes in-process. systemctl
+    is found on PATH, so a test running p1watch as a subprocess can put a
+    stand-in for it there.
     """
 
     def __init__(self, cfg: P1Config, *, transport: httpx.BaseTransport | None = None) -> None:
@@ -448,12 +454,13 @@ def run_watch(
     health_detail, health = _check_health(probes, watch, now, state)
     stale_detail, stream_run, ages = _check_quotes(cfg, watch, holidays, now)
     units_detail, units = _check_units(probes, watch.services, state)
+    resources_detail, resources = _check_resources(probes, watch, disk_path)
     found: dict[str, Mapping[str, object] | None] = {
         "health_not_healthy": health_detail,
         "relogin_failed": _check_server_log(server_log, watch.failure_patterns, state),
         "quotes_stale": stale_detail,
         "service_down": units_detail,
-        "resources": _check_resources(probes, watch, disk_path),
+        "resources": resources_detail,
         "egress_changed": _check_egress(probes, watch, egress_ips, now, state),
     }
 
@@ -472,6 +479,7 @@ def run_watch(
         ],
         "health": health,
         "units": units,
+        "resources": resources,
         "stream_run": stream_run,
         "data_frame_age_s": ages,
         "egress_matches": state.egress_matches,
@@ -683,37 +691,59 @@ def _count_or_none(text: str | None) -> int | None:
     return int(text) if text is not None and text.isdigit() else None
 
 
-def _check_resources(probes: Probes, watch: WatchConfig, disk_path: Path) -> dict[str, object] | None:
-    """Return resources' detail if free disk, available memory or swap use is past its threshold.
+def _check_resources(
+    probes: Probes, watch: WatchConfig, disk_path: Path
+) -> tuple[dict[str, object] | None, dict[str, int | None]]:
+    """Return resources' detail if it holds, and status.json's resources, in bytes, None where a probe failed.
 
-    A measurement that cannot be taken is logged and left out of the check.
+    It holds when free disk, available memory or swap use is past its
+    threshold, or when the disk or meminfo probe failed, since a host that
+    cannot be measured must not read as healthy.
     """
-    disk_free: int | None
+    disk_free = _measure_disk(probes, disk_path)
+    memory = _measure_memory(probes)
+    mem_available, swap_used = (None, None) if memory is None else memory
+    measured = {"disk_free_bytes": disk_free, "mem_available_bytes": mem_available, "swap_used_bytes": swap_used}
+
+    failed = [name for name, value in ((_DISK_PROBE, disk_free), (_MEMINFO_PROBE, memory)) if value is None]
+    past_threshold = (
+        (disk_free is not None and disk_free < watch.disk_free_min_gib * _BYTES_PER_GIB)
+        or (mem_available is not None and mem_available < watch.mem_available_min_mib * _BYTES_PER_MIB)
+        or (swap_used is not None and swap_used > watch.swap_used_max_mib * _BYTES_PER_MIB)
+    )
+    if not (failed or past_threshold):
+        return None, measured
+    detail: dict[str, object] = {
+        "disk_free_gib": None if disk_free is None else disk_free / _BYTES_PER_GIB,
+        "mem_available_mib": None if mem_available is None else mem_available / _BYTES_PER_MIB,
+        "swap_used_mib": None if swap_used is None else swap_used / _BYTES_PER_MIB,
+        "probe_failed": bool(failed),
+        "failed_probes": failed,
+    }
+    return detail, measured
+
+
+def _measure_disk(probes: Probes, disk_path: Path) -> int | None:
+    """Return the free bytes at disk_path, or None, logged, if they cannot be measured."""
     try:
-        disk_free = probes.disk_free_bytes(disk_path)
+        return probes.disk_free_bytes(disk_path)
     except OSError as exc:
         logger.warning("cannot measure free disk at %s: %s", disk_path, describe_exception(exc))
-        disk_free = None
+        return None
+
+
+def _measure_memory(probes: Probes) -> tuple[int, int] | None:
+    """Return available memory and swap in use, in bytes, or None, logged, if they cannot be read."""
     try:
         meminfo = probes.meminfo()
     except OSError as exc:
         logger.warning("cannot read memory use: %s", describe_exception(exc))
-        meminfo = {}
-    mem_available = meminfo.get("MemAvailable")
-    swap_total, swap_free = meminfo.get("SwapTotal"), meminfo.get("SwapFree")
-    swap_used = None if swap_total is None or swap_free is None else swap_total - swap_free
-
-    if not (
-        (disk_free is not None and disk_free < watch.disk_free_min_gib * _BYTES_PER_GIB)
-        or (mem_available is not None and mem_available < watch.mem_available_min_mib * _BYTES_PER_MIB)
-        or (swap_used is not None and swap_used > watch.swap_used_max_mib * _BYTES_PER_MIB)
-    ):
         return None
-    return {
-        "disk_free_gib": None if disk_free is None else disk_free / _BYTES_PER_GIB,
-        "mem_available_mib": None if mem_available is None else mem_available / _BYTES_PER_MIB,
-        "swap_used_mib": None if swap_used is None else swap_used / _BYTES_PER_MIB,
-    }
+    try:
+        return meminfo["MemAvailable"], meminfo["SwapTotal"] - meminfo["SwapFree"]
+    except KeyError as exc:
+        logger.warning("memory use lacks %s", exc)
+        return None
 
 
 def _check_egress(

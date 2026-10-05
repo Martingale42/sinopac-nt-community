@@ -91,6 +91,8 @@ class _FakeProbes:
     memory: dict[str, int] = field(
         default_factory=lambda: {"MemAvailable": 512 * _MIB, "SwapTotal": 2 * _GIB, "SwapFree": 2 * _GIB}
     )
+    disk_error: OSError | None = None
+    memory_error: OSError | None = None
     egress_calls: int = 0
 
     def health(self) -> tuple[int | None, Mapping[str, object] | None]:
@@ -104,9 +106,13 @@ class _FakeProbes:
         return self.egress
 
     def disk_free_bytes(self, path: Path) -> int:
+        if self.disk_error is not None:
+            raise self.disk_error
         return self.disk_free
 
     def meminfo(self) -> Mapping[str, int]:
+        if self.memory_error is not None:
+            raise self.memory_error
         return self.memory
 
 
@@ -463,12 +469,51 @@ def test_quotes_stale_only_in_session(host: _Host) -> None:
     ],
 )
 def test_resources_past_threshold(host: _Host, probes: _FakeProbes, measured: tuple[str, float]) -> None:
-    assert "resources" not in _names(host.run(_FakeProbes(), _at(15, 10)))
+    roomy = host.run(_FakeProbes(), _at(15, 10))
+    assert "resources" not in _names(roomy)
+    assert roomy["resources"] == {"disk_free_bytes": 40 * _GIB, "mem_available_bytes": 512 * _MIB, "swap_used_bytes": 0}
 
     status = host.run(probes, _at(15, 10, 5))
 
     key, value = measured
-    assert _anomaly(status, "resources")["detail"][key] == value
+    detail = _anomaly(status, "resources")["detail"]
+    assert detail[key] == value
+    assert detail["probe_failed"] is False
+    assert detail["failed_probes"] == []
+
+
+@pytest.mark.parametrize(
+    ("probes", "failed", "unmeasured"),
+    [
+        pytest.param(
+            _FakeProbes(disk_error=PermissionError("Permission denied")), ["disk"], ["disk_free_bytes"], id="disk"
+        ),
+        pytest.param(
+            _FakeProbes(memory_error=FileNotFoundError("No such file or directory")),
+            ["meminfo"],
+            ["mem_available_bytes", "swap_used_bytes"],
+            id="meminfo-unreadable",
+        ),
+        pytest.param(
+            _FakeProbes(memory={"MemTotal": _GIB}),
+            ["meminfo"],
+            ["mem_available_bytes", "swap_used_bytes"],
+            id="meminfo-incomplete",
+        ),
+    ],
+)
+def test_resources_probe_failure_is_an_anomaly(
+    host: _Host, probes: _FakeProbes, failed: list[str], unmeasured: list[str]
+) -> None:
+    status = host.run(probes, _at(15, 10))
+
+    detail = _anomaly(status, "resources")["detail"]
+    assert detail["probe_failed"] is True
+    assert detail["failed_probes"] == failed
+    assert [key for key, value in status["resources"].items() if value is None] == unmeasured
+
+    # A probe is named, never the path it measured
+    assert "/" not in json.dumps(detail)
 
 
 def test_unreadable_state_starts_afresh(host: _Host) -> None:
@@ -553,9 +598,19 @@ def test_main_against_stub_server(tmp_path: Path) -> None:
     assert _P1WATCH.is_file(), f"no p1watch console script beside {sys.executable}; run the tests with uv run"
     egress_ip = "203.0.113.77"
 
+    # A stand-in systemctl ahead of the real one on PATH, so the units do not depend on the test host
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    systemctl = fake_bin / "systemctl"
+    systemctl.write_text(
+        "#!/bin/sh\nprintf 'ActiveState=active\\nNRestarts=0\\nMemoryCurrent=1048576\\n'\n", encoding="utf-8"
+    )
+    systemctl.chmod(0o755)
+
     # Only the egress role is set, since p1watch must not need the others
     env = {name: value for name, value in os.environ.items() if name not in SECRET_ENV_VARS}
     env["P1_EGRESS_IP"] = egress_ip
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env.get('PATH', '')}"
 
     # Neither the state directory nor its parent exists yet
     state_dir = tmp_path / "home" / "watch"
@@ -594,7 +649,14 @@ def test_main_against_stub_server(tmp_path: Path) -> None:
         unhealthy = json.loads((state_dir / "status.json").read_text(encoding="utf-8"))
 
     assert healthy["health"]["status"] == "healthy"
-    assert "health_not_healthy" not in _names(healthy)
+    assert healthy["units"] == dict.fromkeys(
+        ("p1-server.service", "p1-stream.service"), {"active": True, "n_restarts": 0, "memory_bytes": 1048576}
+    )
+
+    # The disk and memory are the test host's own, so only resources may vary from host to host
+    assert set(_names(healthy)) <= {"resources"}
+    assert isinstance(healthy["resources"]["disk_free_bytes"], int)
+    assert isinstance(healthy["resources"]["mem_available_bytes"], int)
     assert healthy["egress_matches"] is None
     assert healthy["stream_run"] is None
     assert _anomaly(unhealthy, "health_not_healthy")["detail"]["http_status"] == 503
