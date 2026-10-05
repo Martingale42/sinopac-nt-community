@@ -44,7 +44,7 @@ ROADMAP「P1 官方 server 驗證 spike」的 soak 在家用網路執行，10/5 
 
 ## 5. VPS 準備與部署
 
-1. 時區設為 `Asia/Taipei`。官方 server 依台北時間 08:12–08:30 排每日維護，若它讀系統時區，UTC 主機會把維護排到下午；試跑以 health 的 `next_maintenance` 驗證。
+1. 時區設為 `Asia/Taipei`，與家用主機一致，`recorder.log` 的無時區時間戳才能與家用時期的紀錄對照。官方 server 的 log 以「Taiwan time」標示下次維護時間，推論它不依系統時區排程；試跑以 health 的 `next_maintenance` 驗證。
 2. 2 GiB swapfile，`vm.swappiness=10`。
 3. Tailscale：`--accept-dns=false`，不當 exit node、不廣播路由，對永豐的出口仍是固定 IP；UFW 只在 `tailscale0` 介面加放 22 埠。節點授權由使用者操作。
 4. `uv tool install shioaji==1.7.6`，wheel 的 sha256 與 PyPI 公布值比對。
@@ -149,7 +149,7 @@ VPS 端的 systemd unit 與監看腳本放在 `tools/p1-official-server/deploy/`
 
 - VPS 在 soak 中途失效：每日兩次取回，最多失去半天資料，但正式窗口須重排；下一個沒有假日的週四至週二為 10/29–11/3。
 - 10/8 晚上是否有期貨夜盤未查證，只影響試跑的 `quotes_stale` 判讀。
-- 官方 server 是否依系統時區排維護未知，以 §5 第 1 點與 §11.1 第 3 點處理。
+- 官方 server 不依系統時區排維護是推論，以 §5 第 1 點與 §11.1 第 3 點驗證。
 
 ## 14. 捨棄的方案
 

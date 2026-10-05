@@ -980,7 +980,7 @@ git commit -m "Rehearse the full recorder pipeline against a stub server"
 
 **Behaviour:**
 
-- 排程：soak 於 10/1–10/5 在家用網路執行，因浮動對外 IP 五天內換了兩次、每日重新登入被白名單擋下，10/5 14:45 暫停；改在有固定對外 IP 的 AWS 台北主機上重新執行 Task 12 的 soak 起點、Task 13 與 Task 14，日期待定。10/1–10/5 的紀錄保留為家用網路的證據。
+- 排程：soak 於 10/1–10/5 在家用網路執行，因浮動對外 IP 五天內換了兩次、每日重新登入被白名單擋下，10/5 14:45 暫停；改在有固定對外 IP 的 AWS 台北主機上重新執行 Task 12 的 soak 起點、Task 13 與 Task 14，依 `2026-10-06-soak-rehost-plan.md` 的 R4–R8 進行，正式 soak 為 10/15 08:00 至 10/20 09:30。10/1–10/5 的紀錄保留為家用網路的證據。
 - 離線演練（Task 11）沒有涵蓋、只能在本日驗證的路徑，逐項觀察並記入契約文件：委託在下單回應之後才結算（等待成交、`PendingSubmit` 時刪單、`step_wait_s` 等時間的實際值）、部分成交與多筆成交、成交事件的 `deal_key` 與 `deal_qty`、IOC／FOK 到期的事件形狀、以事件回報的改單或刪單拒絕、不帶帳戶的 `trades` 是否列出所有帳戶的委託、斷線後訂閱是否需要重送、串流流量是否計入每日額度、夜盤與跨日。
 - 改動 `p1.toml` 的指標、範本、`[events]` 或 `[trades]` 時，同步改 `tests/data/p1.toml`，否則離線測試的設定比對會失敗。
 - 前一個交易日：依當日合約清單校準 `p1.toml` 的近月期貨代號（TXFJ6、MXFJ6、TMFJ6 於 2026-10-21 到期，soak 跨過該日就改用下一個月份）與近月價平 TXO 買權、賣權各一檔，同步更新 `[stream]` 商品、`[history]` 的 snapshots 查詢與 `scenarios.toml`。
@@ -1026,6 +1026,7 @@ git commit -m "Calibrate recorder settings from the first live session"
 
 **Behaviour:**
 
+- 重跑：本任務改由 `2026-10-06-soak-rehost-plan.md` 的 R7 於 10/19 在固定 IP 主機上執行；以下為家用網路時期的原步驟。
 - 10/2（五）10:30 的排程動作已自動執行：兩個 client 的 2330 tick 同時停止（§6 D2），不必重做。其餘步驟原定週五，因排程未觸發改在 10/5（一）同樣時段執行，soak 結束時間不變。
 - 11:00：先查 soak 實例的 `usage`；`connections` 加 1（一個官方實例的量測值）超過 5 時，不開 harness 實例，F2 只以文件與模擬模式預設值作答並在契約文件註明。未超過時，以另一份 env（`SJ_HTTP_ADDR=127.0.0.1:18081`、`SJ_AGENT_HARNESS=all`、獨立的 `SJ_HOME_PATH`）啟動第二個官方 server 實例；執行 `p1rec orders --tag harness --only harness_probe --base-url http://127.0.0.1:18081`，錄下回應後停止該實例。soak 實例不受影響。
 - 11:30：經 soak 實例本身執行 `p1rec orders --tag pre-restart --only lifecycle_futures_tmf,<週四確認會成交的一個 market_futures_tmf_* 案例>`，讓重啟前的當日委託同時有未成交與成交兩種（設計 §9.1 第 8 步要求重啟時當日已有委託）；harness 實例的委託走另一個實例，不能代替。
@@ -1070,6 +1071,7 @@ git commit -m "Record multi-client, harness and restart runs"
 
 **Behaviour:**
 
+- 重跑：本任務改由 `2026-10-06-soak-rehost-plan.md` 的 R8 於 10/20 執行，log sweep 一併涵蓋家用網路時期的 server log；以下為原步驟。
 - soak 分兩段 run：`20261001T040917Z-stream`（10/1 12:09 至 10/3 16:19，主機重開機中斷）與 `20261003T205132Z-stream`（10/4 04:51 起）；`stats` 兩段各跑一次，server log 涵蓋 `2026-10-01-server/` 與 `2026-10-04-server/`。Task 13 的對帳用後者。
 - 09:30 `stream` 自動結束；停止官方 server；以 `p1rec stats --sse-run <stream run_id>` 涵蓋整個 soak。對帳只在下單當日做（Task 12、13）：`trades` 是否只回當日委託（§6 C7）尚未確認，跨日對帳可能把前幾日的委託誤報為遺漏。
 - 官方 server log 與全部 `recorder.log` 中的每一類 WARN／ERROR／CRITICAL（依訊息樣板歸類）各記：次數、首末次時間、處置（接受並說明原因，或記為契約發現並寫明對 go/no-go 的影響）；IP 白名單的 `not allow` 為必列類別（設計 §4）。
