@@ -16,6 +16,7 @@ dev = ["pytest>=8"]
 
 [project.scripts]
 p1rec = "p1rec.cli:main"
+p1watch = "p1rec.watch:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

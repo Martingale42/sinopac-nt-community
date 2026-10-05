@@ -6,8 +6,9 @@ it exactly as they reach the official server. StubBroker extends
 mock_official.FakeServer, which already answers every preflight query,
 with the rest of what the recorder sends: the mode switch, the order book
 and trades, trade report and quote subscriptions, history queries and
-usage, and an SseHub that pushes quotes, order and deal reports and
-heartbeats, and can drop every stream for a while.
+usage, the health check p1watch reads, and an SseHub that pushes quotes,
+order and deal reports and heartbeats, and can drop every stream for a
+while.
 
 Field names follow openapi.json and the shapes recorded in
 docs/official-server-contract.md section 2; every value is made up. As
@@ -59,6 +60,7 @@ logger = logging.getLogger(__name__)
 TAIPEI = ZoneInfo("Asia/Taipei")
 
 INFO_PATH = "/api/v1/info"
+HEALTH_PATH = "/api/v1/health"
 USAGE_PATH = "/api/v1/auth/usage"
 SUBSCRIBE_TRADE_PATH = "/api/v1/auth/subscribe_trade"
 SUBSCRIBE_PATH = "/api/v1/stream/subscribe"
@@ -125,6 +127,20 @@ _SUBMITTED = "Submitted"
 # (docs/official-server-contract.md section 2).
 _CONNECTIONS = 1
 _DAILY_LIMIT_BYTES = 2 * 1024**3
+
+# HealthResponse.status of a logged-in server, and token_expires_in_seconds
+# just after a login (docs/official-server-contract.md section 2).
+HEALTHY = "healthy"
+_TOKEN_LIFETIME_S = 86396
+
+_AGENT_HARNESS_OFF: dict[str, object] = {
+    "enabled": False,
+    "mode": "off",
+    "capability_version": 1,
+    "capability_header": "X-Shioaji-Agent-Capability",
+    "digest_scheme": "compact_keyed_blake3",
+    "max_ttl_seconds": 60,
+}
 
 # Margin's required fields (openapi.json), all zero unless set below
 _MARGIN_FIELDS = (
@@ -373,7 +389,9 @@ class StubBroker(FakeServer):
     Thread-safe: the HTTP server answers on many threads at once. A test
     reads what happened through count, mutation_count, subscriptions and
     trade_subscribed, or blocks on wait_until. Once production_after_mutations
-    mutations have been answered, mode reports production.
+    mutations have been answered, mode reports production. health answers
+    with health_status and health_http_status, which a test may change at
+    any time, such as to the unhealthy 503 of a server whose login failed.
     """
 
     accounts: list[dict[str, object]] = field(
@@ -390,6 +408,8 @@ class StubBroker(FakeServer):
     hub: SseHub = field(default_factory=SseHub)
     exchange_clock_start: datetime = field(default_factory=session_anchor)
     production_after_mutations: int | None = None
+    health_status: str = HEALTHY
+    health_http_status: int = 200
 
     _cond: threading.Condition = field(init=False, default_factory=threading.Condition, repr=False)
     _created: float = field(init=False, default_factory=time.monotonic, repr=False)
@@ -492,6 +512,7 @@ class StubBroker(FakeServer):
     def _route(self, method: str, path: str) -> Callable[[Any], httpx.Response] | None:
         routes: dict[tuple[str, str], Callable[[Any], httpx.Response]] = {
             ("GET", INFO_PATH): self._info,
+            ("GET", HEALTH_PATH): self._health,
             ("GET", USAGE_PATH): self._usage,
             ("POST", SUBSCRIBE_TRADE_PATH): self._subscribe_trade,
             ("POST", SUBSCRIBE_PATH): lambda body: self._subscribe(body, active=True),
@@ -520,14 +541,26 @@ class StubBroker(FakeServer):
                 "scheme": "http",
                 "uds_plaintext": False,
                 "simulation": self.simulation,
-                "agent_harness": {
-                    "enabled": False,
-                    "mode": "off",
-                    "capability_version": 1,
-                    "capability_header": "X-Shioaji-Agent-Capability",
-                    "digest_scheme": "compact_keyed_blake3",
-                    "max_ttl_seconds": 60,
-                },
+                "agent_harness": _AGENT_HARNESS_OFF,
+            },
+        )
+
+    def _health(self, _body: object) -> httpx.Response:
+        """Answer HealthResponse (openapi.json) with health_status, under the HTTP status health_http_status."""
+        return httpx.Response(
+            self.health_http_status,
+            json={
+                "status": self.health_status,
+                "version": "1.7.6",
+                "timestamp": datetime.now(TAIPEI).isoformat(),
+                "session_recovering": False,
+                "session_recovery_attempts": 0,
+                "token_stale": self.health_status != HEALTHY,
+                "token_expires_in_seconds": _TOKEN_LIFETIME_S,
+                "next_maintenance": None,
+                "last_session_recovery_error": None,
+                "last_maintenance_error": None,
+                "agent_harness": _AGENT_HARNESS_OFF,
             },
         )
 
