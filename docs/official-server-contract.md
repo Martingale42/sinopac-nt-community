@@ -102,6 +102,15 @@ P1 spike 的產出文件（設計：`docs/plans/2026-09-29-official-server-spike
 - 失敗期間 `/api/v1/info` 仍回 200；`stream/subscribe` 24 個請求皆回 200，但最後一筆 tick 停在 08:35:00，此後只有心跳；`subscribe_trade` 先回 401，錄製器每 60 秒重試，到 14:45 共回 741 次 500。SSE 連線本身沒有中斷。
 - Task 13 的三個步驟因 server 未登入而未執行；14:45 暫停錄製（run `20261003T205132Z-stream` 正常結束），14:48 停止 server。使用者決定改在有固定對外 IP 的 AWS 台北主機上重跑 soak。
 
+**固定 IP 主機（10/6 架設；計畫 `docs/plans/2026-10-06-soak-rehost-plan.md` R4；證據在本機 `results/p1/2026-10-06-server/` 與 `results/p1/20261006T084434Z-stream`）**
+
+- 主機：AWS 台北區域的 `t3.micro`（1 GiB），另加 2 GiB swap；時區 `Asia/Taipei`；chrony 與 NTP 相差約 2 µs。
+- 新 API key 的白名單只有這台主機的固定 IP；舊 gateway 的設定未動。
+- 官方 server、錄製器與每 5 分鐘一次的本地監看都是 systemd 服務（`tools/p1-official-server/deploy/`），開機自動啟動。
+- 第一次登入（10/6 16:44，模擬模式）：`simulation` 為 `true`，health 為 `healthy`，token 剩 86391 秒，下次維護 10/7 08:28:32；`usage.connections` 為 1，舊 gateway 沒有同時登入；帳戶 `S`、`F` 已簽署，`H` 未簽署；出口 IP 等於固定 IP；server log 沒有 `not allow`、ERROR 或 WARN。
+- 錄製器啟動時唯一的 WARNING 是過期的 10/2 排程動作被跳過，與 10/4 續錄時相同。
+- 試跑錄到 10/14 20:00；正式 soak 為 10/15 08:00 至 10/20 09:30。
+
 **假設關卡**
 
 - A1 成立：`GET /api/v1/info` 的 `/simulation`。
