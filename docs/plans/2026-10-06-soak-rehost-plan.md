@@ -13,7 +13,7 @@
 **Done signal:**
 
 - 離線：在 `tools/p1-official-server/` 下 `uv run pytest -q` 全綠。
-- **env-gated**：Task R8 的驗證通過。需要 VPS、新 API key、`~/.sinopac-p1/env` 與 10/15–10/20 的交易窗口。對應的離線演練是原計畫 Task 11 與本計畫 Task R2 對 stub server 的測試。
+- **env-gated**：Task R8 的驗證通過。需要 VPS、新 API key、`~/.sinopac-p1/env` 與 10/6–10/12 的 soak 窗口。對應的離線演練是原計畫 Task 11 與本計畫 Task R2 對 stub server 的測試。
 
 **執行分工：** R1–R3 為離線，交給 subagent-driven-development；R4–R8 為 live，由主 session 執行，不交給 subagent。
 
@@ -193,12 +193,12 @@ egress_url = "https://checkip.amazonaws.com"
 
 **Numbers:**
 
-- `maintenance_window` 08:00–08:45：每日維護在 08:12–08:30 內（契約文件 §2），token 約 24 小時到期，維護時間逐日浮動，前一日較早的登入可能在今日維護前到期而短暫 `degraded`。`calibrate:` 依 R5 試跑觀察。
+- `maintenance_window` 08:00–08:45：每日維護在 08:12–08:30 內（契約文件 §2），token 約 24 小時到期，維護時間逐日浮動，前一日較早的登入可能在今日維護前到期而短暫 `degraded`。`calibrate:` 依 R5 觀察。
 - `degraded_after_checks` 2：timer 5 分鐘一次（設計 §8），兩次即 10 分鐘。
-- `quotes_stale_s` 300：夜盤每個 client 約 26 萬筆 tick（契約文件 §2），遠高於每 5 分鐘一筆。`calibrate:` R5 試跑。
-- `day_session`、`night_session`：期交所 08:45–13:45、15:00–次日 05:00（上位設計 §4），兩端各內縮 1 分鐘以避開開收盤邊界。`calibrate:` R5 試跑。
+- `quotes_stale_s` 300：夜盤每個 client 約 26 萬筆 tick（契約文件 §2），遠高於每 5 分鐘一筆。`calibrate:` R5。
+- `day_session`、`night_session`：期交所 08:45–13:45、15:00–次日 05:00（上位設計 §4），兩端各內縮 1 分鐘以避開開收盤邊界。`calibrate:` R5。
 - `failure_patterns`：10/5 家用 server log 的重新登入失敗訊息。
-- `disk_free_min_gib` 5：每交易日約 2 GB 錄製量（家用 run `20261001T040917Z-stream` 推算）的兩天多。`mem_available_min_mib` 100、`swap_used_max_mib` 256：`calibrate:` R5 試跑。
+- `disk_free_min_gib` 5：每交易日約 2 GB 錄製量（家用 run `20261001T040917Z-stream` 推算）的兩天多。`mem_available_min_mib` 100、`swap_used_max_mib` 256：`calibrate:` R5。
 - `egress_check_interval_s` 3600：設計 §8。
 
 **Verification:**
@@ -280,7 +280,7 @@ git commit -m "Add systemd units for the soak host"
 
 - 2 GiB、`vm.swappiness` 10、10 分鐘、3 次、14:10、05:30：設計 §2、§8、§9。
 - 15 分鐘：timer 5 分鐘一次，三次未更新即視為監看停止。
-- 試跑結束 10/14 20:00：設計 §7。
+- `P1_STREAM_UNTIL` 10/14 20:00：設計 §7。
 
 **Verification:**
 
@@ -302,32 +302,27 @@ git commit -m "Record the fixed-IP host setup and first login"
 
 ---
 
-### Task R5（live，10/7–10/14）：試跑
+### Task R5（live，10/6–10/12 09:30）：soak 期間的 runbook 與校準
 
 **Files:**
-- Modify: `docs/official-server-contract.md`（§2「固定 IP 主機」小節）、`tools/p1-official-server/p1.toml` 與 `tests/data/p1.toml`（`[watch]` 校準、近月合約與價平 TXO、`futures_margin_twd`）
+- Modify: `docs/official-server-contract.md`（§2「固定 IP 主機」小節）、`tools/p1-official-server/p1.toml` 與 `tests/data/p1.toml`（`[watch]` 校準）
 
 **Behaviour:**
 
-- 完成設計 §11.1 第 1–6 項，各記結果與時間：
-  1. 非交易時段 `sudo reboot`，兩個服務自行啟動、錄製器開新 run，Telegram 收到 `service_down` 與恢復。
-  2. 非交易時段 `systemctl stop p1-stream` 一次，收到通知後啟動；`p1-poll.py` 指向錯誤目標一次，收到 `unreachable`。
-  3. health 的 `next_maintenance` 與 server log 的 `Starting daily maintenance` 時間落在台北 08:12–08:30。
-  4. 拉回後兩端 sha256 一致；一致的試跑 run 從 VPS 刪除。
-  5. 每日 14:15 摘要的 `MemoryCurrent` 與 `CPUCreditBalance` 抄入契約文件。
-  6. R1 已完成，`scrub --scan-only` 回 0。
-- 依試跑紀錄校準 `[watch]` 中標 `calibrate:` 的值；改動 `p1.toml` 時同步 `tests/data/p1.toml` 並跑 `uv run pytest -q`。
-- 10/14：
-  - 依 R2 數字判斷機型：`MemoryCurrent` 每日持續增加，或 `CPUCreditBalance` 連日下降至 0，即**停下來問使用者**是否換 `t3.small`（stop、改機型、start，EIP 不變）。
-  - 依當日合約清單校準近月期貨（J6 於 10/21 到期，窗口在其前結束）與價平 TXO 買權、賣權各一檔；`futures_margin_twd` 填期交所當日公布值；同步 `[stream]`、`[history]` 與 `scenarios.toml`。
-  - `P1_MARKET_HOLIDAYS` 清空（窗口內沒有休市日）。
+- 完成設計 §11.1 第 1–4 項，各記結果與時間：
+  1. health 的 `next_maintenance` 與 server log 的 `Starting daily maintenance` 時間落在台北 08:12–08:30。
+  2. 拉回後兩端 sha256 一致；VPS 上的 soak 資料留到 R8 結束。
+  3. 每日 14:15 摘要的 `MemoryCurrent` 與 `CPUCreditBalance` 抄入契約文件；`resources` 告警持續出現，或 `CPUCreditBalance` 連日下降至 0，即**停下來問使用者**是否換 `t3.small`（stop、改機型、start，EIP 不變）。
+  4. R1 已完成，`scrub --scan-only` 回 0。
+- 依 soak 前幾天的紀錄校準 `[watch]` 中標 `calibrate:` 的值；改動 `p1.toml` 時同步 `tests/data/p1.toml` 並跑 `uv run pytest -q`。
+- 不做重開機與停錄製器的告警演練（設計 §11.1 末段）；近月合約與價平 TXO 不重新校準，`TMFJ6` 等近月契約在窗口內不會到期。
 - 10/8 晚上若沒有夜盤，`quotes_stale` 的一次誤報記為已知並寫入契約文件。
-- 10/14 20:00 錄製器到期結束後執行 `systemctl disable p1-stream`，到 R6 再啟用；過了 `--until` 的錄製器每次啟動都會失敗並重啟。
+- 除 R7 外不碰兩個服務。
 
 **Verification:**
 
 Run：`grep -c '固定 IP 主機' docs/official-server-contract.md`
-Expected: 大於 0，且該小節列出 §11.1 第 1–6 項的結果。
+Expected: 大於 0，且該小節列出 §11.1 第 1–4 項的結果。
 
 Run：`cd tools/p1-official-server && uv run pytest -q && uv run p1rec scrub --scan-only; echo $?`
 Expected: 全部 passed，`0`。
@@ -335,44 +330,21 @@ Expected: 全部 passed，`0`。
 **Commit:**
 
 ```bash
-git add tools/p1-official-server/p1.toml tools/p1-official-server/tests/data/p1.toml tools/p1-official-server/scenarios.toml docs/official-server-contract.md
-git commit -m "Calibrate the soak watch and contracts from the trial week"
+git add tools/p1-official-server/p1.toml tools/p1-official-server/tests/data/p1.toml docs/official-server-contract.md
+git commit -m "Calibrate the soak watch from the fixed-IP soak"
 ```
 
 ---
 
-### Task R6（live，10/15 07:30）：soak 起點
+### Task R6：取消
 
-取代原計畫 Task 12 的 07:30–08:30 步驟；orders、history 與校準不重跑。
-
-**Files:**
-- Modify: `docs/official-server-contract.md`（§2）
-
-**Behaviour:**
-
-- 07:30：shell 先 `umask 077`；`timedatectl` 與 `chronyc tracking` 存入 `results/p1/2026-10-15-ntp.txt`；`host.env` 改 `P1_SERVER_LOG=…/results/p1/2026-10-15-server/server.log`、`P1_STREAM_UNTIL=2026-10-20T09:30:00+08:00`，並在同一個指令內 `systemctl restart p1-server`，監看才不會盯著沒人寫的舊 log。
-- `p1rec self-test-interlock` 回 0；`p1rec preflight` 回 0，或只因資金比對回 2（P1REC-26，記錄後繼續）；其他非 0 即停止。
-- 08:00：`systemctl enable --now p1-stream`，記下新的 stream run ID，即 soak 起點。
-- 08:30 後（每日維護之後）：再跑一次 `p1rec preflight`，判讀同上。
-- 此後到 10/20 09:30，除 R7 外不碰兩個服務。
-
-**Verification:**
-
-Run（VPS）：`for f in results/p1/<stream run>/sse_*_data.jsonl; do printf '%s ' "$f"; jq -c 'select(.kind=="frame")' "$f" | wc -l; done`
-Expected: 每個 client 皆大於 0，09:00 後重跑數字增加。
-
-**Commit:**
-
-```bash
-git add docs/official-server-contract.md
-git commit -m "Start the fixed-IP soak"
-```
+soak 從 R4 的第一次登入與 stream run `20261006T084434Z-stream` 起算，不另開 run（設計 §1、§7）。原本在此的 `self-test-interlock` 與 `preflight` 移到 R7 下單之前。
 
 ---
 
-### Task R7（live，10/19）：多 client、harness 實例、重啟與對帳
+### Task R7（live，10/8）：多 client、harness 實例、重啟與對帳
 
-取代原計畫 Task 13；步驟與判讀規則不變，只改為在 VPS 上執行。
+取代原計畫 Task 13；步驟與判讀規則不變，只改為在 VPS 上執行，並先跑原屬 R6 的檢查。
 
 **Files:**
 - Modify: `docs/official-server-contract.md`（§2）
@@ -380,10 +352,12 @@ git commit -m "Start the fixed-IP soak"
 **Behaviour:**
 
 - 10:30 前**停下來問使用者**：本日會開第二個登入（harness 實例）並下模擬單。
+- 10:30：shell 先 `umask 077`；`p1rec self-test-interlock` 回 0；`p1rec preflight` 回 0，或只因資金比對回 2（P1REC-26，記錄後繼續）；其他非 0 即停止並回報使用者，本日不下單。
 - 11:00：查 soak 實例的 `usage`；`connections` 加 1 超過 5 時不開 harness 實例，F2 只以文件與模擬模式預設值作答。未超過時以 `~/.sinopac-p1/harness.env`（`SJ_HTTP_ADDR=127.0.0.1:18081`、`SJ_AGENT_HARNESS=all`、`SJ_HOME_PATH=~/.sinopac-p1/home-harness`）加 `secrets.env`，經 `systemd-run --unit=p1-harness` 啟動；執行 `p1rec orders --tag harness --only harness_probe --base-url http://127.0.0.1:18081`；停止該 unit。
 - 11:30：`p1rec orders --tag pre-restart --only lifecycle_futures_tmf,<10/1 確認會成交的一個 market_futures_tmf_* 案例>`。
-- 12:00：`systemctl restart p1-server`，`p1-stream` 不動；重啟後 `p1rec reconcile --sse-run <stream run_id> --trading-day 2026-10-19`。
+- 12:00：`systemctl restart p1-server`，`p1-stream` 不動；重啟後 `p1rec reconcile --sse-run <stream run_id> --trading-day 2026-10-08`。
 - 對帳回 2 時不重試，保留 `reconcile.json`；`rest_order_count` 為 0 即 GO 準則 5 的反證。
+- 錯過 10/8 的交易時段時，改在 10/12 同樣時段執行，`--trading-day` 隨之改。
 
 **Numbers:**
 
@@ -412,7 +386,7 @@ git commit -m "Record multi-client, harness and restart runs on the fixed-IP hos
 
 ---
 
-### Task R8（live，10/20 09:30）：soak 結束與 log sweep
+### Task R8（live，10/12 09:30）：soak 結束與 log sweep
 
 取代原計畫 Task 14。
 
@@ -421,10 +395,10 @@ git commit -m "Record multi-client, harness and restart runs on the fixed-IP hos
 
 **Behaviour:**
 
-- 09:30 `p1-stream` 自行結束；`systemctl disable --now p1-server p1-stream p1-watch.timer`；最後一次 `p1-pull.sh`，sha256 一致後才從 VPS 刪除正式 soak 的資料；家用主機停用 `p1-poll` 與 `p1-pull` 的 timer。
-- 家用主機以 `p1rec stats --sse-run <run_id>` 涵蓋 R6 起的每一段 stream run。
-- log sweep 範圍：`2026-10-15-server/server.log`、正式 soak 期間的全部 `recorder.log`、`journalctl -u p1-server -u p1-stream`（重啟、OOM）、`watch.jsonl` 的異常類別，以及 `2026-10-01-server/` 與 `2026-10-04-server/` 的家用 server log。依訊息樣板歸類，每一類記次數、首末次時間與處置；`not allow` 必列。
-- 從正式 soak 的 server log 量出 session 過期的實際週期與次數，寫入契約文件（P2 watchdog 依據）。
+- 09:30：`systemctl disable --now p1-watch.timer p1-stream p1-server`，錄製器的 `--until` 仍是 10/14 20:00，run 由這一步結束（設計 §7）；最後一次 `p1-pull.sh`，sha256 一致後才從 VPS 刪除 soak 的資料；家用主機停用 `p1-poll` 與 `p1-pull` 的 timer。
+- 家用主機以 `p1rec stats --sse-run <run_id>` 涵蓋 `20261006T084434Z-stream` 起的每一段 stream run。
+- log sweep 範圍：`2026-10-06-server/server.log`、soak 期間的全部 `recorder.log`、`journalctl -u p1-server -u p1-stream`（重啟、OOM）、`watch.jsonl` 的異常類別，以及 `2026-10-01-server/` 與 `2026-10-04-server/` 的家用 server log。依訊息樣板歸類，每一類記次數、首末次時間與處置；`not allow` 必列。
+- 從 soak 的 server log 量出 session 過期的實際週期與次數，寫入契約文件（P2 watchdog 依據）。
 - 任何一類說不出原因時，契約文件標明「P1 未通過驗收」並停止。
 - 原計畫 Task 12–14 標明由本計畫完成並附 commit。
 - 完成後回報 run ID 與窗口、驗收數字、log sweep 結論、未決問題與 commit。

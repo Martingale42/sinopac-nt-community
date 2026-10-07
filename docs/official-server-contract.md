@@ -109,7 +109,7 @@ P1 spike 的產出文件（設計：`docs/plans/2026-09-29-official-server-spike
 - 官方 server、錄製器與每 5 分鐘一次的本地監看都是 systemd 服務（`tools/p1-official-server/deploy/`），開機自動啟動。
 - 第一次登入（10/6 16:44，模擬模式）：`simulation` 為 `true`，health 為 `healthy`，token 剩 86391 秒，下次維護 10/7 08:28:32；`usage.connections` 為 1，舊 gateway 沒有同時登入；帳戶 `S`、`F` 已簽署，`H` 未簽署；出口 IP 等於固定 IP；server log 沒有 `not allow`、ERROR 或 WARN。
 - 錄製器啟動時唯一的 WARNING 是過期的 10/2 排程動作被跳過，與 10/4 續錄時相同。
-- 試跑錄到 10/14 20:00；正式 soak 為 10/15 08:00 至 10/20 09:30。
+- soak 為 10/6 16:44 第一次登入至 10/12 09:30，不另開正式窗口（設計補充 §1、§11.2）。
 - 10/7 每日維護在 08:28:32 開始，約 1.3 秒內重新登入並重放 24 個行情與 2 個委託回報訂閱。jitter 在 server 啟動時決定後固定，每天同一時刻維護；新 token 的到期時間等於下次維護時間。維護時唯一的 WARN 是 `No legacy contracts loaded after client replacement`，與家用網路時相同；完成訊息為 `0 contracts loaded`，訂閱改經 Contract V2 解析。
 - 錄製器 08:35 的全量重送（2 個 `subscribe_trade`、24 個訂閱）皆回 200。兩個 client 的行情 frame 數相同；超過 60 秒的空白只出現在 05:00–08:30 與 13:45 之後的休市時段。
 - 資源（試跑第一天）：CPU 每小時平均最高 5%，CPU credit 維持在上限；兩個服務的匿名記憶體各約 18 MiB，systemd 的 `MemoryCurrent` 含寫檔造成的 page cache，因此在 17–395 MiB 之間擺動；swap 用量約 50 MiB；錄製檔每天約 2 GB。

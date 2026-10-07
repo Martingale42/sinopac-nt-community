@@ -8,7 +8,7 @@
 
 ## 排隊
 
-- **P2 adapter v2 化**：純 Rust `DataClient` / `ExecutionClient` 接官方 server，追 crates.io 最新 nautilus-*；發佈時同步更新 community listing（nautechsystems/nautilus_trader#4324）的安裝說明。等 P1 go/no-go。
+- **P2 adapter v2 化**：純 Rust `DataClient` / `ExecutionClient` 接官方 server，追 crates.io 最新 nautilus-*；發佈時同步更新 community listing（nautechsystems/nautilus_trader#4324）的安裝說明。設計可先開始，實作等 P1 go/no-go。
 - **P3 輔助服務**：只在 P1 判定 GO＋P3 時開，範圍即 P1 的缺口清單。
 
 ## 待決定
