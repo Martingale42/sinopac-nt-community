@@ -36,6 +36,7 @@
 | P1REC-32 | open | IPv4 掃描抓不到以破折號寫的位址（`ip-a-b-c-d`、`ec2-a-b-c-d.…` 主機名）與五段點分的 tcpdump 形式；貼主機 prompt 或 journal 進 `docs/` 前會漏掉 | `scrub/_matching.py` | R1 review |
 | P1REC-33 | open | 出口 IP 查詢失敗後要等滿一小時才重查；失敗時改為下一輪就重查 | `watch.py` egress 檢查 | R2 review |
 | P1REC-34 | open | server log 在同一路徑被換成新檔且 5 分鐘內長過舊位移時，新檔開頭的行會被跳過；比對 `st_ino` | `watch.py` `relogin_failed` | R2 review |
+| P1REC-40 | open | `status.json` 的 `units.*.memory_bytes` 取 systemd `MemoryCurrent`，含錄製寫檔的 page cache，每日摘要因此誤看成記憶體成長；改取 cgroup `memory.stat` 的 `anon` | `watch.py` `SystemProbes.unit`、`p1-poll.py` 摘要 | R5 試跑 10/7 |
 
 ## P1REC — P2（整理；不改行為）
 
