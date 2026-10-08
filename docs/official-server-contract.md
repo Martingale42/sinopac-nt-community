@@ -33,6 +33,31 @@ P1 spike 的產出文件（設計：`docs/plans/2026-09-29-official-server-spike
 
 規格中另有而 adapter 可能用到的：`/api/v1/order/order_deal_records`、`/api/v1/order/trade_cache_health`、`/api/v1/stream/status`、`/api/v1/data/contracts/tick-bands/{rule}`、`/api/v1/stream/data/contract_event`。
 
+### 1.1 adapter 現行契約的差距表（§6 A2）
+
+adapter v0.1.x 對舊 gateway 用到 11 個 HTTP endpoint 與 5 種 WebSocket 業務訊息，共 16 列；連線與控制訊息另列。判定依 `openapi.json` 與 §2、§3 的實測。
+
+| # | adapter 項目 | 官方 1.7.6 對應 | 判定 | 轉換要點 |
+|---|---|---|---|---|
+| 1 | 股票合約 | GET `/api/v1/data/contracts`（分頁）＋ `/contracts/{code}/info` | 可轉換 | 清單只有 `code`、`exchange`，其餘欄位逐檔查 info，或只載入設定的商品 |
+| 2 | 期貨合約 | GET `/api/v1/data/contracts/futures` | 可轉換 | 欄位改名（`root`、`quote_ccy`），欄位可為 null；另帶 `tick`、`tick_rule` |
+| 3 | 選擇權合約 | GET `/contracts/options/roots` → 逐 root 查 `/contracts/options` | 可轉換 | `root` 必填 |
+| 4 | 歷史 tick | POST `/api/v1/data/ticks` | 可轉換 | JSON 本體帶 `contract`；時間為 `datetime` 字串 |
+| 5 | 歷史 K 棒 | POST `/api/v1/data/kbars` | 可轉換 | 鍵名大寫並多 `Amount`；只有 1 分 K（G1），其他粒度自行聚合 |
+| 6 | 新單 | POST `/api/v1/order/place_order` | 可轉換 | `account` 帶完整帳戶物件；`trade_id` 取 `order.id`；股票 MKP 同步 400，需在本地擋；數量單位依 `order_lot`（C5） |
+| 7 | 改單 | POST `/order/update_price`、`/order/update_qty` | 可轉換 | 改價與改量拆成兩個請求；`update_qty` 的數量是減少量或新總量未能區分，P2 驗證 |
+| 8 | 刪單 | POST `/api/v1/order/cancel_order` | 可轉換 | 回應改為 `Trade` |
+| 9 | 當日委託 | POST `/api/v1/order/trades` | 可轉換 | 逐帳戶查；成交量取 `status.deal_quantity`；只回當日（C7） |
+| 10 | 部位 | POST `/api/v1/portfolio/position_unit` | 可轉換 | 以 `S`／`F` 帳戶查；股票部位的 `unit` 未實測，P2 驗證 |
+| 11 | 餘額 | POST `/api/v1/portfolio/account_balance` | 可轉換 | 模擬模式回 0 |
+| 12 | 訂閱 | POST `/api/v1/stream/subscribe` | 可轉換 | 同步回應；server 全域；server 未登入時仍回 200，成敗另看 health |
+| 13 | 取消訂閱 | POST `/api/v1/stream/unsubscribe` | 可轉換 | 一個 client 取消，所有 client 都停收（D2） |
+| 14 | tick 推送 | SSE `tick_stk`、`tick_fop` | 可轉換 | 價格為十進位字串；時間為無時區的台北本地字串；`simtrade` 標記試撮 |
+| 15 | bidask 推送 | SSE `bidask_stk`、`bidask_fop` | 可轉換 | 五檔；時間格式同 tick（B3） |
+| 16 | 委託與成交回報 | `subscribe_trade` ＋ SSE `order_event` | 可轉換 | 外層 `state` 加同名內層鍵；`event_id` 可去重；拒單以 `op_code` `88`；成交可能早於 New |
+| 附 A | 連線、心跳、重連 | 每種資料一條 SSE，server 每 30 秒送心跳 | 可轉換 | frame 沒有 `id:`，斷線後以 REST 對帳補齊（B2） |
+| 附 B | 控制與錯誤 | 同步 HTTP 回應與 `ErrorResponse` | 可轉換 | 錯誤改由 HTTP 狀態碼承載 |
+
 ## 2. 執行環境與探勘觀察
 
 **環境**
@@ -129,51 +154,80 @@ P1 spike 的產出文件（設計：`docs/plans/2026-09-29-official-server-spike
 
 ## 3. 量測清單答案
 
-對應設計 §6；每項附 fixture 名稱或 log 行。
+對應設計 §6；fixture 在 `test_data/official/1.7.6/`，來源與行號見其 `MANIFEST.toml`。
 
 **A. 契約對應**
 
-- A1 OpenAPI 規格：未作答
-- A2 現行 adapter 契約 16 列的差距：未作答
+- A1 OpenAPI 規格：`openapi.json`，OpenAPI 3.1.0，100 條路徑、209 個 schema；server 版本見 `A2_info`。
+- A2 差距：§1.1 的 16 列與附錄全部可轉換，沒有「缺」（`A2_info`、`A2_accounts`、`A2_contracts`、`A2_funds_queries`）。
 
 **B. 行情**
 
-- B1 SSE 訂閱流程、事件類型、frame 格式、心跳間隔：未作答
-- B2 `Last-Event-ID` 斷點接續：未作答
-- B3 五檔深度的檔數、時間戳格式與時區：未作答
-- B4 試撮標記：未作答
-- B5 盤中零股與期貨夜盤行情格式：未作答
-- B6 開盤尖峰每秒訊息量與延遲：未作答
+- B1 每種資料一條 GET 端點，`text/event-stream`，frame 為 `event:` 加 `data:<JSON>`；事件有 `tick_stk`、`tick_fop`、`bidask_stk`、`bidask_fop`、`order_event`、合約事件與 `heartbeat`，綜合串流也帶 `order_event`。心跳每 30 秒，含各連線不同的 `connection_id`。訂閱以 POST 送出、為 server 全域（`B1_stream_subscribe`、`B1_heartbeats`、`B1_tick_stk`、`B1_tick_fop`）。
+- B2 不能以 `Last-Event-ID` 接續：frame 沒有 `id:`，重連後換新 `connection_id`，斷線期間的 frame 不會重放；漏掉的回報由 REST `trades` 補（`B1_heartbeats`、`E1_heartbeats_across_restart`）。
+- B3 買賣各 5 檔，另有 `first_derived_*`、`diff_*_vol` 與總量；`date`、`time` 為台北本地字串、無時區（`B3_bidask_stk`、`B3_bidask_fop`）。
+- B4 tick 以 `simtrade` 布林標記試撮；10/7 的 2330 在 09:00:09 轉為一般 tick，0050 到 09:02:00 仍為 `true`；TXFJ6 在 08:45:00 轉換（`B4_simtrade_stk`、`B4_simtrade_fop`）。
+- B5 盤中零股以 `tick_stk` 送出並帶 `intraday_odd: true` 與 `closing_oddlot_*`；夜盤期貨與日盤同為 `tick_fop`、`bidask_fop`（`B5_odd_lot_quotes`、`B5_night_session_quotes`）。
+- B6 10/1（家用網路）每秒尖峰 859 frame，收到時間減交易所時間 p50 21.8 ms、p99 132.7 ms（`B6_data_stream_stats`）。09:00 開盤尖峰當日未錄到；固定 IP 主機錄到 10/7、10/8 的開盤，其統計在 Task 14 補入 §4，供 P2 參考。
 
 **C. 委託與成交**
 
-- C1 各操作的同步回應與事件順序：未作答
-- C2 委託條件組合（含拒單）：未作答
-- C3 `trade_id`、`ordno`、`seqno` 對應：未作答
-- C4 `custom_field` 長度、字元集與往返：未作答
-- C5 股票成交數量單位：未作答
-- C6 資金不足拒單與 IOC／FOK 未成交取消：未作答
-- C7 重啟後當日委託與成交的取回：未作答
+- C1 `place_order` 同步回 200 與 `Trade`（`PendingSubmit`）；交易所接受以 `op_code` `00` 的 New 事件送達，拒單只以 `op_code` `88` 事件與 `trades` 的 `Failed` 出現；規則檢查失敗同步回 4xx；成交事件可能早於 New（`C1_stock_lifecycle_*`、`C1_futures_lifecycle_*`、`C1_deal_before_new_events`）。
+- C2 期貨 MKT、MKP 的 ROD、IOC、FOK 皆成交；股票與零股的 MKP 同步回 400；超出漲跌幅與零股價格檔數錯誤以 `88` 拒絕（`C2_*`）。
+- C3 成交事件的 `trade_id` 等於委託的 `order.id`，`seqno`、`ordno` 也一致，10/1 的 26 筆成交全數對得上；刪單以 `order.id` 為 `trade_id`（`C3_futures_fill_rest`、`C3_futures_fill_events`）。
+- C4 `custom_field` 6 個 base62 字元原樣往返（含邊界字元與大小寫），7 字元在下單時同步 422；編碼以 ADR-0005 定案（`C4_custom_field_rest`、`C4_custom_field_events`）。
+- C5 成交數量與委託同單位，由 `order_lot` 決定：`Common` 為張，`IntradayOdd` 為股；舊 gateway 一律乘 1000 的假設在零股上錯誤（`C5_board_lot_deal_events`、`C5_odd_lot_deal_events`）。
+- C6 未知：模擬模式的資金查詢回 0 卻照常接單（P1REC-26），資金不足拒單在模擬下無法觸發；遠價 IOC、FOK 在模擬中停在 `Submitted`、不會自動取消（P1REC-27）。兩者的正式環境行為留給 P2（`C6_ioc_fok_resting_events`、`C6_ioc_resting_rest`、`A2_funds_queries`）。
+- C7 10/8 盤中重啟後，`trades` 取回當日 3 張委託與成交，與兩個 client 的事件逐筆一致，不含其他日期的委託（`C7_trades_after_restart`）。
 
 **D. 多 client**
 
-- D1 client 之間的委託回報分送：未作答
-- D2 一個 client 取消訂閱對其他 client 的影響：未作答
+- D1 每個 SSE client 都收到所有帳戶的全部回報，兩個 client 的 frame 數相同（`D1_client_b_order_events`，對照 `C1_futures_lifecycle_events`）。
+- D2 訂閱為 server 全域：10/2 一次取消 2330 tick 後，兩個 client 同時停止收到（`D2_*`）。
 
 **E. 韌性**
 
-- E1 重啟時 SSE client 的行為與訂閱是否需重做：未作答
-- E2 session 過期與自動重登：未作答
-- E3 合約更新事件：未作答
+- E1 server 重啟時 SSE 斷線，約 1 秒後可重連並換新 `connection_id`；重啟沿用快取 token。錄製器重連後立即重送訂閱，全部回 200；server 會不會自行恢復訂閱為未知，因為重送早於能觀察的時間點（`E1_*`）。
+- E2 token 約 24 小時；每日維護在依帳戶固定的時刻（本帳戶 08:28:32）重新登入並重放訂閱，新 token 在下次維護時到期。登入被拒時，間隔 1、2、4、8 分鐘再每 10 分鐘重試，共 10 次後等到隔日維護；期間 health 回 503、`/info` 仍回 200、SSE 只剩心跳、`subscribe_trade` 先回 401 再回 500（`E2_*`）。
+- E3 合約事件經 `contract_event` 串流送出，server log 同時記 `SYS/CONTRACT Check invalidation`；觀察到 10/7 13:55 與 10/8 07:45（FUT、OPT、STK）（`E3_contract_events`）。
 
 **F. 限制與權限**
 
-- F1 速率上限與實際遇到的錯誤：未作答
-- F2 `SJ_AGENT_HARNESS` 預設與 `all` 模式下的回應：未作答
-- F3 連線數與每日額度：未作答
-- F4 模擬模式下 CA 是否真的簽章：未作答
-- F5 HTTP 端驗證與 CORS：未作答
+- F1 未知：未刻意觸發，1729 個 REST 回應中沒有 429，log 也沒有速率限制的訊息。
+- F2 模擬模式預設 `off`；`all` 模式缺 `SJ_AGENT_HARNESS_SECRET` 時拒絕啟動，使用者決定不測，以官方文件作答（§2 的 10/8 紀錄）。正式環境的自動下單須使用者明確選擇並經原生授權，只能以正式帳戶驗證（`A2_info`、`F2_harness_all_refused_log`）。
+- F3 一個官方實例佔 1 條連線，上限 5；每日額度 2 GiB。歷史查詢前後 `bytes` 不變；串流一天在磁碟上達 GB 等級，`bytes` 只到數十 MB，推論串流不全額計入（`F3_usage`、`G1_*`）。
+- F4 未知：啟動時即以 `.pfx` 啟用 CA 並記錄到期日，但模擬模式的下單回應與事件中 `ca` 皆為空，是否真的簽章無法從閉源執行檔確認（`F4_ca_status`、`F4_ca_activation_log`）。
+- F5 綁 localhost 時不驗證 API key；帶 `Origin` 的請求沒有收到 `Access-Control-Allow-Origin`，只有 `access-control-expose-headers`（`F5_http_auth_log`、`A2_info`）。
 
 **G. 歷史資料**
 
-- G1 ticks、kbars、snapshots 的格式與額度消耗：未作答
+- G1 ticks、kbars、snapshots 皆以 POST JSON 本體查詢；kbars 只有 1 分 K（2330 一日 266 根）；四筆查詢前後 `usage.bytes` 不變（`G1_kbars_2330`、`G1_snapshots`）。
+
+## 5. go/no-go
+
+依設計 §8，2026-10-08 判定。
+
+| 準則 | 判定 | 依據 |
+|---|---|---|
+| 1. P2 第一輪功能皆為相同或可轉換 | 成立 | §1.1 的 16 列全部可轉換 |
+| 2. 下單回應、委託回報、成交回報的 ID 能確定對應 | 成立 | C3 |
+| 3. `custom_field` 至少往返 6 個 base62 字元 | 成立 | C4、ADR-0005 |
+| 4. SSE 回報與同時段 REST 當日委託逐筆比對沒有遺漏 | 成立 | 10/1 44 筆、10/8 3 筆皆一致 |
+| 5. 重啟後 REST 能取回當日委託與成交 | 成立 | C7 |
+| 6. harness 有文件記載的自動化方式，或可由設定關閉 | 模擬模式成立 | 預設 `off`（F2）；正式環境留給 P2 驗收 |
+
+**結論：GO。** P2 直接接官方 server，不開 P3。§1.1 的轉換都可在 adapter 內完成；只有多個 node 共用一台官方 server 時，才需要一層輔助服務處理訂閱引用計數與回報分送。
+
+P2 必須處理的發現：
+
+- 官方 server 登入失敗時 `/info` 仍回 200、訂閱仍回 200 卻收不到行情（E2）；adapter 要看 `/api/v1/health`，不能以 `/info` 判斷是否可用。
+- server 重啟後由 adapter 重送訂閱與 `subscribe_trade`（E1）；frame 沒有 `id:`，斷線後以 `trades` 對帳（B2）。
+- 股票數量單位依 `order_lot`（C5）；`place_order` 帶完整帳戶物件；`trades` 逐帳戶查。
+- API key 綁對外 IP 白名單，官方 server 必須在固定 IP 的主機上執行（§2 的 10/5 與固定 IP 主機紀錄）。
+
+風險與 P2 的驗證項目：
+
+- **正式環境能否讓程式自動下單**：官方文件說正式環境的自動下單須使用者明確選擇並經原生授權，只有正式帳戶量得到，列為 P2 第一個驗證項目。
+- 正式環境才看得到的行為：CA 是否真的簽章（F4）、資金不足拒單（C6）、IOC、FOK 是否自動取消（C6）、`update_qty` 的數量語意與股票部位的 `unit`（§1.1）。
+- 速率上限未知（F1），adapter 需要自己的節流。
+- soak 的 log sweep 與固定 IP 主機的串流統計在 10/12 完成，結果是 P2 的參考，不改變本結論（設計 §9.3）。

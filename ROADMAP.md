@@ -4,12 +4,15 @@
 
 ## 進行中
 
-- **P1 官方 server 驗證 spike**：回答 adapter 能否直接接官方 server 1.7.6 與其契約。設計：`docs/plans/2026-09-29-official-server-spike-design.md`。
+- **P2 adapter v2 化**：純 Rust `DataClient` / `ExecutionClient` 接官方 server，追 crates.io 最新 nautilus-*；發佈時同步更新 community listing（nautechsystems/nautilus_trader#4324）的安裝說明。輸入是 P1 契約文件 §1.1、§3、§5；第一個驗證項目是正式環境能否讓程式自動下單。
 
 ## 排隊
 
-- **P2 adapter v2 化**：純 Rust `DataClient` / `ExecutionClient` 接官方 server，追 crates.io 最新 nautilus-*；發佈時同步更新 community listing（nautechsystems/nautilus_trader#4324）的安裝說明。設計可先開始，實作等 P1 go/no-go。
-- **P3 輔助服務**：只在 P1 判定 GO＋P3 時開，範圍即 P1 的缺口清單。
+- **P3 輔助服務**：P1 判定 GO，不開；只有多個 node 共用一台官方 server、需要訂閱引用計數與回報分送時才重新評估。
+
+## 完成
+
+- **P1 官方 server 驗證 spike**：GO，P2 直接接官方 server 1.7.6。契約與量測見 `docs/official-server-contract.md`，委託標記見 ADR-0005。
 
 ## 待決定
 

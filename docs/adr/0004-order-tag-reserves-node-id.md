@@ -1,5 +1,5 @@
 ---
-status: accepted
+status: superseded by ADR-0005
 ---
 
 # 委託標記保留 node 識別位
