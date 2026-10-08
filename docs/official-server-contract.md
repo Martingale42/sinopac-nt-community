@@ -110,10 +110,15 @@ P1 spike 的產出文件（設計：`docs/plans/2026-09-29-official-server-spike
 - 第一次登入（10/6 16:44，模擬模式）：`simulation` 為 `true`，health 為 `healthy`，token 剩 86391 秒，下次維護 10/7 08:28:32；`usage.connections` 為 1，舊 gateway 沒有同時登入；帳戶 `S`、`F` 已簽署，`H` 未簽署；出口 IP 等於固定 IP；server log 沒有 `not allow`、ERROR 或 WARN。
 - 錄製器啟動時唯一的 WARNING 是過期的 10/2 排程動作被跳過，與 10/4 續錄時相同。
 - soak 為 10/6 16:44 第一次登入至 10/12 09:30，不另開正式窗口（設計補充 §1、§11.2）。
-- 10/7 每日維護在 08:28:32 開始，約 1.3 秒內重新登入並重放 24 個行情與 2 個委託回報訂閱。jitter 在 server 啟動時決定後固定，每天同一時刻維護；新 token 的到期時間等於下次維護時間。維護時唯一的 WARN 是 `No legacy contracts loaded after client replacement`，與家用網路時相同；完成訊息為 `0 contracts loaded`，訂閱改經 Contract V2 解析。
+- 10/7 每日維護在 08:28:32 開始，約 1.3 秒內重新登入並重放 24 個行情與 2 個委託回報訂閱。jitter 每次啟動都相同（見 10/8），每天同一時刻維護；新 token 的到期時間等於下次維護時間。維護時唯一的 WARN 是 `No legacy contracts loaded after client replacement`，與家用網路時相同；完成訊息為 `0 contracts loaded`，訂閱改經 Contract V2 解析。
 - 錄製器 08:35 的全量重送（2 個 `subscribe_trade`、24 個訂閱）皆回 200。兩個 client 的行情 frame 數相同；超過 60 秒的空白只出現在 05:00–08:30 與 13:45 之後的休市時段。
 - 資源（試跑第一天）：CPU 每小時平均最高 5%，CPU credit 維持在上限；兩個服務的匿名記憶體各約 18 MiB，systemd 的 `MemoryCurrent` 含寫檔造成的 page cache，因此在 17–395 MiB 之間擺動；swap 用量約 50 MiB；錄製檔每天約 2 GB。
 - 取回：拉回的 10 個檔案，每個檔案前綴的 sha256 都與 VPS 上相同。
+- 10/8 Task 13（計畫 R7；12:53 起，比預定晚約 2.5 小時，仍在期交所日盤內）：`self-test-interlock` 回 0；`preflight` 只因資金比對回 2（P1REC-26）；`usage.connections` 為 2，第二條推論為舊 gateway 容器，它過去 24 小時的 log 有 226 行 `not allow`。
+- harness 實例（`SJ_AGENT_HARNESS=all`、`127.0.0.1:18081`）：登入與 CA 啟用成功後，HTTP server 拒絕啟動，訊息為 `Invalid HTTP transport configuration: SJ_AGENT_HARNESS_SECRET is required for environment bootstrap`。`all` 模式需要另設這個密鑰，計畫未預見；它是讓 agent 取得下單能力的密鑰，當日未產生，也未下 harness 單，F2 待使用者決定。
+- 經 soak 實例下單：`lifecycle_futures_tmf` 完成生命週期，`market_futures_tmf_mkt_ioc` 成交後平倉，共 3 張委託；`orders` 回 0。
+- 盤中重啟 soak 實例（12:55:46）：沿用快取 token，2 秒內 `healthy`，錄製器未重啟。三次啟動（10/6 soak 實例、10/8 harness 實例、10/8 重啟）的 jitter offset 都是 992 秒，維護時刻固定在 08:28:32，與啟動時間無關。
+- 重啟後 `reconcile --trading-day 2026-10-08`：`rest_order_count` 為 3，兩個 client 各 3；`only_in_rest`、`only_in_sse`、`mismatched` 與 `missing_events_by_client` 皆為 0。重啟後 REST 能取回當日全部委託與成交（GO 準則 5）。
 
 **假設關卡**
 
