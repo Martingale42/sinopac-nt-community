@@ -218,13 +218,13 @@ P1 是 spike，只回答一個問題：**NT adapter 能不能直接接官方 ser
 
 ### 9.3 Log sweep
 
-soak 結束後，官方 server 與錄製器 log 中每一類 WARN／ERROR 都要列出處置：說明原因後接受（例如 session 過期重登），或記為契約文件中的發現並寫明對 go/no-go 的影響。官方 server 閉源，不存在「修掉」這個處置。任何一類說不出原因，P1 即不通過驗收。
+soak 結束後，官方 server 與錄製器 log 中每一類 WARN／ERROR 都要列出處置：說明原因後接受（例如 session 過期重登），或記為契約文件中的發現並寫明對 go/no-go 的影響。官方 server 閉源，不存在「修掉」這個處置。說不出原因的類別記為 P2 待辦；log sweep 是 P2 的參考，不回頭改 go/no-go，因為 §8 的 NO-GO 只看下單路徑。
 
 ### 9.4 P1 驗收條件
 
 - §6 A–G 每項有答案，或標「未知」附原因。
 - fixture 已 commit 且去識別化掃描通過。
-- soak 完成，log sweep 沒有未說明的類別。
+- soak 涵蓋 §8 各 GO 準則所需的證據；log sweep 不是 P1 的驗收條件，結果記入契約文件供 P2 參考。
 - go/no-go 結論已寫下。
 
 ## 10. 已知缺口與風險

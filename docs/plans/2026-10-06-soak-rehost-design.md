@@ -38,8 +38,8 @@ VPS 從第一次登入起的連續錄製就是 soak，不另開正式窗口：�
 | 10/6 延遲量測收尾後 | VPS 準備（§5）、使用者建立 key 與搬密鑰（§6）、第一次登入，soak 自此開始 |
 | 10/6–10/12 09:30 | soak：連續錄製，除 Task 13 外不碰兩個服務；完成 §11.1 runbook；離線完成 §10 |
 | 10/8 11:00–12:00 | Task 13 |
-| 10/12 09:30 | soak 結束，停止服務；Task 14 log sweep |
-| 10/13 | 上位計畫 Task 15：go/no-go |
+| 10/8 起 | 上位計畫 Task 15：語料、契約文件 §3、ADR-0005 與 go/no-go；結論寫完即成立，不等 soak 結束 |
+| 10/12 09:30 | soak 結束，停止服務；Task 14 log sweep，結果供 P2 參考 |
 
 證交所行事曆：10/9 補假、10/10 與 10/26 休市，已查證。
 
@@ -137,7 +137,7 @@ VPS 端的 systemd unit 與監看腳本放在 `tools/p1-official-server/deploy/`
 
 ### 11.3 Log sweep（Task 14）
 
-範圍：soak 窗口的 server log（`2026-10-06-server/`）與 `recorder.log`、兩個服務的 journald（重啟、OOM）、`watch.jsonl` 的異常類別，以及 10/1–10/5 家用網路的 server log（待歸類的三類與必列的 `not allow` 在其中）。每一類記次數、首末次時間與處置；任何一類說不出原因，P1 即不通過驗收。
+範圍：soak 窗口的 server log（`2026-10-06-server/`）與 `recorder.log`、兩個服務的 journald（重啟、OOM）、`watch.jsonl` 的異常類別，以及 10/1–10/5 家用網路的 server log（待歸類的三類與必列的 `not allow` 在其中）。每一類記次數、首末次時間與處置。說不出原因的類別記為 P2 待辦；log sweep 是 P2 的參考，不回頭改 go/no-go，因為上位設計 §8 的 NO-GO 只看下單路徑，而 Task 13 之後六條 GO 準則都已有答案。
 
 ## 12. 須由使用者執行或核准的步驟
 

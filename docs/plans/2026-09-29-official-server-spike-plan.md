@@ -1076,7 +1076,7 @@ git commit -m "Record multi-client, harness and restart runs"
 - 09:30 `stream` 自動結束；停止官方 server；以 `p1rec stats --sse-run <stream run_id>` 涵蓋整個 soak。對帳只在下單當日做（Task 12、13）：`trades` 是否只回當日委託（§6 C7）尚未確認，跨日對帳可能把前幾日的委託誤報為遺漏。
 - 官方 server log 與全部 `recorder.log` 中的每一類 WARN／ERROR／CRITICAL（依訊息樣板歸類）各記：次數、首末次時間、處置（接受並說明原因，或記為契約發現並寫明對 go/no-go 的影響）；IP 白名單的 `not allow` 為必列類別（設計 §4）。
 - 從 server log 量出 session 過期的實際週期與次數，寫入契約文件，作為 P2 watchdog 依據（設計 §9.2 的 `calibrate:`）。
-- 任何一類說不出原因時，契約文件標明「P1 未通過驗收」並停止。
+- 說不出原因的類別記為 P2 待辦，不標「P1 未通過驗收」，也不改 Task 15 的 go/no-go 結論（設計 §9.3）。
 
 **Verification:**
 
@@ -1103,6 +1103,7 @@ git commit -m "Classify every warning and error class from the soak"
 
 **Behaviour:**
 
+- 前置：Task 13 的重啟與對帳完成即可開始，不等 Task 14 的 log sweep（設計 §9.4）。
 - `fixtures.toml` 為 §6 每個有證據的項目至少挑一筆；`p1rec scrub` 匯出，`--scan-only` 回 0 後才 commit。
 - 契約文件 §3 依 §6 A–G 逐項作答並附 fixture 名稱或 log 行，答不出者標「未知」並寫原因；§1 差距表每列標「相同／可轉換／缺」。
 - 契約文件 §5 依設計 §8 逐條判定 GO 準則 1–6，寫出結論（GO、GO＋P3 或 NO-GO），GO＋P3 時列出缺口清單。

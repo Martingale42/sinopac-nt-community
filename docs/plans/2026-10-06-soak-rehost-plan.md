@@ -399,7 +399,7 @@ git commit -m "Record multi-client, harness and restart runs on the fixed-IP hos
 - 家用主機以 `p1rec stats --sse-run <run_id>` 涵蓋 `20261006T084434Z-stream` 起的每一段 stream run。
 - log sweep 範圍：`2026-10-06-server/server.log`、soak 期間的全部 `recorder.log`、`journalctl -u p1-server -u p1-stream`（重啟、OOM）、`watch.jsonl` 的異常類別，以及 `2026-10-01-server/` 與 `2026-10-04-server/` 的家用 server log。依訊息樣板歸類，每一類記次數、首末次時間與處置；`not allow` 必列。
 - 從 soak 的 server log 量出 session 過期的實際週期與次數，寫入契約文件（P2 watchdog 依據）。
-- 任何一類說不出原因時，契約文件標明「P1 未通過驗收」並停止。
+- 說不出原因的類別記為 P2 待辦（`BACKLOG.md`），不標「P1 未通過驗收」，也不改 go/no-go 結論。
 - 原計畫 Task 12–14 標明由本計畫完成並附 commit。
 - 完成後回報 run ID 與窗口、驗收數字、log sweep 結論、未決問題與 commit。
 
