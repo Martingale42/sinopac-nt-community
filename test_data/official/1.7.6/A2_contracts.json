@@ -1,0 +1,125 @@
+[
+  {
+    "client": "preflight",
+    "op": "contracts_stock",
+    "method": "GET",
+    "url": "http://127.0.0.1:18080/api/v1/data/contracts/00981A/info",
+    "req_body": null,
+    "sent_ts_ns": 1791435226276127388,
+    "recv_ts_ns": 1791435226391868159,
+    "status": 200,
+    "resp_headers": [
+      [
+        "content-type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "vary",
+        "origin"
+      ],
+      [
+        "vary",
+        "access-control-request-method"
+      ],
+      [
+        "vary",
+        "access-control-request-headers"
+      ],
+      [
+        "access-control-expose-headers",
+        "content-type,cache-control"
+      ],
+      [
+        "content-length",
+        "768"
+      ],
+      [
+        "date",
+        "Thu, 08 Oct 2026 04:53:46 GMT"
+      ]
+    ],
+    "resp_body": "{\"security_type\":\"STK\",\"region\":\"TW\",\"exchange\":\"TSE\",\"code\":\"00981A\",\"target_code\":null,\"name\":\"主動統一台股增長\",\"category\":\"00\",\"currency\":\"TWD\",\"unit\":1000.0,\"day_trade\":\"Yes\",\"reference\":32.26,\"limit_up\":35.48,\"limit_down\":29.04,\"margin_trading_balance\":26353,\"short_selling_balance\":3717,\"trading_suspended\":false,\"margin_loan_ratio\":0.6,\"margin_quota_lots\":26353,\"short_margin_ratio\":0.9,\"short_quota_lots\":3717,\"margin_shortable\":true,\"sbl_shortable\":true,\"below_ref_shortable\":true,\"disposition_level\":0,\"attention_flag\":false,\"etf_constituent\":true,\"settlement_type\":\"0\",\"disposition_match_interval_min\":null,\"disposition_max_lots_single_order\":null,\"disposition_max_lots_total_orders\":null,\"disposition_prepay_ratio\":null,\"update_date\":\"2026-10-08\"}"
+  },
+  {
+    "client": "preflight",
+    "op": "contracts_stock",
+    "method": "GET",
+    "url": "http://127.0.0.1:18080/api/v1/data/contracts/2890/info",
+    "req_body": null,
+    "sent_ts_ns": 1791435226392396610,
+    "recv_ts_ns": 1791435226394282250,
+    "status": 200,
+    "resp_headers": [
+      [
+        "content-type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "vary",
+        "origin"
+      ],
+      [
+        "vary",
+        "access-control-request-method"
+      ],
+      [
+        "vary",
+        "access-control-request-headers"
+      ],
+      [
+        "access-control-expose-headers",
+        "content-type,cache-control"
+      ],
+      [
+        "content-length",
+        "747"
+      ],
+      [
+        "date",
+        "Thu, 08 Oct 2026 04:53:46 GMT"
+      ]
+    ],
+    "resp_body": "{\"security_type\":\"STK\",\"region\":\"TW\",\"exchange\":\"TSE\",\"code\":\"2890\",\"target_code\":null,\"name\":\"永豐金\",\"category\":\"17\",\"currency\":\"TWD\",\"unit\":1000.0,\"day_trade\":\"OnlyBuy\",\"reference\":44.65,\"limit_up\":49.1,\"limit_down\":40.2,\"margin_trading_balance\":0,\"short_selling_balance\":0,\"trading_suspended\":false,\"margin_loan_ratio\":null,\"margin_quota_lots\":null,\"short_margin_ratio\":null,\"short_quota_lots\":null,\"margin_shortable\":true,\"sbl_shortable\":true,\"below_ref_shortable\":true,\"disposition_level\":0,\"attention_flag\":false,\"etf_constituent\":true,\"settlement_type\":\"0\",\"disposition_match_interval_min\":null,\"disposition_max_lots_single_order\":null,\"disposition_max_lots_total_orders\":null,\"disposition_prepay_ratio\":null,\"update_date\":\"2026-10-08\"}"
+  },
+  {
+    "client": "preflight",
+    "op": "contracts_futures",
+    "method": "GET",
+    "url": "http://127.0.0.1:18080/api/v1/data/contracts/futures?root=TMF",
+    "req_body": null,
+    "sent_ts_ns": 1791435226394956770,
+    "recv_ts_ns": 1791435226548156304,
+    "status": 200,
+    "resp_headers": [
+      [
+        "content-type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "vary",
+        "origin"
+      ],
+      [
+        "vary",
+        "access-control-request-method"
+      ],
+      [
+        "vary",
+        "access-control-request-headers"
+      ],
+      [
+        "access-control-expose-headers",
+        "content-type,cache-control"
+      ],
+      [
+        "content-length",
+        "5535"
+      ],
+      [
+        "date",
+        "Thu, 08 Oct 2026 04:53:46 GMT"
+      ]
+    ],
+    "resp_body": "[{\"security_type\":\"FUT\",\"region\":\"TW\",\"exchange\":\"TAIFEX\",\"code\":\"TMFJ6\",\"target_code\":null,\"name\":\"微型臺指期貨 202610\",\"root\":\"TMF\",\"delivery_month\":\"202610\",\"delivery_date\":\"2026-10-21\",\"last_trading_date\":\"2026-10-21\",\"begin_date\":\"2026-07-16\",\"underlying_kind\":\"I\",\"underlying_code\":\"IX0001\",\"multiplier\":10.0,\"contract_size\":10.0,\"size_unit\":\"pt\",\"quote_ccy\":\"TWD\",\"tick_basis\":\"fixed\",\"tick_rule\":null,\"tick\":1.0,\"tick_value\":10.0,\"spec_kind\":\"index_fut\",\"decimal_locator\":2,\"dynamic_banding\":true,\"flow_group\":\"1\",\"reference\":49968.0,\"limit_up\":54964.0,\"limit_down\":44972.0,\"limit_up_2\":null,\"limit_down_2\":null,\"limit_up_3\":null,\"limit_down_3\":null,\"update_date\":\"2026-10-08\"},{\"security_type\":\"FUT\",\"region\":\"TW\",\"exchange\":\"TAIFEX\",\"code\":\"TMFR1\",\"target_code\":\"TMFJ6\",\"name\":\"微型臺指期貨 近月\",\"root\":\"TMF\",\"delivery_month\":\"202610\",\"delivery_date\":\"2026-10-21\",\"last_trading_date\":\"2026-10-21\",\"begin_date\":\"2026-07-16\",\"underlying_kind\":\"I\",\"underlying_code\":\"IX0001\",\"multiplier\":10.0,\"contract_size\":10.0,\"size_unit\":\"pt\",\"quote_ccy\":\"TWD\",\"tick_basis\":\"fixed\",\"tick_rule\":null,\"tick\":1.0,\"tick_value\":10.0,\"spec_kind\":\"index_fut\",\"decimal_locator\":2,\"dynamic_banding\":true,\"flow_group\":\"1\",\"reference\":49968.0,\"limit_up\":54964.0,\"limit_down\":44972.0,\"limit_up_2\":null,\"limit_down_2\":null,\"limit_up_3\":null,\"limit_down_3\":null,\"update_date\":\"2026-10-08\"},{\"security_type\":\"FUT\",\"region\":\"TW\",\"exchange\":\"TAIFEX\",\"code\":\"TMFK6\",\"target_code\":null,\"name\":\"微型臺指期貨 202611\",\"root\":\"TMF\",\"delivery_month\":\"202611\",\"delivery_date\":\"2026-11-18\",\"last_trading_date\":\"2026-11-18\",\"begin_date\":\"2026-08-20\",\"underlying_kind\":\"I\",\"underlying_code\":\"IX0001\",\"multiplier\":10.0,\"contract_size\":10.0,\"size_unit\":\"pt\",\"quote_ccy\":\"TWD\",\"tick_basis\":\"fixed\",\"tick_rule\":null,\"tick\":1.0,\"tick_value\":10.0,\"spec_kind\":\"index_fut\",\"decimal_locator\":2,\"dynamic_banding\":true,\"flow_group\":\"1\",\"reference\":50144.0,\"limit_up\":55158.0,\"limit_down\":45130.0,\"limit_up_2\":null,\"limit_down_2\":null,\"limit_up_3\":null,\"limit_down_3\":null,\"update_date\":\"2026-10-08\"},{\"security_type\":\"FUT\",\"region\":\"TW\",\"exchange\":\"TAIFEX\",\"code\":\"TMFR2\",\"target_code\":\"TMFK6\",\"name\":\"微型臺指期貨 次月\",\"root\":\"TMF\",\"delivery_month\":\"202611\",\"delivery_date\":\"2026-11-18\",\"last_trading_date\":\"2026-11-18\",\"begin_date\":\"2026-08-20\",\"underlying_kind\":\"I\",\"underlying_code\":\"IX0001\",\"multiplier\":10.0,\"contract_size\":10.0,\"size_unit\":\"pt\",\"quote_ccy\":\"TWD\",\"tick_basis\":\"fixed\",\"tick_rule\":null,\"tick\":1.0,\"tick_value\":10.0,\"spec_kind\":\"index_fut\",\"decimal_locator\":2,\"dynamic_banding\":true,\"flow_group\":\"1\",\"reference\":50144.0,\"limit_up\":55158.0,\"limit_down\":45130.0,\"limit_up_2\":null,\"limit_down_2\":null,\"limit_up_3\":null,\"limit_down_3\":null,\"update_date\":\"2026-10-08\"},{\"security_type\":\"FUT\",\"region\":\"TW\",\"exchange\":\"TAIFEX\",\"code\":\"TMFL6\",\"target_code\":null,\"name\":\"微型臺指期貨 202612\",\"root\":\"TMF\",\"delivery_month\":\"202612\",\"delivery_date\":\"2026-12-16\",\"last_trading_date\":\"2026-12-16\",\"begin_date\":\"2025-12-18\",\"underlying_kind\":\"I\",\"underlying_code\":\"IX0001\",\"multiplier\":10.0,\"contract_size\":10.0,\"size_unit\":\"pt\",\"quote_ccy\":\"TWD\",\"tick_basis\":\"fixed\",\"tick_rule\":null,\"tick\":1.0,\"tick_value\":10.0,\"spec_kind\":\"index_fut\",\"decimal_locator\":2,\"dynamic_banding\":true,\"flow_group\":\"1\",\"reference\":50321.0,\"limit_up\":55353.0,\"limit_down\":45289.0,\"limit_up_2\":null,\"limit_down_2\":null,\"limit_up_3\":null,\"limit_down_3\":null,\"update_date\":\"2026-10-08\"},{\"security_type\":\"FUT\",\"region\":\"TW\",\"exchange\":\"TAIFEX\",\"code\":\"TMFC7\",\"target_code\":null,\"name\":\"微型臺指期貨 202703\",\"root\":\"TMF\",\"delivery_month\":\"202703\",\"delivery_date\":\"2027-03-17\",\"last_trading_date\":\"2027-03-17\",\"begin_date\":\"2026-03-19\",\"underlying_kind\":\"I\",\"underlying_code\":\"IX0001\",\"multiplier\":10.0,\"contract_size\":10.0,\"size_unit\":\"pt\",\"quote_ccy\":\"TWD\",\"tick_basis\":\"fixed\",\"tick_rule\":null,\"tick\":1.0,\"tick_value\":10.0,\"spec_kind\":\"index_fut\",\"decimal_locator\":2,\"dynamic_banding\":true,\"flow_group\":\"1\",\"reference\":50838.0,\"limit_up\":55921.0,\"limit_down\":45755.0,\"limit_up_2\":null,\"limit_down_2\":null,\"limit_up_3\":null,\"limit_down_3\":null,\"update_date\":\"2026-10-08\"},{\"security_type\":\"FUT\",\"region\":\"TW\",\"exchange\":\"TAIFEX\",\"code\":\"TMFF7\",\"target_code\":null,\"name\":\"微型臺指期貨 202706\",\"root\":\"TMF\",\"delivery_month\":\"202706\",\"delivery_date\":\"2027-06-16\",\"last_trading_date\":\"2027-06-16\",\"begin_date\":\"2026-06-18\",\"underlying_kind\":\"I\",\"underlying_code\":\"IX0001\",\"multiplier\":10.0,\"contract_size\":10.0,\"size_unit\":\"pt\",\"quote_ccy\":\"TWD\",\"tick_basis\":\"fixed\",\"tick_rule\":null,\"tick\":1.0,\"tick_value\":10.0,\"spec_kind\":\"index_fut\",\"decimal_locator\":2,\"dynamic_banding\":true,\"flow_group\":\"1\",\"reference\":51360.0,\"limit_up\":56496.0,\"limit_down\":46224.0,\"limit_up_2\":null,\"limit_down_2\":null,\"limit_up_3\":null,\"limit_down_3\":null,\"update_date\":\"2026-10-08\"},{\"security_type\":\"FUT\",\"region\":\"TW\",\"exchange\":\"TAIFEX\",\"code\":\"TMFI7\",\"target_code\":null,\"name\":\"微型臺指期貨 202709\",\"root\":\"TMF\",\"delivery_month\":\"202709\",\"delivery_date\":\"2027-09-16\",\"last_trading_date\":\"2027-09-16\",\"begin_date\":\"2026-09-17\",\"underlying_kind\":\"I\",\"underlying_code\":\"IX0001\",\"multiplier\":10.0,\"contract_size\":10.0,\"size_unit\":\"pt\",\"quote_ccy\":\"TWD\",\"tick_basis\":\"fixed\",\"tick_rule\":null,\"tick\":1.0,\"tick_value\":10.0,\"spec_kind\":\"index_fut\",\"decimal_locator\":2,\"dynamic_banding\":true,\"flow_group\":\"1\",\"reference\":51433.0,\"limit_up\":56576.0,\"limit_down\":46290.0,\"limit_up_2\":null,\"limit_down_2\":null,\"limit_up_3\":null,\"limit_down_3\":null,\"update_date\":\"2026-10-08\"}]"
+  }
+]

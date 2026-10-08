@@ -1,0 +1,3 @@
+event:bidask_stk
+data:{"code":"2330","date":"2026-10-07","time":"10:00:00.090893","bid_price":["2575","2570","2565","2560","2555"],"bid_volume":[688,600,801,1307,449],"diff_bid_vol":[1,0,0,0,0],"ask_price":["2580","2585","2590","2595","2600"],"ask_volume":[448,669,495,733,1120],"diff_ask_vol":[0,0,0,0,0],"suspend":false,"simtrade":false,"intraday_odd":false}
+

@@ -1,0 +1,8 @@
+[2m2026-10-07T00:28:32.003653Z[0m [32m INFO[0m [2mshioaji::server::maintenance[0m[2m:[0m Starting daily maintenance (attempt 1)
+[2m2026-10-07T00:28:32.675622Z[0m [32m INFO[0m [2mshioaji::api::api_v1::auth::token_login[0m[2m:[0m No cached token available, performing new login
+[2m2026-10-07T00:28:32.892600Z[0m [32m INFO[0m [2mshioaji::api::api_v1::auth::token_login[0m[2m:[0m Stored new token in slot 2
+[2m2026-10-07T00:28:32.941372Z[0m [33m WARN[0m [2mshioaji::server::maintenance[0m[2m:[0m No legacy contracts loaded after client replacement; resolving 24 subscriptions through Contract V2 or stored contract info
+[2m2026-10-07T00:28:33.014387Z[0m [32m INFO[0m [2mshioaji::server::maintenance[0m[2m:[0m Replayed 24 market-data subscriptions
+[2m2026-10-07T00:28:33.310921Z[0m [32m INFO[0m [2mshioaji::server::maintenance[0m[2m:[0m Replayed 2 trade subscriptions
+[2m2026-10-07T00:28:33.310982Z[0m [32m INFO[0m [2mshioaji::server::maintenance[0m[2m:[0m Daily maintenance completed: 0 contracts loaded, token expires at Some(1791419312)
+[2m2026-10-07T00:28:33.311813Z[0m [32m INFO[0m [2mshioaji::server::maintenance[0m[2m:[0m Next daily maintenance at 2026-10-08 08:28:32 (Taiwan time)

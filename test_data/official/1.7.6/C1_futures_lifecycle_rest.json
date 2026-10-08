@@ -1,0 +1,207 @@
+[
+  {
+    "client": "orders",
+    "op": "place_futures",
+    "method": "POST",
+    "url": "http://127.0.0.1:18080/api/v1/order/place_order",
+    "req_body": "{\"contract\":{\"security_type\":\"FUT\",\"exchange\":\"TAIFEX\",\"code\":\"TMFJ6\"},\"futures_order\":{\"action\":\"Buy\",\"price\":47469,\"quantity\":2,\"price_type\":\"LMT\",\"order_type\":\"ROD\",\"octype\":\"Auto\",\"custom_field\":null,\"account\":{\"account_type\":\"F\",\"person_id\":\"PERSON_ID_1\",\"broker_id\":\"F002000\",\"account_id\":\"ACCOUNT_ID_1\",\"signed\":true,\"username\":\"USERNAME_1\"}}}",
+    "sent_ts_ns": 1791435312520455077,
+    "recv_ts_ns": 1791435312710411693,
+    "status": 200,
+    "resp_headers": [
+      [
+        "content-type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "vary",
+        "origin"
+      ],
+      [
+        "vary",
+        "access-control-request-method"
+      ],
+      [
+        "vary",
+        "access-control-request-headers"
+      ],
+      [
+        "access-control-expose-headers",
+        "content-type,cache-control"
+      ],
+      [
+        "content-length",
+        "648"
+      ],
+      [
+        "date",
+        "Thu, 08 Oct 2026 04:55:12 GMT"
+      ]
+    ],
+    "resp_body": "{\"contract\":{\"security_type\":\"FUT\",\"region\":\"TW\",\"exchange\":\"TAIFEX\",\"code\":\"TMFJ6\",\"target_code\":\"\"},\"order\":{\"id\":\"00367C\",\"seqno\":\"00367C\",\"ordno\":\"159063\",\"action\":\"Buy\",\"price\":47469.0,\"quantity\":2,\"order_type\":\"ROD\",\"price_type\":\"LMT\",\"custom_field\":\"\",\"account\":{\"account_type\":\"F\",\"person_id\":\"PERSON_ID_1\",\"broker_id\":\"F002000\",\"account_id\":\"ACCOUNT_ID_1\",\"signed\":true,\"username\":\"USERNAME_1\"},\"ca\":\"\",\"octype\":\"Auto\"},\"status\":{\"id\":\"00367C\",\"status\":\"PendingSubmit\",\"status_code\":\"00\",\"web_id\":\"\",\"order_ts\":1791435312.544344,\"msg\":\"\",\"modified_ts\":0.0,\"modified_price\":0.0,\"order_quantity\":0,\"deal_quantity\":0,\"cancel_quantity\":0,\"deals\":[]}}"
+  },
+  {
+    "client": "orders",
+    "op": "update_price",
+    "method": "POST",
+    "url": "http://127.0.0.1:18080/api/v1/order/update_price",
+    "req_body": "{\"trade_id\":\"00367C\",\"price\":47470}",
+    "sent_ts_ns": 1791435313712800872,
+    "recv_ts_ns": 1791435314958279131,
+    "status": 200,
+    "resp_headers": [
+      [
+        "content-type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "vary",
+        "origin"
+      ],
+      [
+        "vary",
+        "access-control-request-method"
+      ],
+      [
+        "vary",
+        "access-control-request-headers"
+      ],
+      [
+        "access-control-expose-headers",
+        "content-type,cache-control"
+      ],
+      [
+        "content-length",
+        "644"
+      ],
+      [
+        "date",
+        "Thu, 08 Oct 2026 04:55:14 GMT"
+      ]
+    ],
+    "resp_body": "{\"contract\":{\"security_type\":\"FUT\",\"region\":\"TW\",\"exchange\":\"TAIFEX\",\"code\":\"TMFJ6\",\"target_code\":\"\"},\"order\":{\"id\":\"00367C\",\"seqno\":\"00367C\",\"ordno\":\"159063\",\"action\":\"Buy\",\"price\":47469.0,\"quantity\":2,\"order_type\":\"ROD\",\"price_type\":\"LMT\",\"custom_field\":\"\",\"account\":{\"account_type\":\"F\",\"person_id\":\"PERSON_ID_1\",\"broker_id\":\"F002000\",\"account_id\":\"ACCOUNT_ID_1\",\"signed\":true,\"username\":\"USERNAME_1\"},\"ca\":\"\",\"octype\":\"Auto\"},\"status\":{\"id\":\"00367C\",\"status\":\"Submitted\",\"status_code\":\"00\",\"web_id\":\"\",\"order_ts\":1791435312.544344,\"msg\":\"\",\"modified_ts\":0.0,\"modified_price\":0.0,\"order_quantity\":0,\"deal_quantity\":0,\"cancel_quantity\":0,\"deals\":[]}}"
+  },
+  {
+    "client": "orders",
+    "op": "update_qty",
+    "method": "POST",
+    "url": "http://127.0.0.1:18080/api/v1/order/update_qty",
+    "req_body": "{\"trade_id\":\"00367C\",\"quantity\":1}",
+    "sent_ts_ns": 1791435315960656579,
+    "recv_ts_ns": 1791435316104911848,
+    "status": 200,
+    "resp_headers": [
+      [
+        "content-type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "vary",
+        "origin"
+      ],
+      [
+        "vary",
+        "access-control-request-method"
+      ],
+      [
+        "vary",
+        "access-control-request-headers"
+      ],
+      [
+        "access-control-expose-headers",
+        "content-type,cache-control"
+      ],
+      [
+        "content-length",
+        "662"
+      ],
+      [
+        "date",
+        "Thu, 08 Oct 2026 04:55:16 GMT"
+      ]
+    ],
+    "resp_body": "{\"contract\":{\"security_type\":\"FUT\",\"region\":\"TW\",\"exchange\":\"TAIFEX\",\"code\":\"TMFJ6\",\"target_code\":\"\"},\"order\":{\"id\":\"00367C\",\"seqno\":\"00367C\",\"ordno\":\"159063\",\"action\":\"Buy\",\"price\":47469.0,\"quantity\":2,\"order_type\":\"ROD\",\"price_type\":\"LMT\",\"custom_field\":\"\",\"account\":{\"account_type\":\"F\",\"person_id\":\"PERSON_ID_1\",\"broker_id\":\"F002000\",\"account_id\":\"ACCOUNT_ID_1\",\"signed\":true,\"username\":\"USERNAME_1\"},\"ca\":\"\",\"octype\":\"Auto\"},\"status\":{\"id\":\"00367C\",\"status\":\"Submitted\",\"status_code\":\"00\",\"web_id\":\"\",\"order_ts\":1791435312.544344,\"msg\":\"\",\"modified_ts\":1791435314.949439,\"modified_price\":47470.0,\"order_quantity\":0,\"deal_quantity\":0,\"cancel_quantity\":0,\"deals\":[]}}"
+  },
+  {
+    "client": "orders",
+    "op": "cancel",
+    "method": "POST",
+    "url": "http://127.0.0.1:18080/api/v1/order/cancel_order",
+    "req_body": "{\"trade_id\":\"00367C\"}",
+    "sent_ts_ns": 1791435317107383307,
+    "recv_ts_ns": 1791435317152630083,
+    "status": 200,
+    "resp_headers": [
+      [
+        "content-type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "vary",
+        "origin"
+      ],
+      [
+        "vary",
+        "access-control-request-method"
+      ],
+      [
+        "vary",
+        "access-control-request-headers"
+      ],
+      [
+        "access-control-expose-headers",
+        "content-type,cache-control"
+      ],
+      [
+        "content-length",
+        "662"
+      ],
+      [
+        "date",
+        "Thu, 08 Oct 2026 04:55:17 GMT"
+      ]
+    ],
+    "resp_body": "{\"contract\":{\"security_type\":\"FUT\",\"region\":\"TW\",\"exchange\":\"TAIFEX\",\"code\":\"TMFJ6\",\"target_code\":\"\"},\"order\":{\"id\":\"00367C\",\"seqno\":\"00367C\",\"ordno\":\"159063\",\"action\":\"Buy\",\"price\":47469.0,\"quantity\":2,\"order_type\":\"ROD\",\"price_type\":\"LMT\",\"custom_field\":\"\",\"account\":{\"account_type\":\"F\",\"person_id\":\"PERSON_ID_1\",\"broker_id\":\"F002000\",\"account_id\":\"ACCOUNT_ID_1\",\"signed\":true,\"username\":\"USERNAME_1\"},\"ca\":\"\",\"octype\":\"Auto\"},\"status\":{\"id\":\"00367C\",\"status\":\"Submitted\",\"status_code\":\"00\",\"web_id\":\"\",\"order_ts\":1791435312.544344,\"msg\":\"\",\"modified_ts\":1791435314.949439,\"modified_price\":47470.0,\"order_quantity\":0,\"deal_quantity\":0,\"cancel_quantity\":1,\"deals\":[]}}"
+  },
+  {
+    "client": "orders",
+    "op": "trades",
+    "method": "POST",
+    "url": "http://127.0.0.1:18080/api/v1/order/trades",
+    "req_body": "{\"account_type\":\"F\",\"broker_id\":\"F002000\",\"account_id\":\"ACCOUNT_ID_1\",\"person_id\":\"PERSON_ID_1\",\"refresh\":true}",
+    "sent_ts_ns": 1791435319153570740,
+    "recv_ts_ns": 1791435320289137421,
+    "status": 200,
+    "resp_headers": [
+      [
+        "content-type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "vary",
+        "origin"
+      ],
+      [
+        "vary",
+        "access-control-request-method"
+      ],
+      [
+        "vary",
+        "access-control-request-headers"
+      ],
+      [
+        "access-control-expose-headers",
+        "content-type,cache-control"
+      ],
+      [
+        "content-length",
+        "664"
+      ],
+      [
+        "date",
+        "Thu, 08 Oct 2026 04:55:20 GMT"
+      ]
+    ],
+    "resp_body": "[{\"contract\":{\"security_type\":\"FUT\",\"region\":\"TW\",\"exchange\":\"TAIFEX\",\"code\":\"TMFJ6\",\"target_code\":\"\"},\"order\":{\"id\":\"00367C\",\"seqno\":\"00367C\",\"ordno\":\"159063\",\"action\":\"Buy\",\"price\":47469.0,\"quantity\":2,\"order_type\":\"ROD\",\"price_type\":\"LMT\",\"custom_field\":\"\",\"account\":{\"account_type\":\"F\",\"person_id\":\"PERSON_ID_1\",\"broker_id\":\"F002000\",\"account_id\":\"ACCOUNT_ID_1\",\"signed\":true,\"username\":\"USERNAME_1\"},\"ca\":\"\",\"octype\":\"Auto\"},\"status\":{\"id\":\"00367C\",\"status\":\"Cancelled\",\"status_code\":\"00\",\"web_id\":\"\",\"order_ts\":1791435312.544344,\"msg\":\"\",\"modified_ts\":1791435317.137436,\"modified_price\":47470.0,\"order_quantity\":2,\"deal_quantity\":0,\"cancel_quantity\":2,\"deals\":[]}}]"
+  }
+]

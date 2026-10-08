@@ -1,0 +1,43 @@
+[
+  {
+    "client": "preflight",
+    "op": "ca_status",
+    "method": "GET",
+    "url": "http://127.0.0.1:18080/api/v1/auth/ca_expiretime?person_id=PERSON_ID_1",
+    "req_body": null,
+    "sent_ts_ns": 1791435226271052375,
+    "recv_ts_ns": 1791435226275729203,
+    "status": 200,
+    "resp_headers": [
+      [
+        "content-type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "vary",
+        "origin"
+      ],
+      [
+        "vary",
+        "access-control-request-method"
+      ],
+      [
+        "vary",
+        "access-control-request-headers"
+      ],
+      [
+        "access-control-expose-headers",
+        "content-type,cache-control"
+      ],
+      [
+        "content-length",
+        "62"
+      ],
+      [
+        "date",
+        "Thu, 08 Oct 2026 04:53:46 GMT"
+      ]
+    ],
+    "resp_body": "{\"person_id\":\"PERSON_ID_1\",\"expire_time\":\"2028-03-06T15:59:59\"}"
+  }
+]

@@ -1,0 +1,12 @@
+[2m2026-10-08T04:55:46.708856Z[0m [32m INFO[0m [2mshioaji::cli::common[0m[2m:[0m Received terminate signal
+[2m2026-10-08T04:55:46.708893Z[0m [32m INFO[0m [2mshioaji::cli::server[0m[2m:[0m Shutting down server...
+[2m2026-10-08T04:55:46.726908Z[0m [32m INFO[0m [2mshioaji::cli::server[0m[2m:[0m Server shut down gracefully
+[2m2026-10-08T04:55:47.222721Z[0m [32m INFO[0m [2mshioaji::cli::server[0m[2m:[0m Starting Shioaji API Server...
+[2m2026-10-08T04:55:47.222862Z[0m [32m INFO[0m [2mshioaji::cli::server[0m[2m:[0m Simulation mode: enabled
+[2m2026-10-08T04:55:47.524320Z[0m [32m INFO[0m [2mshioaji::api::api_v1::auth::token_login[0m[2m:[0m Found cached token from slot 1, verifying...
+[2m2026-10-08T04:55:47.539137Z[0m [32m INFO[0m [2mshioaji::api::api_v1::auth::token_login[0m[2m:[0m Cached token is valid, using it
+[2m2026-10-08T04:55:47.543204Z[0m [32m INFO[0m [2mshioaji::server[0m[2m:[0m CA certificate activated successfully
+[2m2026-10-08T04:55:47.543254Z[0m [32m INFO[0m [2mshioaji::server[0m[2m:[0m CA certificate expires on 2028-03-06T15:59:59 (515 days left)
+[2m2026-10-08T04:55:47.547182Z[0m [32m INFO[0m [2mshioaji::cli::server[0m[2m:[0m Successfully authenticated with Shioaji API
+[2m2026-10-08T04:55:47.547209Z[0m [32m INFO[0m [2mshioaji::server::maintenance[0m[2m:[0m Daily maintenance scheduled in window 08:12-08:30 with jitter offset 992s (target: 08:28:32)
+[2m2026-10-08T04:55:47.547254Z[0m [32m INFO[0m [2mshioaji::server::maintenance[0m[2m:[0m Next daily maintenance at 2026-10-09 08:28:32 (Taiwan time)

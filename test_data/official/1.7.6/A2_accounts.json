@@ -1,0 +1,43 @@
+[
+  {
+    "client": "preflight",
+    "op": "accounts",
+    "method": "GET",
+    "url": "http://127.0.0.1:18080/api/v1/auth/accounts",
+    "req_body": null,
+    "sent_ts_ns": 1791435226222215708,
+    "recv_ts_ns": 1791435226224438917,
+    "status": 200,
+    "resp_headers": [
+      [
+        "content-type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "vary",
+        "origin"
+      ],
+      [
+        "vary",
+        "access-control-request-method"
+      ],
+      [
+        "vary",
+        "access-control-request-headers"
+      ],
+      [
+        "access-control-expose-headers",
+        "content-type,cache-control"
+      ],
+      [
+        "content-length",
+        "381"
+      ],
+      [
+        "date",
+        "Thu, 08 Oct 2026 04:53:46 GMT"
+      ]
+    ],
+    "resp_body": "[{\"account_type\":\"F\",\"person_id\":\"PERSON_ID_1\",\"broker_id\":\"F002000\",\"account_id\":\"ACCOUNT_ID_1\",\"signed\":true,\"username\":\"USERNAME_1\"},{\"account_type\":\"S\",\"person_id\":\"PERSON_ID_1\",\"broker_id\":\"9A9N\",\"account_id\":\"ACCOUNT_ID_2\",\"signed\":true,\"username\":\"USERNAME_1\"},{\"account_type\":\"H\",\"person_id\":\"PERSON_ID_1\",\"broker_id\":\"9A9N\",\"account_id\":\"ACCOUNT_ID_3\",\"signed\":false,\"username\":\"USERNAME_1\"}]"
+  }
+]

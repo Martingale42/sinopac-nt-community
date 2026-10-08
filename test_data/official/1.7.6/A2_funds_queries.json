@@ -1,0 +1,125 @@
+[
+  {
+    "client": "preflight",
+    "op": "trading_limits",
+    "method": "POST",
+    "url": "http://127.0.0.1:18080/api/v1/portfolio/trading_limits",
+    "req_body": "{\"account_type\":\"S\",\"broker_id\":\"9A9N\",\"account_id\":\"ACCOUNT_ID_2\",\"person_id\":\"PERSON_ID_1\"}",
+    "sent_ts_ns": 1791435226225626741,
+    "recv_ts_ns": 1791435226246114440,
+    "status": 200,
+    "resp_headers": [
+      [
+        "content-type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "vary",
+        "origin"
+      ],
+      [
+        "vary",
+        "access-control-request-method"
+      ],
+      [
+        "vary",
+        "access-control-request-headers"
+      ],
+      [
+        "access-control-expose-headers",
+        "content-type,cache-control"
+      ],
+      [
+        "content-length",
+        "163"
+      ],
+      [
+        "date",
+        "Thu, 08 Oct 2026 04:53:46 GMT"
+      ]
+    ],
+    "resp_body": "{\"trading_limit\":0,\"trading_used\":0,\"trading_available\":0,\"margin_limit\":0,\"margin_used\":0,\"margin_available\":0,\"short_limit\":0,\"short_used\":0,\"short_available\":0}"
+  },
+  {
+    "client": "preflight",
+    "op": "balance",
+    "method": "POST",
+    "url": "http://127.0.0.1:18080/api/v1/portfolio/account_balance",
+    "req_body": "{\"account_type\":\"S\",\"broker_id\":\"9A9N\",\"account_id\":\"ACCOUNT_ID_2\",\"person_id\":\"PERSON_ID_1\"}",
+    "sent_ts_ns": 1791435226246618559,
+    "recv_ts_ns": 1791435226247594717,
+    "status": 200,
+    "resp_headers": [
+      [
+        "content-type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "vary",
+        "origin"
+      ],
+      [
+        "vary",
+        "access-control-request-method"
+      ],
+      [
+        "vary",
+        "access-control-request-headers"
+      ],
+      [
+        "access-control-expose-headers",
+        "content-type,cache-control"
+      ],
+      [
+        "content-length",
+        "41"
+      ],
+      [
+        "date",
+        "Thu, 08 Oct 2026 04:53:46 GMT"
+      ]
+    ],
+    "resp_body": "{\"acc_balance\":0.0,\"date\":\"\",\"errmsg\":\"\"}"
+  },
+  {
+    "client": "preflight",
+    "op": "margin",
+    "method": "POST",
+    "url": "http://127.0.0.1:18080/api/v1/portfolio/margin",
+    "req_body": "{\"account_type\":\"F\",\"broker_id\":\"F002000\",\"account_id\":\"ACCOUNT_ID_1\",\"person_id\":\"PERSON_ID_1\"}",
+    "sent_ts_ns": 1791435226247958397,
+    "recv_ts_ns": 1791435226248704639,
+    "status": 200,
+    "resp_headers": [
+      [
+        "content-type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "vary",
+        "origin"
+      ],
+      [
+        "vary",
+        "access-control-request-method"
+      ],
+      [
+        "vary",
+        "access-control-request-headers"
+      ],
+      [
+        "access-control-expose-headers",
+        "content-type,cache-control"
+      ],
+      [
+        "content-length",
+        "613"
+      ],
+      [
+        "date",
+        "Thu, 08 Oct 2026 04:53:46 GMT"
+      ]
+    ],
+    "resp_body": "{\"yesterday_balance\":0.0,\"today_balance\":0.0,\"deposit_withdrawal\":0.0,\"fee\":0.0,\"tax\":0.0,\"initial_margin\":0.0,\"maintenance_margin\":0.0,\"margin_call\":0.0,\"risk_indicator\":0.0,\"royalty_revenue_expenditure\":0.0,\"equity\":0.0,\"equity_amount\":0.0,\"option_openbuy_market_value\":0.0,\"option_opensell_market_value\":0.0,\"option_open_position\":0.0,\"option_settle_profitloss\":0.0,\"future_open_position\":0.0,\"today_future_open_position\":0.0,\"future_settle_profitloss\":0.0,\"available_margin\":0.0,\"plus_margin\":0.0,\"plus_margin_indicator\":0.0,\"security_collateral_amount\":0.0,\"order_margin_premium\":0.0,\"collateral_amount\":0.0}"
+  }
+]

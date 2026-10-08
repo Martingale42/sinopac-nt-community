@@ -1,0 +1,43 @@
+[
+  {
+    "client": "orders",
+    "op": "place_stock",
+    "method": "POST",
+    "url": "http://127.0.0.1:18080/api/v1/order/place_order",
+    "req_body": "{\"contract\":{\"security_type\":\"STK\",\"exchange\":\"TSE\",\"code\":\"00981A\"},\"stock_order\":{\"action\":\"Buy\",\"price\":33.59,\"quantity\":1,\"price_type\":\"MKP\",\"order_type\":\"ROD\",\"order_lot\":\"IntradayOdd\",\"custom_field\":null,\"account\":{\"account_type\":\"S\",\"person_id\":\"PERSON_ID_1\",\"broker_id\":\"9A9N\",\"account_id\":\"ACCOUNT_ID_2\",\"signed\":true,\"username\":\"USERNAME_1\"}}}",
+    "sent_ts_ns": 1790829230666550294,
+    "recv_ts_ns": 1790829230667038422,
+    "status": 400,
+    "resp_headers": [
+      [
+        "vary",
+        "origin"
+      ],
+      [
+        "vary",
+        "access-control-request-method"
+      ],
+      [
+        "vary",
+        "access-control-request-headers"
+      ],
+      [
+        "access-control-expose-headers",
+        "content-type,cache-control"
+      ],
+      [
+        "content-type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "content-length",
+        "62"
+      ],
+      [
+        "date",
+        "Thu, 01 Oct 2026 04:33:50 GMT"
+      ]
+    ],
+    "resp_body": "{\"code\":400,\"message\":\"parse http data failed\",\"details\":null}"
+  }
+]

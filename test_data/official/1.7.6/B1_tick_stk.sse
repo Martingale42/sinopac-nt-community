@@ -1,0 +1,3 @@
+event:tick_stk
+data:{"code":"2330","date":"2026-10-07","time":"10:00:02.837876","open":"2565","avg_price":"2569.85","close":"2580","high":"2580","low":"2560","amount":"2580000","total_amount":"13964610000","volume":1,"total_volume":5434,"tick_type":1,"chg_type":4,"price_chg":"-5","pct_chg":"-0.19","bid_side_total_vol":1689,"ask_side_total_vol":3745,"bid_side_total_cnt":629,"ask_side_total_cnt":496,"closing_oddlot_shares":0,"closing_oddlot_close":null,"closing_oddlot_amount":"0","closing_oddlot_bid_price":null,"closing_oddlot_ask_price":null,"fixed_trade_vol":0,"fixed_trade_amount":"0","suspend":false,"simtrade":false,"intraday_odd":false}
+

@@ -1,0 +1,71 @@
+  "sse_run": "20261001T040917Z-stream",
+    "sse_a_data.jsonl": {
+      "client": "a",
+      "stream": "data",
+      "frames": 284836,
+      "event_counts": {
+        "bidask_fop": 158308,
+        "bidask_stk": 69800,
+        "heartbeat": 265,
+        "order_event": 87,
+        "tick_fop": 43890,
+        "tick_stk": 12486
+      },
+      "peak_seconds": [
+        {
+          "second": "2026-10-01T05:04:47Z",
+          "frames": 859
+        },
+        {
+          "second": "2026-10-01T05:04:48Z",
+          "frames": 602
+        },
+        {
+          "second": "2026-10-01T04:37:32Z",
+          "frames": 542
+        },
+        {
+          "second": "2026-10-01T05:29:07Z",
+          "frames": 481
+        },
+        {
+          "second": "2026-10-01T05:00:11Z",
+          "frames": 446
+        },
+        {
+          "second": "2026-10-01T05:19:35Z",
+          "frames": 440
+        },
+        {
+          "second": "2026-10-01T04:37:31Z",
+          "frames": 421
+        },
+        {
+          "second": "2026-10-01T05:00:10Z",
+          "frames": 386
+        },
+        {
+          "second": "2026-10-01T04:59:43Z",
+          "frames": 378
+        },
+        {
+          "second": "2026-10-01T05:00:00Z",
+          "frames": 305
+        }
+      ],
+      "heartbeat_interval_s": {
+        "n": 264,
+        "min": 29.993169534,
+        "median": 29.9999810265,
+        "max": 30.007818103
+      },
+      "gaps": [],
+      "outages": [],
+      "latency_s": {
+        "n": 284314,
+        "p50": 0.021799435,
+        "p99": 0.132655635,
+        "max": 0.241200294,
+        "unparsable": 170
+      }
+    },

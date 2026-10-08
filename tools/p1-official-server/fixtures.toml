@@ -9,15 +9,475 @@
 #   run_id      run directory under results/p1/
 #   source      file in that run directory
 #   lines       1-based line numbers in source, in output order
-#   checklist   measurement checklist items the fixture is evidence for
+#   checklist   measurement checklist items the fixture is evidence for,
+#               named as in docs/official-server-contract.md section 3
 #   instrument  instrument code, or "" when none applies
 #   recorded_at optional date-time with a UTC offset, required only when
 #               the first selected line carries no timestamp of its own
 #
-# [[fixture]]
-# name = "B1_tick_fop"
-# run_id = "20261001T000000Z-stream"
-# source = "sse_a_tick_fop.jsonl"
-# lines = [3, 4]
-# checklist = ["B1"]
-# instrument = "TMFJ6"
+# Server log lines that carry an IP address, the API key prefix or an
+# account number are left out, so a log fixture can skip lines in between.
+
+# A. Contract mapping; A1's specification is openapi.json beside the fixtures
+
+[[fixture]]
+name = "A2_info"
+run_id = "20261008T045346Z-preflight"
+source = "rest.jsonl"
+lines = [1]
+checklist = ["A1", "A2", "F2", "F5"]
+instrument = ""
+
+[[fixture]]
+name = "A2_accounts"
+run_id = "20261008T045346Z-preflight"
+source = "rest.jsonl"
+lines = [2]
+checklist = ["A2"]
+instrument = ""
+
+[[fixture]]
+name = "A2_funds_queries"
+run_id = "20261008T045346Z-preflight"
+source = "rest.jsonl"
+lines = [3, 4, 5]
+checklist = ["A2", "C6"]
+instrument = ""
+
+[[fixture]]
+name = "A2_contracts"
+run_id = "20261008T045346Z-preflight"
+source = "rest.jsonl"
+lines = [8, 9, 10]
+checklist = ["A2"]
+instrument = ""
+
+# B. Market data
+
+[[fixture]]
+name = "B1_stream_subscribe"
+run_id = "20261006T084434Z-stream"
+source = "rest.jsonl"
+lines = [5, 6]
+checklist = ["B1"]
+instrument = "2330"
+
+[[fixture]]
+name = "B1_heartbeats"
+run_id = "20261006T084434Z-stream"
+source = "sse_a_data.jsonl"
+lines = [1084304, 1086119, 1088398]
+checklist = ["B1", "B2"]
+instrument = ""
+
+[[fixture]]
+name = "B1_tick_stk"
+run_id = "20261006T084434Z-stream"
+source = "sse_a_data.jsonl"
+lines = [1084233]
+checklist = ["B1"]
+instrument = "2330"
+
+[[fixture]]
+name = "B1_tick_fop"
+run_id = "20261006T084434Z-stream"
+source = "sse_a_data.jsonl"
+lines = [1084029]
+checklist = ["B1"]
+instrument = "TXFJ6"
+
+[[fixture]]
+name = "B3_bidask_stk"
+run_id = "20261006T084434Z-stream"
+source = "sse_a_data.jsonl"
+lines = [1084019]
+checklist = ["B3"]
+instrument = "2330"
+
+[[fixture]]
+name = "B3_bidask_fop"
+run_id = "20261006T084434Z-stream"
+source = "sse_a_data.jsonl"
+lines = [1084015]
+checklist = ["B3"]
+instrument = "TXFJ6"
+
+# The last simulated-match tick before the open, then the first regular one
+[[fixture]]
+name = "B4_simtrade_stk"
+run_id = "20261006T084434Z-stream"
+source = "sse_a_data.jsonl"
+lines = [833988, 834889]
+checklist = ["B4"]
+instrument = "2330"
+
+[[fixture]]
+name = "B4_simtrade_fop"
+run_id = "20261006T084434Z-stream"
+source = "sse_a_data.jsonl"
+lines = [786511, 786527]
+checklist = ["B4"]
+instrument = "TXFJ6"
+
+[[fixture]]
+name = "B5_odd_lot_quotes"
+run_id = "20261006T084434Z-stream"
+source = "sse_a_data.jsonl"
+lines = [891908, 891909]
+checklist = ["B5"]
+instrument = "00981A"
+
+[[fixture]]
+name = "B5_night_session_quotes"
+run_id = "20261006T084434Z-stream"
+source = "sse_a_data.jsonl"
+lines = [2212316, 2212318]
+checklist = ["B5"]
+instrument = "TMFJ6"
+
+# p1rec stats output for client a's data stream, a file without timestamps of
+# its own
+[[fixture]]
+name = "B6_data_stream_stats"
+run_id = "20261001T062126Z-stats"
+source = "stats.json"
+lines = [
+  2, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111,
+  112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129,
+  130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147,
+  148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162,
+]
+checklist = ["B1", "B6"]
+instrument = ""
+recorded_at = 2026-10-01T06:21:26Z
+
+# C. Orders and fills
+
+[[fixture]]
+name = "C1_stock_lifecycle_rest"
+run_id = "20261001T042052Z-orders-lifecycle2"
+source = "rest.jsonl"
+lines = [4, 6, 8, 10, 11]
+checklist = ["C1", "C3", "F4"]
+instrument = "2890"
+
+[[fixture]]
+name = "C1_stock_lifecycle_events"
+run_id = "20261001T040917Z-stream"
+source = "sse_a_order_event.jsonl"
+lines = [27, 28, 29, 30]
+checklist = ["C1", "C3"]
+instrument = "2890"
+
+[[fixture]]
+name = "C1_futures_lifecycle_rest"
+run_id = "20261008T045512Z-orders-pre-restart"
+source = "rest.jsonl"
+lines = [4, 6, 8, 10, 11]
+checklist = ["C1", "C3"]
+instrument = "TMFJ6"
+
+[[fixture]]
+name = "C1_futures_lifecycle_events"
+run_id = "20261006T084434Z-stream"
+source = "sse_a_order_event.jsonl"
+lines = [5304, 5305, 5306, 5307]
+checklist = ["C1", "D1"]
+instrument = "TMFJ6"
+
+# A fill whose deal event arrived before the order's New event
+[[fixture]]
+name = "C1_deal_before_new_events"
+run_id = "20261001T040917Z-stream"
+source = "sse_a_order_event.jsonl"
+lines = [113, 114]
+checklist = ["C1", "C3"]
+instrument = "TMFJ6"
+
+[[fixture]]
+name = "C2_price_limit_reject_event"
+run_id = "20261001T040917Z-stream"
+source = "sse_a_order_event.jsonl"
+lines = [18]
+checklist = ["C2"]
+instrument = "2890"
+
+[[fixture]]
+name = "C2_odd_lot_tick_reject_event"
+run_id = "20261001T040917Z-stream"
+source = "sse_a_order_event.jsonl"
+lines = [41]
+checklist = ["C2"]
+instrument = "00981A"
+
+[[fixture]]
+name = "C2_stock_mkp_rejected"
+run_id = "20261001T043017Z-orders-day1b"
+source = "rest.jsonl"
+lines = [194]
+checklist = ["C2"]
+instrument = "2890"
+
+[[fixture]]
+name = "C2_odd_lot_mkp_rejected"
+run_id = "20261001T043017Z-orders-day1b"
+source = "rest.jsonl"
+lines = [245]
+checklist = ["C2"]
+instrument = "00981A"
+
+[[fixture]]
+name = "C2_stock_mkt_ioc_fill_events"
+run_id = "20261001T040917Z-stream"
+source = "sse_a_order_event.jsonl"
+lines = [91, 92]
+checklist = ["C2", "C5"]
+instrument = "2890"
+
+[[fixture]]
+name = "C2_futures_mkp_rod_fill_events"
+run_id = "20261001T040917Z-stream"
+source = "sse_a_order_event.jsonl"
+lines = [125, 126]
+checklist = ["C2"]
+instrument = "TMFJ6"
+
+[[fixture]]
+name = "C3_futures_fill_rest"
+run_id = "20261008T045512Z-orders-pre-restart"
+source = "rest.jsonl"
+lines = [15, 16]
+checklist = ["C2", "C3"]
+instrument = "TMFJ6"
+
+[[fixture]]
+name = "C3_futures_fill_events"
+run_id = "20261006T084434Z-stream"
+source = "sse_a_order_event.jsonl"
+lines = [5308, 5309]
+checklist = ["C3", "D1"]
+instrument = "TMFJ6"
+
+[[fixture]]
+name = "C4_custom_field_rest"
+run_id = "20261001T042143Z-orders-day1"
+source = "rest.jsonl"
+lines = [299, 306]
+checklist = ["C4"]
+instrument = "2890"
+
+[[fixture]]
+name = "C4_custom_field_events"
+run_id = "20261001T040917Z-stream"
+source = "sse_a_order_event.jsonl"
+lines = [60, 61]
+checklist = ["C4"]
+instrument = "2890"
+
+[[fixture]]
+name = "C5_board_lot_deal_events"
+run_id = "20261001T040917Z-stream"
+source = "sse_a_order_event.jsonl"
+lines = [88, 89]
+checklist = ["C5"]
+instrument = "2890"
+
+[[fixture]]
+name = "C5_odd_lot_deal_events"
+run_id = "20261001T040917Z-stream"
+source = "sse_a_order_event.jsonl"
+lines = [102, 103]
+checklist = ["C5"]
+instrument = "00981A"
+
+# Unfilled IOC and FOK orders that stayed open until the cleanup run
+# cancelled them
+[[fixture]]
+name = "C6_ioc_fok_resting_events"
+run_id = "20261001T040917Z-stream"
+source = "sse_a_order_event.jsonl"
+lines = [35, 38, 70, 71]
+checklist = ["C6"]
+instrument = "2890"
+
+[[fixture]]
+name = "C6_ioc_resting_rest"
+run_id = "20261001T042143Z-orders-day1"
+source = "rest.jsonl"
+lines = [11, 67]
+checklist = ["C6"]
+instrument = "2890"
+
+[[fixture]]
+name = "C7_trades_after_restart"
+run_id = "20261008T045600Z-reconcile"
+source = "rest.jsonl"
+lines = [3, 4]
+checklist = ["C7"]
+instrument = "TMFJ6"
+
+# D. Multiple clients; client a's side of D1 is in C1_futures_lifecycle_events
+# and C3_futures_fill_events
+
+[[fixture]]
+name = "D1_client_b_order_events"
+run_id = "20261006T084434Z-stream"
+source = "sse_b_order_event.jsonl"
+lines = [5304, 5305, 5306, 5307, 5308, 5309]
+checklist = ["D1"]
+instrument = "TMFJ6"
+
+[[fixture]]
+name = "D2_unsubscribe_2330_tick"
+run_id = "20261001T040917Z-stream"
+source = "rest.jsonl"
+lines = [55]
+checklist = ["D2"]
+instrument = "2330"
+
+# Each client's last 2330 tick before the unsubscribe, then its next 2330
+# quote, a bidask
+[[fixture]]
+name = "D2_client_a_2330_quotes"
+run_id = "20261001T040917Z-stream"
+source = "sse_a_data.jsonl"
+lines = [2138320, 2139917]
+checklist = ["D2"]
+instrument = "2330"
+
+[[fixture]]
+name = "D2_client_b_2330_quotes"
+run_id = "20261001T040917Z-stream"
+source = "sse_b_data.jsonl"
+lines = [2138320, 2139917]
+checklist = ["D2"]
+instrument = "2330"
+
+# E. Resilience
+
+[[fixture]]
+name = "E1_restart_server_log"
+run_id = "2026-10-06-server"
+source = "server.log"
+lines = [910, 911, 912, 913, 914, 915, 916, 918, 919, 920, 921, 922]
+checklist = ["E1", "F4"]
+instrument = ""
+
+[[fixture]]
+name = "E1_restart_recorder_log"
+run_id = "20261006T084434Z-stream"
+source = "recorder.log"
+lines = [13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]
+checklist = ["E1"]
+instrument = ""
+
+[[fixture]]
+name = "E1_heartbeats_across_restart"
+run_id = "20261006T084434Z-stream"
+source = "sse_a_order_event.jsonl"
+lines = [5312, 5315, 5316]
+checklist = ["E1", "B2"]
+instrument = ""
+
+[[fixture]]
+name = "E1_resend_after_restart"
+run_id = "20261006T084434Z-stream"
+source = "rest.jsonl"
+lines = [81, 83]
+checklist = ["E1"]
+instrument = ""
+
+[[fixture]]
+name = "E2_daily_maintenance_log"
+run_id = "2026-10-06-server"
+source = "server.log"
+lines = [308, 309, 310, 317, 329, 330, 331, 332]
+checklist = ["E2"]
+instrument = ""
+
+# The retry schedule only, since each failure line quotes the egress IP and
+# the API key prefix
+[[fixture]]
+name = "E2_relogin_refused_log"
+run_id = "2026-10-04-server"
+source = "server.log"
+lines = [270, 275, 276, 279, 487, 488]
+checklist = ["E2"]
+instrument = ""
+
+[[fixture]]
+name = "E2_trade_subscribe_after_expiry"
+run_id = "20261003T205132Z-stream"
+source = "rest.jsonl"
+lines = [55, 56]
+checklist = ["E2"]
+instrument = ""
+
+[[fixture]]
+name = "E3_contract_events"
+run_id = "20261006T084434Z-stream"
+source = "sse_a_contract_event.jsonl"
+lines = [2544, 4687, 4688, 4690]
+checklist = ["E3"]
+instrument = ""
+
+# F. Limits and permissions
+
+[[fixture]]
+name = "F2_harness_all_refused_log"
+run_id = "2026-10-08-harness-server"
+source = "server.log"
+lines = [1, 2, 11, 12]
+checklist = ["F2"]
+instrument = ""
+
+[[fixture]]
+name = "F5_http_auth_log"
+run_id = "2026-10-06-server"
+source = "server.log"
+lines = [11, 12]
+checklist = ["F2", "F5"]
+instrument = ""
+
+[[fixture]]
+name = "F3_usage"
+run_id = "20261008T045346Z-preflight"
+source = "rest.jsonl"
+lines = [6]
+checklist = ["F3"]
+instrument = ""
+
+[[fixture]]
+name = "F4_ca_status"
+run_id = "20261008T045346Z-preflight"
+source = "rest.jsonl"
+lines = [7]
+checklist = ["F4"]
+instrument = ""
+
+[[fixture]]
+name = "F4_ca_activation_log"
+run_id = "2026-10-06-server"
+source = "server.log"
+lines = [3, 4, 6, 7, 8]
+checklist = ["E2", "F4"]
+instrument = ""
+
+# G. History; the 2330 ticks response is left out, since that one record holds
+# the whole day's ticks
+
+[[fixture]]
+name = "G1_kbars_2330"
+run_id = "20261001T062125Z-history"
+source = "rest.jsonl"
+lines = [7, 8, 9]
+checklist = ["F3", "G1"]
+instrument = "2330"
+
+[[fixture]]
+name = "G1_snapshots"
+run_id = "20261001T062125Z-history"
+source = "rest.jsonl"
+lines = [13, 14, 15]
+checklist = ["F3", "G1"]
+instrument = ""

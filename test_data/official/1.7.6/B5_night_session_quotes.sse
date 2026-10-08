@@ -1,0 +1,6 @@
+event:bidask_fop
+data:{"code":"TMFJ6","date":"2026-10-07","time":"21:00:00.075000","bid_total_vol":26,"ask_total_vol":46,"bid_price":["49483","49482","49481","49480","49479"],"bid_volume":[1,8,5,6,6],"diff_bid_vol":[-2,0,0,0,0],"ask_price":["49486","49487","49488","49489","49490"],"ask_volume":[3,23,10,7,3],"diff_ask_vol":[0,0,0,0,0],"first_derived_bid_price":"49479","first_derived_ask_price":"0","first_derived_bid_vol":1,"first_derived_ask_vol":0,"underlying_price":"49806.37","simtrade":false}
+
+event:tick_fop
+data:{"code":"TMFJ6","date":"2026-10-07","time":"21:00:00.104000","open":"49922","underlying_price":"49806.37","bid_side_total_vol":33420,"ask_side_total_vol":51219,"avg_price":"49683.889372","close":"49486","high":"49933","low":"49460","amount":"148458","total_amount":"4294377294","volume":3,"total_volume":86434,"tick_type":1,"chg_type":4,"price_chg":"-482","pct_chg":"-0.964617","simtrade":false}
+

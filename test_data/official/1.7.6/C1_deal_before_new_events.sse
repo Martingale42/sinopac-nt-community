@@ -1,0 +1,6 @@
+event:order_event
+data:{"state":"FuturesDeal","data":{"FuturesDeal":{"event_id":"v1:FD:BO7SLUBpR10:BPjnpoK:1","trade_id":"001380","seqno":"001380","ordno":"137388","exchange_seq":"000001","action":"Buy","code":"TMFJ6","price":48459.0,"quantity":1,"subaccount":"","security_type":"FUT","delivery_month":"","ts":1790829233.759345,"broker_id":"F002000","account_id":"ACCOUNT_ID_1","full_code":"","strike_price":0.0,"option_right":"Future","market_type":"Day","combo":false}}}
+
+event:order_event
+data:{"state":"FuturesOrder","data":{"FuturesOrder":{"event_id":"v1:FO:BO7SLUBpR10:BPjnpoK:11","operation":{"op_type":"New","op_code":"00","op_msg":""},"order":{"id":"001380","seqno":"001380","ordno":"137388","account":{"account_type":"F","person_id":"","broker_id":"F002000","account_id":"ACCOUNT_ID_1","signed":true,"username":""},"action":"Buy","price":53163.0,"quantity":1,"order_type":"ROD","price_type":"MKT","market_type":"Day","oc_type":"Auto","subaccount":"","combo":false},"status":{"id":"001380","exchange_ts":1790829233.703221,"modified_price":0.0,"cancel_quantity":0,"order_quantity":1,"web_id":"Z"},"contract":{"security_type":"FUT","code":"TMFJ6","exchange":"TAIFEX","delivery_month":"","full_code":"","delivery_date":"","strike_price":0.0,"option_right":"Future"}}}}
+

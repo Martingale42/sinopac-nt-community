@@ -1,0 +1,125 @@
+[
+  {
+    "client": "history",
+    "op": "usage",
+    "method": "GET",
+    "url": "http://127.0.0.1:18080/api/v1/auth/usage",
+    "req_body": null,
+    "sent_ts_ns": 1790835686454591116,
+    "recv_ts_ns": 1790835686465643609,
+    "status": 200,
+    "resp_headers": [
+      [
+        "content-type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "vary",
+        "origin"
+      ],
+      [
+        "vary",
+        "access-control-request-method"
+      ],
+      [
+        "vary",
+        "access-control-request-headers"
+      ],
+      [
+        "access-control-expose-headers",
+        "content-type,cache-control"
+      ],
+      [
+        "content-length",
+        "87"
+      ],
+      [
+        "date",
+        "Thu, 01 Oct 2026 06:21:26 GMT"
+      ]
+    ],
+    "resp_body": "{\"connections\":1,\"bytes\":4966919,\"limit_bytes\":2147483648,\"remaining_bytes\":2142516729}"
+  },
+  {
+    "client": "history",
+    "op": "snapshots",
+    "method": "POST",
+    "url": "http://127.0.0.1:18080/api/v1/data/snapshots",
+    "req_body": "{\"contracts\":[{\"security_type\":\"STK\",\"exchange\":\"TSE\",\"code\":\"2330\"},{\"security_type\":\"STK\",\"exchange\":\"TSE\",\"code\":\"0050\"},{\"security_type\":\"STK\",\"exchange\":\"TSE\",\"code\":\"2890\"},{\"security_type\":\"STK\",\"exchange\":\"TSE\",\"code\":\"00981A\"},{\"security_type\":\"STK\",\"exchange\":\"TSE\",\"code\":\"00631L\"},{\"security_type\":\"FUT\",\"exchange\":\"TAIFEX\",\"code\":\"TXFJ6\"},{\"security_type\":\"FUT\",\"exchange\":\"TAIFEX\",\"code\":\"MXFJ6\"},{\"security_type\":\"FUT\",\"exchange\":\"TAIFEX\",\"code\":\"TMFJ6\"},{\"security_type\":\"OPT\",\"exchange\":\"TAIFEX\",\"code\":\"TXO47900J6\"},{\"security_type\":\"OPT\",\"exchange\":\"TAIFEX\",\"code\":\"TXO47900V6\"}]}",
+    "sent_ts_ns": 1790835686465937488,
+    "recv_ts_ns": 1790835686498194669,
+    "status": 200,
+    "resp_headers": [
+      [
+        "content-type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "vary",
+        "origin"
+      ],
+      [
+        "vary",
+        "access-control-request-method"
+      ],
+      [
+        "vary",
+        "access-control-request-headers"
+      ],
+      [
+        "access-control-expose-headers",
+        "content-type,cache-control"
+      ],
+      [
+        "content-length",
+        "4230"
+      ],
+      [
+        "date",
+        "Thu, 01 Oct 2026 06:21:26 GMT"
+      ]
+    ],
+    "resp_body": "[{\"datetime\":\"2026-10-01T13:30:00\",\"code\":\"2330\",\"exchange\":\"TSE\",\"open\":2490.0,\"high\":2510.0,\"low\":2485.0,\"close\":2510.0,\"tick_type\":\"Buy\",\"change_price\":30.0,\"change_rate\":1.2,\"change_type\":\"Up\",\"average_price\":2501.41,\"volume\":4219,\"total_volume\":18496,\"amount\":10589690000,\"total_amount\":46266175000,\"yesterday_volume\":30460.0,\"buy_price\":2510.0,\"buy_volume\":481.0,\"sell_price\":2515.0,\"sell_volume\":977,\"volume_ratio\":0.61},{\"datetime\":\"2026-10-01T13:30:00\",\"code\":\"0050\",\"exchange\":\"TSE\",\"open\":112.2,\"high\":112.9,\"low\":111.7,\"close\":112.9,\"tick_type\":\"Buy\",\"change_price\":0.85,\"change_rate\":0.75,\"change_type\":\"Up\",\"average_price\":112.25,\"volume\":1137,\"total_volume\":51487,\"amount\":128367300,\"total_amount\":5779453500,\"yesterday_volume\":58048.0,\"buy_price\":112.85,\"buy_volume\":82.0,\"sell_price\":112.9,\"sell_volume\":153,\"volume_ratio\":0.89},{\"datetime\":\"2026-10-01T13:30:00\",\"code\":\"2890\",\"exchange\":\"TSE\",\"open\":44.25,\"high\":44.35,\"low\":43.1,\"close\":43.65,\"tick_type\":\"Buy\",\"change_price\":-0.6,\"change_rate\":-1.35,\"change_type\":\"Down\",\"average_price\":43.5,\"volume\":2861,\"total_volume\":21405,\"amount\":124882650,\"total_amount\":931197100,\"yesterday_volume\":17780.0,\"buy_price\":43.65,\"buy_volume\":148.0,\"sell_price\":43.7,\"sell_volume\":340,\"volume_ratio\":1.2},{\"datetime\":\"2026-10-01T13:30:00\",\"code\":\"00981A\",\"exchange\":\"TSE\",\"open\":30.63,\"high\":31.03,\"low\":30.53,\"close\":31.0,\"tick_type\":\"Buy\",\"change_price\":0.46,\"change_rate\":1.5,\"change_type\":\"Up\",\"average_price\":30.79,\"volume\":3324,\"total_volume\":111416,\"amount\":103044000,\"total_amount\":3430699410,\"yesterday_volume\":97944.0,\"buy_price\":30.99,\"buy_volume\":1642.0,\"sell_price\":31.0,\"sell_volume\":627,\"volume_ratio\":1.14},{\"datetime\":\"2026-10-01T13:30:00\",\"code\":\"00631L\",\"exchange\":\"TSE\",\"open\":39.13,\"high\":39.62,\"low\":38.9,\"close\":39.62,\"tick_type\":\"Buy\",\"change_price\":0.63,\"change_rate\":1.61,\"change_type\":\"Up\",\"average_price\":39.26,\"volume\":4283,\"total_volume\":103205,\"amount\":169692460,\"total_amount\":4052199600,\"yesterday_volume\":136262.0,\"buy_price\":39.62,\"buy_volume\":346.0,\"sell_price\":39.63,\"sell_volume\":125,\"volume_ratio\":0.76},{\"datetime\":\"2026-10-01T13:44:59.918000\",\"code\":\"TXFJ6\",\"exchange\":\"TAIFEX\",\"open\":48398.0,\"high\":48719.0,\"low\":48168.0,\"close\":48685.0,\"tick_type\":\"Sell\",\"change_price\":355.0,\"change_rate\":0.73,\"change_type\":\"Up\",\"average_price\":48425.37,\"volume\":1,\"total_volume\":34278,\"amount\":48685,\"total_amount\":1659924832,\"yesterday_volume\":23615.0,\"buy_price\":48685.0,\"buy_volume\":4.0,\"sell_price\":48689.0,\"sell_volume\":6,\"volume_ratio\":1.45},{\"datetime\":\"2026-10-01T13:45:00.033000\",\"code\":\"MXFJ6\",\"exchange\":\"TAIFEX\",\"open\":48394.0,\"high\":48718.0,\"low\":48168.0,\"close\":48695.0,\"tick_type\":\"Buy\",\"change_price\":365.0,\"change_rate\":0.76,\"change_type\":\"Up\",\"average_price\":48400.29,\"volume\":1,\"total_volume\":80963,\"amount\":48695,\"total_amount\":3918632783,\"yesterday_volume\":76258.0,\"buy_price\":48690.0,\"buy_volume\":6.0,\"sell_price\":48695.0,\"sell_volume\":4,\"volume_ratio\":1.06},{\"datetime\":\"2026-10-01T13:44:59.884000\",\"code\":\"TMFJ6\",\"exchange\":\"TAIFEX\",\"open\":48360.0,\"high\":48715.0,\"low\":48171.0,\"close\":48694.0,\"tick_type\":\"Buy\",\"change_price\":364.0,\"change_rate\":0.75,\"change_type\":\"Up\",\"average_price\":48402.87,\"volume\":1,\"total_volume\":127250,\"amount\":48694,\"total_amount\":6159265668,\"yesterday_volume\":146788.0,\"buy_price\":48691.0,\"buy_volume\":3.0,\"sell_price\":48695.0,\"sell_volume\":9,\"volume_ratio\":0.87},{\"datetime\":\"2026-10-01T12:05:58.699000\",\"code\":\"TXO47900J6\",\"exchange\":\"TAIFEX\",\"open\":1110.0,\"high\":1190.0,\"low\":1050.0,\"close\":1190.0,\"tick_type\":\"Buy\",\"change_price\":10.0,\"change_rate\":0.85,\"change_type\":\"Up\",\"average_price\":1115.0,\"volume\":1,\"total_volume\":6,\"amount\":1190,\"total_amount\":6690,\"yesterday_volume\":7.0,\"buy_price\":1330.0,\"buy_volume\":5.0,\"sell_price\":1350.0,\"sell_volume\":5,\"volume_ratio\":0.86},{\"datetime\":\"2026-10-01T13:36:32.955000\",\"code\":\"TXO47900V6\",\"exchange\":\"TAIFEX\",\"open\":695.0,\"high\":695.0,\"low\":555.0,\"close\":555.0,\"tick_type\":\"None\",\"change_price\":-200.0,\"change_rate\":-26.49,\"change_type\":\"Down\",\"average_price\":618.06,\"volume\":1,\"total_volume\":18,\"amount\":555,\"total_amount\":11125,\"yesterday_volume\":2.0,\"buy_price\":545.0,\"buy_volume\":5.0,\"sell_price\":555.0,\"sell_volume\":5,\"volume_ratio\":9.0}]"
+  },
+  {
+    "client": "history",
+    "op": "usage",
+    "method": "GET",
+    "url": "http://127.0.0.1:18080/api/v1/auth/usage",
+    "req_body": null,
+    "sent_ts_ns": 1790835686498522478,
+    "recv_ts_ns": 1790835686510973676,
+    "status": 200,
+    "resp_headers": [
+      [
+        "content-type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "vary",
+        "origin"
+      ],
+      [
+        "vary",
+        "access-control-request-method"
+      ],
+      [
+        "vary",
+        "access-control-request-headers"
+      ],
+      [
+        "access-control-expose-headers",
+        "content-type,cache-control"
+      ],
+      [
+        "content-length",
+        "87"
+      ],
+      [
+        "date",
+        "Thu, 01 Oct 2026 06:21:26 GMT"
+      ]
+    ],
+    "resp_body": "{\"connections\":1,\"bytes\":4966919,\"limit_bytes\":2147483648,\"remaining_bytes\":2142516729}"
+  }
+]

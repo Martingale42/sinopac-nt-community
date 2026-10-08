@@ -1,0 +1,4 @@
+[2m2026-10-08T04:54:26.429283Z[0m [32m INFO[0m [2mshioaji::cli::server[0m[2m:[0m Starting Shioaji API Server...
+[2m2026-10-08T04:54:26.429347Z[0m [32m INFO[0m [2mshioaji::cli::server[0m[2m:[0m Simulation mode: enabled
+[2m2026-10-08T04:54:27.597706Z[0m [31mERROR[0m [2mshioaji::cli::server[0m[2m:[0m Failed to start HTTP server: Invalid HTTP transport configuration: SJ_AGENT_HARNESS_SECRET is required for environment bootstrap
+Error: Failed to start server: Invalid HTTP transport configuration: SJ_AGENT_HARNESS_SECRET is required for environment bootstrap

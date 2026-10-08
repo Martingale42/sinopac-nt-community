@@ -1,0 +1,6 @@
+event:order_event
+data:{"state":"StockOrder","data":{"StockOrder":{"event_id":"v1:SO:A1EGgvbrM:BPjnpoK:28","operation":{"op_type":"New","op_code":"00","op_msg":""},"order":{"id":"001368","seqno":"001368","ordno":"137370","account":{"account_type":"S","person_id":"","broker_id":"9A9N","account_id":"ACCOUNT_ID_2","signed":true,"username":""},"action":"Buy","price":48.65,"quantity":1,"order_type":"IOC","price_type":"MKT","order_cond":"Cash","order_lot":"Common","custom_field":""},"status":{"id":"001368","exchange_ts":1790829167.073619,"modified_price":0.0,"cancel_quantity":0,"order_quantity":1,"web_id":"137"},"contract":{"exchange":"TSE","code":"2890","security_type":"STK","symbol":"","name":"","currency":"TWD"}}}}
+
+event:order_event
+data:{"state":"StockDeal","data":{"StockDeal":{"event_id":"v1:SD:A1EGgvbrM:BPjnpoK:5","trade_id":"001368","seqno":"001368","ordno":"137370","exchange_seq":"000001","action":"Buy","code":"2890","order_cond":"Cash","order_lot":"Common","price":43.2,"quantity":1,"ts":1790829167.241549,"broker_id":"9A9N","account_id":"ACCOUNT_ID_2","web_id":"137","custom_field":""}}}
+

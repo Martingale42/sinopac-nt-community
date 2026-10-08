@@ -1,0 +1,3 @@
+event:order_event
+data:{"state":"StockOrder","data":{"StockOrder":{"event_id":"v1:SO:A1EGgvbrM:BPjnpoK:10","operation":{"op_type":"New","op_code":"88","op_msg":"價格檔數錯誤"},"order":{"id":"0012E9","seqno":"0012E9","ordno":"1372F1","account":{"account_type":"S","person_id":"","broker_id":"9A9N","account_id":"ACCOUNT_ID_2","signed":true,"username":""},"action":"Buy","price":29.01,"quantity":1,"order_type":"ROD","price_type":"LMT","order_cond":"Cash","order_lot":"IntradayOdd","custom_field":""},"status":{"id":"0012E9","exchange_ts":1790828629.988851,"modified_price":0.0,"cancel_quantity":0,"order_quantity":0,"web_id":"137"},"contract":{"exchange":"TSE","code":"00981A","security_type":"STK","symbol":"","name":"","currency":"TWD"}}}}
+

@@ -1,0 +1,43 @@
+[
+  {
+    "client": "preflight",
+    "op": "mode",
+    "method": "GET",
+    "url": "http://127.0.0.1:18080/api/v1/info",
+    "req_body": null,
+    "sent_ts_ns": 1791435226214887588,
+    "recv_ts_ns": 1791435226221471305,
+    "status": 200,
+    "resp_headers": [
+      [
+        "content-type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "vary",
+        "origin"
+      ],
+      [
+        "vary",
+        "access-control-request-method"
+      ],
+      [
+        "vary",
+        "access-control-request-headers"
+      ],
+      [
+        "access-control-expose-headers",
+        "content-type,cache-control"
+      ],
+      [
+        "content-length",
+        "394"
+      ],
+      [
+        "date",
+        "Thu, 08 Oct 2026 04:53:46 GMT"
+      ]
+    ],
+    "resp_body": "{\"name\":\"Shioaji API Server\",\"version\":\"1.7.6\",\"description\":\"SinoPac Shioaji Cross-Platform Trading API HTTP Adaptor\",\"protocols\":[\"HTTP/1.1\"],\"scheme\":\"http\",\"uds_plaintext\":true,\"simulation\":true,\"agent_harness\":{\"enabled\":false,\"mode\":\"off\",\"capability_version\":1,\"capability_header\":\"X-Shioaji-Agent-Capability\",\"digest_scheme\":\"compact_keyed_blake3\",\"audience\":null,\"max_ttl_seconds\":60}}"
+  }
+]

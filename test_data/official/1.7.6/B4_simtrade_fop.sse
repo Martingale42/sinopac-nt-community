@@ -1,0 +1,6 @@
+event:tick_fop
+data:{"code":"TXFJ6","date":"2026-10-07","time":"08:44:55","open":"50153","underlying_price":"49822.55","bid_side_total_vol":411,"ask_side_total_vol":1702,"avg_price":"50030","close":"50030","high":"50153","low":"49960","amount":"2001200","total_amount":"2001200","volume":40,"total_volume":40,"tick_type":1,"chg_type":4,"price_chg":"-52","pct_chg":"-0.10383","simtrade":true}
+
+event:tick_fop
+data:{"code":"TXFJ6","date":"2026-10-07","time":"08:45:00.014000","open":"50050","underlying_price":"49822.55","bid_side_total_vol":74,"ask_side_total_vol":0,"avg_price":"50050","close":"50050","high":"50050","low":"50050","amount":"3703700","total_amount":"3703700","volume":74,"total_volume":74,"tick_type":1,"chg_type":4,"price_chg":"-32","pct_chg":"-0.063895","simtrade":false}
+

@@ -1,0 +1,43 @@
+[
+  {
+    "client": "stream",
+    "op": "stream_unsubscribe",
+    "method": "POST",
+    "url": "http://127.0.0.1:18080/api/v1/stream/unsubscribe",
+    "req_body": "{\"security_type\":\"STK\",\"exchange\":\"TSE\",\"code\":\"2330\",\"quote_type\":\"Tick\",\"intraday_odd\":false}",
+    "sent_ts_ns": 1790908200001623693,
+    "recv_ts_ns": 1790908200003238349,
+    "status": 200,
+    "resp_headers": [
+      [
+        "content-type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "vary",
+        "origin"
+      ],
+      [
+        "vary",
+        "access-control-request-method"
+      ],
+      [
+        "vary",
+        "access-control-request-headers"
+      ],
+      [
+        "access-control-expose-headers",
+        "content-type,cache-control"
+      ],
+      [
+        "content-length",
+        "184"
+      ],
+      [
+        "date",
+        "Fri, 02 Oct 2026 02:30:00 GMT"
+      ]
+    ],
+    "resp_body": "{\"success\":true,\"message\":\"Unsubscription successful\",\"subscription\":{\"security_type\":\"STK\",\"exchange\":\"TSE\",\"code\":\"2330\",\"target_code\":null,\"quote_type\":\"Tick\",\"intraday_odd\":false}}"
+  }
+]

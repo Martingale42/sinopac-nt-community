@@ -1,0 +1,3 @@
+event:tick_fop
+data:{"code":"TXFJ6","date":"2026-10-07","time":"10:00:00.179000","open":"50050","underlying_price":"49827.73","bid_side_total_vol":5712,"ask_side_total_vol":5823,"avg_price":"50000.825824","close":"49978","high":"50110","low":"49863","amount":"49978","total_amount":"595959843","volume":1,"total_volume":11919,"tick_type":2,"chg_type":4,"price_chg":"-104","pct_chg":"-0.207659","simtrade":false}
+

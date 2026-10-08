@@ -1,0 +1,5 @@
+[2m2026-10-06T08:44:13.094199Z[0m [32m INFO[0m [2mshioaji::api::api_v1::auth::token_login[0m[2m:[0m No cached token available, performing new login
+[2m2026-10-06T08:44:13.716607Z[0m [32m INFO[0m [2mshioaji::api::api_v1::auth::token_login[0m[2m:[0m Stored new token in slot 1
+[2m2026-10-06T08:44:13.720954Z[0m [32m INFO[0m [2mshioaji::server[0m[2m:[0m CA certificate activated successfully
+[2m2026-10-06T08:44:13.720973Z[0m [32m INFO[0m [2mshioaji::server[0m[2m:[0m CA certificate expires on 2028-03-06T15:59:59 (517 days left)
+[2m2026-10-06T08:44:13.724993Z[0m [32m INFO[0m [2mshioaji::cli::server[0m[2m:[0m Successfully authenticated with Shioaji API

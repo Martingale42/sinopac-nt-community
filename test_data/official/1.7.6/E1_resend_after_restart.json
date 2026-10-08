@@ -1,0 +1,84 @@
+[
+  {
+    "client": "stream",
+    "op": "subscribe_trade",
+    "method": "POST",
+    "url": "http://127.0.0.1:18080/api/v1/auth/subscribe_trade",
+    "req_body": "{\"account_type\":\"S\",\"broker_id\":\"9A9N\",\"account_id\":\"ACCOUNT_ID_2\",\"person_id\":\"PERSON_ID_1\"}",
+    "sent_ts_ns": 1791435347797830091,
+    "recv_ts_ns": 1791435348296916554,
+    "status": 200,
+    "resp_headers": [
+      [
+        "content-type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "vary",
+        "origin"
+      ],
+      [
+        "vary",
+        "access-control-request-method"
+      ],
+      [
+        "vary",
+        "access-control-request-headers"
+      ],
+      [
+        "access-control-expose-headers",
+        "content-type,cache-control"
+      ],
+      [
+        "content-length",
+        "170"
+      ],
+      [
+        "date",
+        "Thu, 08 Oct 2026 04:55:48 GMT"
+      ]
+    ],
+    "resp_body": "{\"account\":{\"account_type\":\"S\",\"person_id\":\"PERSON_ID_1\",\"broker_id\":\"9A9N\",\"account_id\":\"ACCOUNT_ID_2\",\"signed\":true,\"username\":\"\"},\"subscribe_trade\":true,\"ts\":20261008045548}"
+  },
+  {
+    "client": "stream",
+    "op": "stream_subscribe",
+    "method": "POST",
+    "url": "http://127.0.0.1:18080/api/v1/stream/subscribe",
+    "req_body": "{\"security_type\":\"STK\",\"exchange\":\"TSE\",\"code\":\"2330\",\"quote_type\":\"Tick\",\"intraday_odd\":false}",
+    "sent_ts_ns": 1791435348537694530,
+    "recv_ts_ns": 1791435348539737512,
+    "status": 200,
+    "resp_headers": [
+      [
+        "content-type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "vary",
+        "origin"
+      ],
+      [
+        "vary",
+        "access-control-request-method"
+      ],
+      [
+        "vary",
+        "access-control-request-headers"
+      ],
+      [
+        "access-control-expose-headers",
+        "content-type,cache-control"
+      ],
+      [
+        "content-length",
+        "182"
+      ],
+      [
+        "date",
+        "Thu, 08 Oct 2026 04:55:48 GMT"
+      ]
+    ],
+    "resp_body": "{\"success\":true,\"message\":\"Subscription successful\",\"subscription\":{\"security_type\":\"STK\",\"exchange\":\"TSE\",\"code\":\"2330\",\"target_code\":null,\"quote_type\":\"Tick\",\"intraday_odd\":false}}"
+  }
+]

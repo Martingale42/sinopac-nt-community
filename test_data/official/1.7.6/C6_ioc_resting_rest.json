@@ -1,0 +1,84 @@
+[
+  {
+    "client": "orders",
+    "op": "place_stock",
+    "method": "POST",
+    "url": "http://127.0.0.1:18080/api/v1/order/place_order",
+    "req_body": "{\"contract\":{\"security_type\":\"STK\",\"exchange\":\"TSE\",\"code\":\"2890\"},\"stock_order\":{\"action\":\"Buy\",\"price\":42,\"quantity\":1,\"price_type\":\"LMT\",\"order_type\":\"IOC\",\"order_lot\":\"Common\",\"custom_field\":null,\"account\":{\"account_type\":\"S\",\"person_id\":\"PERSON_ID_1\",\"broker_id\":\"9A9N\",\"account_id\":\"ACCOUNT_ID_2\",\"signed\":true,\"username\":\"USERNAME_1\"}}}",
+    "sent_ts_ns": 1790828507026262844,
+    "recv_ts_ns": 1790828507057211820,
+    "status": 200,
+    "resp_headers": [
+      [
+        "content-type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "vary",
+        "origin"
+      ],
+      [
+        "vary",
+        "access-control-request-method"
+      ],
+      [
+        "vary",
+        "access-control-request-headers"
+      ],
+      [
+        "access-control-expose-headers",
+        "content-type,cache-control"
+      ],
+      [
+        "content-length",
+        "663"
+      ],
+      [
+        "date",
+        "Thu, 01 Oct 2026 04:21:47 GMT"
+      ]
+    ],
+    "resp_body": "{\"contract\":{\"security_type\":\"STK\",\"region\":\"TW\",\"exchange\":\"TSE\",\"code\":\"2890\",\"target_code\":\"\"},\"order\":{\"id\":\"0012CE\",\"seqno\":\"0012CE\",\"ordno\":\"1372D6\",\"action\":\"Buy\",\"price\":42.0,\"quantity\":1,\"order_type\":\"IOC\",\"price_type\":\"LMT\",\"custom_field\":\"\",\"account\":{\"account_type\":\"S\",\"person_id\":\"PERSON_ID_1\",\"broker_id\":\"9A9N\",\"account_id\":\"ACCOUNT_ID_2\",\"signed\":true,\"username\":\"USERNAME_1\"},\"ca\":\"\",\"order_cond\":\"Cash\",\"order_lot\":\"Common\"},\"status\":{\"id\":\"0012CE\",\"status\":\"PendingSubmit\",\"status_code\":\"00\",\"web_id\":\"\",\"order_ts\":1790828507.043605,\"msg\":\"\",\"modified_ts\":0.0,\"modified_price\":0.0,\"order_quantity\":0,\"deal_quantity\":0,\"cancel_quantity\":0,\"deals\":[]}}"
+  },
+  {
+    "client": "orders",
+    "op": "trades",
+    "method": "POST",
+    "url": "http://127.0.0.1:18080/api/v1/order/trades",
+    "req_body": "{\"account_type\":\"S\",\"broker_id\":\"9A9N\",\"account_id\":\"ACCOUNT_ID_2\",\"person_id\":\"PERSON_ID_1\",\"refresh\":true}",
+    "sent_ts_ns": 1790828568603728365,
+    "recv_ts_ns": 1790828568642095047,
+    "status": 200,
+    "resp_headers": [
+      [
+        "content-type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "vary",
+        "origin"
+      ],
+      [
+        "vary",
+        "access-control-request-method"
+      ],
+      [
+        "vary",
+        "access-control-request-headers"
+      ],
+      [
+        "access-control-expose-headers",
+        "content-type,cache-control"
+      ],
+      [
+        "content-length",
+        "2722"
+      ],
+      [
+        "date",
+        "Thu, 01 Oct 2026 04:22:48 GMT"
+      ]
+    ],
+    "resp_body": "[{\"contract\":{\"security_type\":\"STK\",\"region\":\"TW\",\"exchange\":\"TSE\",\"code\":\"2890\",\"target_code\":\"\"},\"order\":{\"id\":\"001294\",\"seqno\":\"001294\",\"ordno\":\"13729C\",\"action\":\"Buy\",\"price\":39.85,\"quantity\":2,\"order_type\":\"ROD\",\"price_type\":\"LMT\",\"custom_field\":\"\",\"account\":{\"account_type\":\"S\",\"person_id\":\"PERSON_ID_1\",\"broker_id\":\"9A9N\",\"account_id\":\"ACCOUNT_ID_2\",\"signed\":true,\"username\":\"USERNAME_1\"},\"ca\":\"\",\"order_cond\":\"Cash\",\"order_lot\":\"Common\"},\"status\":{\"id\":\"001294\",\"status\":\"Failed\",\"status_code\":\"88\",\"web_id\":\"\",\"order_ts\":1790828226.900283,\"msg\":\"價格超過漲跌幅範圍\",\"modified_ts\":1790828226.900283,\"modified_price\":0.0,\"order_quantity\":0,\"deal_quantity\":0,\"cancel_quantity\":0,\"deals\":[]}},{\"contract\":{\"security_type\":\"STK\",\"region\":\"TW\",\"exchange\":\"TSE\",\"code\":\"2890\",\"target_code\":\"\"},\"order\":{\"id\":\"0012C3\",\"seqno\":\"0012C3\",\"ordno\":\"1372CB\",\"action\":\"Buy\",\"price\":42.0,\"quantity\":2,\"order_type\":\"ROD\",\"price_type\":\"LMT\",\"custom_field\":\"\",\"account\":{\"account_type\":\"S\",\"person_id\":\"PERSON_ID_1\",\"broker_id\":\"9A9N\",\"account_id\":\"ACCOUNT_ID_2\",\"signed\":true,\"username\":\"USERNAME_1\"},\"ca\":\"\",\"order_cond\":\"Cash\",\"order_lot\":\"Common\"},\"status\":{\"id\":\"0012C3\",\"status\":\"Cancelled\",\"status_code\":\"00\",\"web_id\":\"\",\"order_ts\":1790828452.419274,\"msg\":\"\",\"modified_ts\":1790828461.594924,\"modified_price\":42.05,\"order_quantity\":2,\"deal_quantity\":0,\"cancel_quantity\":2,\"deals\":[]}},{\"contract\":{\"security_type\":\"STK\",\"region\":\"TW\",\"exchange\":\"TSE\",\"code\":\"2890\",\"target_code\":\"\"},\"order\":{\"id\":\"0012CD\",\"seqno\":\"0012CD\",\"ordno\":\"1372D5\",\"action\":\"Buy\",\"price\":42.0,\"quantity\":1,\"order_type\":\"ROD\",\"price_type\":\"LMT\",\"custom_field\":\"\",\"account\":{\"account_type\":\"S\",\"person_id\":\"PERSON_ID_1\",\"broker_id\":\"9A9N\",\"account_id\":\"ACCOUNT_ID_2\",\"signed\":true,\"username\":\"USERNAME_1\"},\"ca\":\"\",\"order_cond\":\"Cash\",\"order_lot\":\"Common\"},\"status\":{\"id\":\"0012CD\",\"status\":\"Cancelled\",\"status_code\":\"00\",\"web_id\":\"\",\"order_ts\":1790828503.934564,\"msg\":\"\",\"modified_ts\":1790828504.9836,\"modified_price\":0.0,\"order_quantity\":1,\"deal_quantity\":0,\"cancel_quantity\":1,\"deals\":[]}},{\"contract\":{\"security_type\":\"STK\",\"region\":\"TW\",\"exchange\":\"TSE\",\"code\":\"2890\",\"target_code\":\"\"},\"order\":{\"id\":\"0012CE\",\"seqno\":\"0012CE\",\"ordno\":\"1372D6\",\"action\":\"Buy\",\"price\":42.0,\"quantity\":1,\"order_type\":\"IOC\",\"price_type\":\"LMT\",\"custom_field\":\"\",\"account\":{\"account_type\":\"S\",\"person_id\":\"PERSON_ID_1\",\"broker_id\":\"9A9N\",\"account_id\":\"ACCOUNT_ID_2\",\"signed\":true,\"username\":\"USERNAME_1\"},\"ca\":\"\",\"order_cond\":\"Cash\",\"order_lot\":\"Common\"},\"status\":{\"id\":\"0012CE\",\"status\":\"Submitted\",\"status_code\":\"00\",\"web_id\":\"\",\"order_ts\":1790828507.043605,\"msg\":\"\",\"modified_ts\":1790828507.043605,\"modified_price\":0.0,\"order_quantity\":1,\"deal_quantity\":0,\"cancel_quantity\":0,\"deals\":[]}}]"
+  }
+]

@@ -1,0 +1,487 @@
+# Written by `p1rec scrub` from fixtures.toml, one [[fixture]] per exported file.
+
+[[fixture]]
+file = "A2_info.json"
+run_id = "20261008T045346Z-preflight"
+source = "rest.jsonl"
+lines = [1]
+recorded_at = "2026-10-08T04:53:46.221471305Z"
+instrument = ""
+checklist = ["A1", "A2", "F2", "F5"]
+
+[[fixture]]
+file = "A2_accounts.json"
+run_id = "20261008T045346Z-preflight"
+source = "rest.jsonl"
+lines = [2]
+recorded_at = "2026-10-08T04:53:46.224438917Z"
+instrument = ""
+checklist = ["A2"]
+
+[[fixture]]
+file = "A2_funds_queries.json"
+run_id = "20261008T045346Z-preflight"
+source = "rest.jsonl"
+lines = [3, 4, 5]
+recorded_at = "2026-10-08T04:53:46.246114440Z"
+instrument = ""
+checklist = ["A2", "C6"]
+
+[[fixture]]
+file = "A2_contracts.json"
+run_id = "20261008T045346Z-preflight"
+source = "rest.jsonl"
+lines = [8, 9, 10]
+recorded_at = "2026-10-08T04:53:46.391868159Z"
+instrument = ""
+checklist = ["A2"]
+
+[[fixture]]
+file = "B1_stream_subscribe.json"
+run_id = "20261006T084434Z-stream"
+source = "rest.jsonl"
+lines = [5, 6]
+recorded_at = "2026-10-06T08:44:34.564543504Z"
+instrument = "2330"
+checklist = ["B1"]
+
+[[fixture]]
+file = "B1_heartbeats.sse"
+run_id = "20261006T084434Z-stream"
+source = "sse_a_data.jsonl"
+lines = [1084304, 1086119, 1088398]
+recorded_at = "2026-10-07T02:00:04.247412896Z"
+instrument = ""
+checklist = ["B1", "B2"]
+
+[[fixture]]
+file = "B1_tick_stk.sse"
+run_id = "20261006T084434Z-stream"
+source = "sse_a_data.jsonl"
+lines = [1084233]
+recorded_at = "2026-10-07T02:00:02.874143577Z"
+instrument = "2330"
+checklist = ["B1"]
+
+[[fixture]]
+file = "B1_tick_fop.sse"
+run_id = "20261006T084434Z-stream"
+source = "sse_a_data.jsonl"
+lines = [1084029]
+recorded_at = "2026-10-07T02:00:00.279770742Z"
+instrument = "TXFJ6"
+checklist = ["B1"]
+
+[[fixture]]
+file = "B3_bidask_stk.sse"
+run_id = "20261006T084434Z-stream"
+source = "sse_a_data.jsonl"
+lines = [1084019]
+recorded_at = "2026-10-07T02:00:00.120387193Z"
+instrument = "2330"
+checklist = ["B3"]
+
+[[fixture]]
+file = "B3_bidask_fop.sse"
+run_id = "20261006T084434Z-stream"
+source = "sse_a_data.jsonl"
+lines = [1084015]
+recorded_at = "2026-10-07T02:00:00.032104616Z"
+instrument = "TXFJ6"
+checklist = ["B3"]
+
+[[fixture]]
+file = "B4_simtrade_stk.sse"
+run_id = "20261006T084434Z-stream"
+source = "sse_a_data.jsonl"
+lines = [833988, 834889]
+recorded_at = "2026-10-07T01:00:00.009502945Z"
+instrument = "2330"
+checklist = ["B4"]
+
+[[fixture]]
+file = "B4_simtrade_fop.sse"
+run_id = "20261006T084434Z-stream"
+source = "sse_a_data.jsonl"
+lines = [786511, 786527]
+recorded_at = "2026-10-07T00:44:55.008288558Z"
+instrument = "TXFJ6"
+checklist = ["B4"]
+
+[[fixture]]
+file = "B5_odd_lot_quotes.sse"
+run_id = "20261006T084434Z-stream"
+source = "sse_a_data.jsonl"
+lines = [891908, 891909]
+recorded_at = "2026-10-07T01:10:00.835614504Z"
+instrument = "00981A"
+checklist = ["B5"]
+
+[[fixture]]
+file = "B5_night_session_quotes.sse"
+run_id = "20261006T084434Z-stream"
+source = "sse_a_data.jsonl"
+lines = [2212316, 2212318]
+recorded_at = "2026-10-07T13:00:00.078821597Z"
+instrument = "TMFJ6"
+checklist = ["B5"]
+
+[[fixture]]
+file = "B6_data_stream_stats.log"
+run_id = "20261001T062126Z-stats"
+source = "stats.json"
+lines = [2, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162]
+recorded_at = "2026-10-01T06:21:26.000000000Z"
+instrument = ""
+checklist = ["B1", "B6"]
+
+[[fixture]]
+file = "C1_stock_lifecycle_rest.json"
+run_id = "20261001T042052Z-orders-lifecycle2"
+source = "rest.jsonl"
+lines = [4, 6, 8, 10, 11]
+recorded_at = "2026-10-01T04:20:52.434344982Z"
+instrument = "2890"
+checklist = ["C1", "C3", "F4"]
+
+[[fixture]]
+file = "C1_stock_lifecycle_events.sse"
+run_id = "20261001T040917Z-stream"
+source = "sse_a_order_event.jsonl"
+lines = [27, 28, 29, 30]
+recorded_at = "2026-10-01T04:20:52.457244444Z"
+instrument = "2890"
+checklist = ["C1", "C3"]
+
+[[fixture]]
+file = "C1_futures_lifecycle_rest.json"
+run_id = "20261008T045512Z-orders-pre-restart"
+source = "rest.jsonl"
+lines = [4, 6, 8, 10, 11]
+recorded_at = "2026-10-08T04:55:12.710411693Z"
+instrument = "TMFJ6"
+checklist = ["C1", "C3"]
+
+[[fixture]]
+file = "C1_futures_lifecycle_events.sse"
+run_id = "20261006T084434Z-stream"
+source = "sse_a_order_event.jsonl"
+lines = [5304, 5305, 5306, 5307]
+recorded_at = "2026-10-08T04:55:12.740696366Z"
+instrument = "TMFJ6"
+checklist = ["C1", "D1"]
+
+[[fixture]]
+file = "C1_deal_before_new_events.sse"
+run_id = "20261001T040917Z-stream"
+source = "sse_a_order_event.jsonl"
+lines = [113, 114]
+recorded_at = "2026-10-01T04:33:54.030238557Z"
+instrument = "TMFJ6"
+checklist = ["C1", "C3"]
+
+[[fixture]]
+file = "C2_price_limit_reject_event.sse"
+run_id = "20261001T040917Z-stream"
+source = "sse_a_order_event.jsonl"
+lines = [18]
+recorded_at = "2026-10-01T04:17:07.026626910Z"
+instrument = "2890"
+checklist = ["C2"]
+
+[[fixture]]
+file = "C2_odd_lot_tick_reject_event.sse"
+run_id = "20261001T040917Z-stream"
+source = "sse_a_order_event.jsonl"
+lines = [41]
+recorded_at = "2026-10-01T04:23:50.030920114Z"
+instrument = "00981A"
+checklist = ["C2"]
+
+[[fixture]]
+file = "C2_stock_mkp_rejected.json"
+run_id = "20261001T043017Z-orders-day1b"
+source = "rest.jsonl"
+lines = [194]
+recorded_at = "2026-10-01T04:33:21.387639553Z"
+instrument = "2890"
+checklist = ["C2"]
+
+[[fixture]]
+file = "C2_odd_lot_mkp_rejected.json"
+run_id = "20261001T043017Z-orders-day1b"
+source = "rest.jsonl"
+lines = [245]
+recorded_at = "2026-10-01T04:33:50.667038422Z"
+instrument = "00981A"
+checklist = ["C2"]
+
+[[fixture]]
+file = "C2_stock_mkt_ioc_fill_events.sse"
+run_id = "20261001T040917Z-stream"
+source = "sse_a_order_event.jsonl"
+lines = [91, 92]
+recorded_at = "2026-10-01T04:32:47.268971074Z"
+instrument = "2890"
+checklist = ["C2", "C5"]
+
+[[fixture]]
+file = "C2_futures_mkp_rod_fill_events.sse"
+run_id = "20261001T040917Z-stream"
+source = "sse_a_order_event.jsonl"
+lines = [125, 126]
+recorded_at = "2026-10-01T04:34:05.168249382Z"
+instrument = "TMFJ6"
+checklist = ["C2"]
+
+[[fixture]]
+file = "C3_futures_fill_rest.json"
+run_id = "20261008T045512Z-orders-pre-restart"
+source = "rest.jsonl"
+lines = [15, 16]
+recorded_at = "2026-10-08T04:55:21.647016268Z"
+instrument = "TMFJ6"
+checklist = ["C2", "C3"]
+
+[[fixture]]
+file = "C3_futures_fill_events.sse"
+run_id = "20261006T084434Z-stream"
+source = "sse_a_order_event.jsonl"
+lines = [5308, 5309]
+recorded_at = "2026-10-08T04:55:21.617700064Z"
+instrument = "TMFJ6"
+checklist = ["C3", "D1"]
+
+[[fixture]]
+file = "C4_custom_field_rest.json"
+run_id = "20261001T042143Z-orders-day1"
+source = "rest.jsonl"
+lines = [299, 306]
+recorded_at = "2026-10-01T04:26:20.001732619Z"
+instrument = "2890"
+checklist = ["C4"]
+
+[[fixture]]
+file = "C4_custom_field_events.sse"
+run_id = "20261001T040917Z-stream"
+source = "sse_a_order_event.jsonl"
+lines = [60, 61]
+recorded_at = "2026-10-01T04:26:20.095769379Z"
+instrument = "2890"
+checklist = ["C4"]
+
+[[fixture]]
+file = "C5_board_lot_deal_events.sse"
+run_id = "20261001T040917Z-stream"
+source = "sse_a_order_event.jsonl"
+lines = [88, 89]
+recorded_at = "2026-10-01T04:32:30.802842712Z"
+instrument = "2890"
+checklist = ["C5"]
+
+[[fixture]]
+file = "C5_odd_lot_deal_events.sse"
+run_id = "20261001T040917Z-stream"
+source = "sse_a_order_event.jsonl"
+lines = [102, 103]
+recorded_at = "2026-10-01T04:33:28.723830855Z"
+instrument = "00981A"
+checklist = ["C5"]
+
+[[fixture]]
+file = "C6_ioc_fok_resting_events.sse"
+run_id = "20261001T040917Z-stream"
+source = "sse_a_order_event.jsonl"
+lines = [35, 38, 70, 71]
+recorded_at = "2026-10-01T04:21:47.079824324Z"
+instrument = "2890"
+checklist = ["C6"]
+
+[[fixture]]
+file = "C6_ioc_resting_rest.json"
+run_id = "20261001T042143Z-orders-day1"
+source = "rest.jsonl"
+lines = [11, 67]
+recorded_at = "2026-10-01T04:21:47.057211820Z"
+instrument = "2890"
+checklist = ["C6"]
+
+[[fixture]]
+file = "C7_trades_after_restart.json"
+run_id = "20261008T045600Z-reconcile"
+source = "rest.jsonl"
+lines = [3, 4]
+recorded_at = "2026-10-08T04:56:02.259625117Z"
+instrument = "TMFJ6"
+checklist = ["C7"]
+
+[[fixture]]
+file = "D1_client_b_order_events.sse"
+run_id = "20261006T084434Z-stream"
+source = "sse_b_order_event.jsonl"
+lines = [5304, 5305, 5306, 5307, 5308, 5309]
+recorded_at = "2026-10-08T04:55:12.741171630Z"
+instrument = "TMFJ6"
+checklist = ["D1"]
+
+[[fixture]]
+file = "D2_unsubscribe_2330_tick.json"
+run_id = "20261001T040917Z-stream"
+source = "rest.jsonl"
+lines = [55]
+recorded_at = "2026-10-02T02:30:00.003238349Z"
+instrument = "2330"
+checklist = ["D2"]
+
+[[fixture]]
+file = "D2_client_a_2330_quotes.sse"
+run_id = "20261001T040917Z-stream"
+source = "sse_a_data.jsonl"
+lines = [2138320, 2139917]
+recorded_at = "2026-10-02T02:29:58.842695394Z"
+instrument = "2330"
+checklist = ["D2"]
+
+[[fixture]]
+file = "D2_client_b_2330_quotes.sse"
+run_id = "20261001T040917Z-stream"
+source = "sse_b_data.jsonl"
+lines = [2138320, 2139917]
+recorded_at = "2026-10-02T02:29:58.842747223Z"
+instrument = "2330"
+checklist = ["D2"]
+
+[[fixture]]
+file = "E1_restart_server_log.log"
+run_id = "2026-10-06-server"
+source = "server.log"
+lines = [910, 911, 912, 913, 914, 915, 916, 918, 919, 920, 921, 922]
+recorded_at = "2026-10-08T04:55:46.708856000Z"
+instrument = ""
+checklist = ["E1", "F4"]
+
+[[fixture]]
+file = "E1_restart_recorder_log.log"
+run_id = "20261006T084434Z-stream"
+source = "recorder.log"
+lines = [13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]
+recorded_at = "2026-10-08T04:55:46.761000000Z"
+instrument = ""
+checklist = ["E1"]
+
+[[fixture]]
+file = "E1_heartbeats_across_restart.sse"
+run_id = "20261006T084434Z-stream"
+source = "sse_a_order_event.jsonl"
+lines = [5312, 5315, 5316]
+recorded_at = "2026-10-08T04:55:34.255165213Z"
+instrument = ""
+checklist = ["E1", "B2"]
+
+[[fixture]]
+file = "E1_resend_after_restart.json"
+run_id = "20261006T084434Z-stream"
+source = "rest.jsonl"
+lines = [81, 83]
+recorded_at = "2026-10-08T04:55:48.296916554Z"
+instrument = ""
+checklist = ["E1"]
+
+[[fixture]]
+file = "E2_daily_maintenance_log.log"
+run_id = "2026-10-06-server"
+source = "server.log"
+lines = [308, 309, 310, 317, 329, 330, 331, 332]
+recorded_at = "2026-10-07T00:28:32.003653000Z"
+instrument = ""
+checklist = ["E2"]
+
+[[fixture]]
+file = "E2_relogin_refused_log.log"
+run_id = "2026-10-04-server"
+source = "server.log"
+lines = [270, 275, 276, 279, 487, 488]
+recorded_at = "2026-10-05T00:15:17.000783000Z"
+instrument = ""
+checklist = ["E2"]
+
+[[fixture]]
+file = "E2_trade_subscribe_after_expiry.json"
+run_id = "20261003T205132Z-stream"
+source = "rest.jsonl"
+lines = [55, 56]
+recorded_at = "2026-10-05T00:35:00.012705852Z"
+instrument = ""
+checklist = ["E2"]
+
+[[fixture]]
+file = "E3_contract_events.sse"
+run_id = "20261006T084434Z-stream"
+source = "sse_a_contract_event.jsonl"
+lines = [2544, 4687, 4688, 4690]
+recorded_at = "2026-10-07T05:55:20.667627039Z"
+instrument = ""
+checklist = ["E3"]
+
+[[fixture]]
+file = "F2_harness_all_refused_log.log"
+run_id = "2026-10-08-harness-server"
+source = "server.log"
+lines = [1, 2, 11, 12]
+recorded_at = "2026-10-08T04:54:26.429283000Z"
+instrument = ""
+checklist = ["F2"]
+
+[[fixture]]
+file = "F5_http_auth_log.log"
+run_id = "2026-10-06-server"
+source = "server.log"
+lines = [11, 12]
+recorded_at = "2026-10-06T08:44:13.725361000Z"
+instrument = ""
+checklist = ["F2", "F5"]
+
+[[fixture]]
+file = "F3_usage.json"
+run_id = "20261008T045346Z-preflight"
+source = "rest.jsonl"
+lines = [6]
+recorded_at = "2026-10-08T04:53:46.270386958Z"
+instrument = ""
+checklist = ["F3"]
+
+[[fixture]]
+file = "F4_ca_status.json"
+run_id = "20261008T045346Z-preflight"
+source = "rest.jsonl"
+lines = [7]
+recorded_at = "2026-10-08T04:53:46.275729203Z"
+instrument = ""
+checklist = ["F4"]
+
+[[fixture]]
+file = "F4_ca_activation_log.log"
+run_id = "2026-10-06-server"
+source = "server.log"
+lines = [3, 4, 6, 7, 8]
+recorded_at = "2026-10-06T08:44:13.094199000Z"
+instrument = ""
+checklist = ["E2", "F4"]
+
+[[fixture]]
+file = "G1_kbars_2330.json"
+run_id = "20261001T062125Z-history"
+source = "rest.jsonl"
+lines = [7, 8, 9]
+recorded_at = "2026-10-01T06:21:26.315365726Z"
+instrument = "2330"
+checklist = ["F3", "G1"]
+
+[[fixture]]
+file = "G1_snapshots.json"
+run_id = "20261001T062125Z-history"
+source = "rest.jsonl"
+lines = [13, 14, 15]
+recorded_at = "2026-10-01T06:21:26.465643609Z"
+instrument = ""
+checklist = ["F3", "G1"]

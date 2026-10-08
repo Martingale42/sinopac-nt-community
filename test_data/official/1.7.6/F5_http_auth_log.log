@@ -1,0 +1,2 @@
+[2m2026-10-06T08:44:13.725361Z[0m [32m INFO[0m [2mshioaji::server::http[0m[2m:[0m API key authentication disabled (localhost bind)
+[2m2026-10-06T08:44:13.725371Z[0m [32m INFO[0m [2mshioaji::server::http[0m[2m:[0m agent_harness configured [3mmode[0m[2m=[0mOff [3menabled[0m[2m=[0mfalse [3msimulation[0m[2m=[0mtrue

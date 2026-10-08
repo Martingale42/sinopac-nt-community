@@ -1091,7 +1091,13 @@ def test_real_p1_toml_scrub_section() -> None:
     assert cfg.fixtures_root.parent.name == "official"
     assert all(path.exists() for path in cfg.scrub.extra_scan_paths)
     assert cfg.scrub.ipv4_allow == frozenset({"7.33.0.3"})
-    assert scrub.load_selection(cfg.scrub.selection) == []
+
+    # The committed MANIFEST.toml must come from an export of the committed selection
+    entries = scrub.load_selection(cfg.scrub.selection)
+    manifest = tomllib.loads((cfg.fixtures_root / "MANIFEST.toml").read_text(encoding="utf-8"))
+    assert entries
+    assert [Path(item["file"]).stem for item in manifest["fixture"]] == [entry.name for entry in entries]
+    assert [item["lines"] for item in manifest["fixture"]] == [list(entry.lines) for entry in entries]
 
 
 def test_committed_docs_and_config_scan_clean() -> None:

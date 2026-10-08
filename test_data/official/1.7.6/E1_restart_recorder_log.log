@@ -1,0 +1,13 @@
+2026-10-08 12:55:46,761 WARNING p1rec.sse: SSE a/contract_event disconnected: RemoteProtocolError: peer closed connection without sending complete message body (incomplete chunked read); retrying every 1.0s
+2026-10-08 12:55:46,761 WARNING p1rec.sse: SSE b/data disconnected: RemoteProtocolError: peer closed connection without sending complete message body (incomplete chunked read); retrying every 1.0s
+2026-10-08 12:55:46,762 WARNING p1rec.sse: SSE a/order_event disconnected: RemoteProtocolError: peer closed connection without sending complete message body (incomplete chunked read); retrying every 1.0s
+2026-10-08 12:55:46,762 WARNING p1rec.sse: SSE a/data disconnected: RemoteProtocolError: peer closed connection without sending complete message body (incomplete chunked read); retrying every 1.0s
+2026-10-08 12:55:46,762 WARNING p1rec.sse: SSE b/contract_event disconnected: RemoteProtocolError: peer closed connection without sending complete message body (incomplete chunked read); retrying every 1.0s
+2026-10-08 12:55:46,762 WARNING p1rec.sse: SSE b/order_event disconnected: RemoteProtocolError: peer closed connection without sending complete message body (incomplete chunked read); retrying every 1.0s
+2026-10-08 12:55:47,790 INFO p1rec.sse: SSE a/data reconnected after 1 failed attempt(s) over 1.0s
+2026-10-08 12:55:47,790 INFO p1rec.sse: SSE a/contract_event reconnected after 1 failed attempt(s) over 1.0s
+2026-10-08 12:55:47,790 INFO p1rec.sse: SSE b/order_event reconnected after 1 failed attempt(s) over 1.0s
+2026-10-08 12:55:47,794 INFO p1rec.stream: leader stream a/data connected again; resending 2 startup request(s) and 24 subscription(s)
+2026-10-08 12:55:47,796 INFO p1rec.sse: SSE b/data reconnected after 1 failed attempt(s) over 1.0s
+2026-10-08 12:55:47,800 INFO p1rec.sse: SSE b/contract_event reconnected after 1 failed attempt(s) over 1.0s
+2026-10-08 12:55:47,803 INFO p1rec.sse: SSE a/order_event reconnected after 1 failed attempt(s) over 1.0s

@@ -1,0 +1,84 @@
+[
+  {
+    "client": "stream",
+    "op": "subscribe_trade",
+    "method": "POST",
+    "url": "http://127.0.0.1:18080/api/v1/auth/subscribe_trade",
+    "req_body": "{\"account_type\":\"S\",\"broker_id\":\"9A9N\",\"account_id\":\"ACCOUNT_ID_2\",\"person_id\":\"PERSON_ID_1\"}",
+    "sent_ts_ns": 1791160500002928109,
+    "recv_ts_ns": 1791160500012705852,
+    "status": 401,
+    "resp_headers": [
+      [
+        "content-type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "vary",
+        "origin"
+      ],
+      [
+        "vary",
+        "access-control-request-method"
+      ],
+      [
+        "vary",
+        "access-control-request-headers"
+      ],
+      [
+        "access-control-expose-headers",
+        "content-type,cache-control"
+      ],
+      [
+        "content-length",
+        "56"
+      ],
+      [
+        "date",
+        "Mon, 05 Oct 2026 00:35:00 GMT"
+      ]
+    ],
+    "resp_body": "{\"code\":401,\"message\":\"Token is expired\",\"details\":null}"
+  },
+  {
+    "client": "stream",
+    "op": "subscribe_trade",
+    "method": "POST",
+    "url": "http://127.0.0.1:18080/api/v1/auth/subscribe_trade",
+    "req_body": "{\"account_type\":\"F\",\"broker_id\":\"F002000\",\"account_id\":\"ACCOUNT_ID_1\",\"person_id\":\"PERSON_ID_1\"}",
+    "sent_ts_ns": 1791160500013150710,
+    "recv_ts_ns": 1791160500013743699,
+    "status": 500,
+    "resp_headers": [
+      [
+        "content-type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "vary",
+        "origin"
+      ],
+      [
+        "vary",
+        "access-control-request-method"
+      ],
+      [
+        "vary",
+        "access-control-request-headers"
+      ],
+      [
+        "access-control-expose-headers",
+        "content-type,cache-control"
+      ],
+      [
+        "content-length",
+        "276"
+      ],
+      [
+        "date",
+        "Mon, 05 Oct 2026 00:35:00 GMT"
+      ]
+    ],
+    "resp_body": "{\"code\":500,\"message\":\"Shioaji error Session error SolClient send request api/v1/paper/subscribe_trade, code: NotReady, Error ErrorInfo { sub_code: SubCode(SessionNotEstablished), error_str: \\\"Unable to wait for session '(c1,s1)_sinopac' to be established\\\" }\",\"details\":null}"
+  }
+]

@@ -1,0 +1,84 @@
+[
+  {
+    "client": "reconcile",
+    "op": "trades",
+    "method": "POST",
+    "url": "http://127.0.0.1:18080/api/v1/order/trades",
+    "req_body": "{\"account_type\":\"S\",\"broker_id\":\"9A9N\",\"account_id\":\"ACCOUNT_ID_2\",\"person_id\":\"PERSON_ID_1\",\"refresh\":true}",
+    "sent_ts_ns": 1791435360807165852,
+    "recv_ts_ns": 1791435362259625117,
+    "status": 200,
+    "resp_headers": [
+      [
+        "content-type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "vary",
+        "origin"
+      ],
+      [
+        "vary",
+        "access-control-request-method"
+      ],
+      [
+        "vary",
+        "access-control-request-headers"
+      ],
+      [
+        "access-control-expose-headers",
+        "content-type,cache-control"
+      ],
+      [
+        "content-length",
+        "2"
+      ],
+      [
+        "date",
+        "Thu, 08 Oct 2026 04:56:02 GMT"
+      ]
+    ],
+    "resp_body": "[]"
+  },
+  {
+    "client": "reconcile",
+    "op": "trades",
+    "method": "POST",
+    "url": "http://127.0.0.1:18080/api/v1/order/trades",
+    "req_body": "{\"account_type\":\"F\",\"broker_id\":\"F002000\",\"account_id\":\"ACCOUNT_ID_1\",\"person_id\":\"PERSON_ID_1\",\"refresh\":true}",
+    "sent_ts_ns": 1791435362260465631,
+    "recv_ts_ns": 1791435363395041123,
+    "status": 200,
+    "resp_headers": [
+      [
+        "content-type",
+        "application/json; charset=utf-8"
+      ],
+      [
+        "vary",
+        "origin"
+      ],
+      [
+        "vary",
+        "access-control-request-method"
+      ],
+      [
+        "vary",
+        "access-control-request-headers"
+      ],
+      [
+        "access-control-expose-headers",
+        "content-type,cache-control"
+      ],
+      [
+        "content-length",
+        "2113"
+      ],
+      [
+        "date",
+        "Thu, 08 Oct 2026 04:56:03 GMT"
+      ]
+    ],
+    "resp_body": "[{\"contract\":{\"security_type\":\"FUT\",\"region\":\"TW\",\"exchange\":\"TAIFEX\",\"code\":\"TMFJ6\",\"target_code\":\"\"},\"order\":{\"id\":\"00367C\",\"seqno\":\"00367C\",\"ordno\":\"159063\",\"action\":\"Buy\",\"price\":47469.0,\"quantity\":2,\"order_type\":\"ROD\",\"price_type\":\"LMT\",\"custom_field\":\"\",\"account\":{\"account_type\":\"F\",\"person_id\":\"PERSON_ID_1\",\"broker_id\":\"F002000\",\"account_id\":\"ACCOUNT_ID_1\",\"signed\":true,\"username\":\"USERNAME_1\"},\"ca\":\"\",\"octype\":\"Auto\"},\"status\":{\"id\":\"00367C\",\"status\":\"Cancelled\",\"status_code\":\"00\",\"web_id\":\"\",\"order_ts\":1791435312.544344,\"msg\":\"\",\"modified_ts\":1791435317.137436,\"modified_price\":47470.0,\"order_quantity\":2,\"deal_quantity\":0,\"cancel_quantity\":2,\"deals\":[]}},{\"contract\":{\"security_type\":\"FUT\",\"region\":\"TW\",\"exchange\":\"TAIFEX\",\"code\":\"TMFJ6\",\"target_code\":\"\"},\"order\":{\"id\":\"003683\",\"seqno\":\"003683\",\"ordno\":\"15906A\",\"action\":\"Buy\",\"price\":54964.0,\"quantity\":1,\"order_type\":\"IOC\",\"price_type\":\"MKT\",\"custom_field\":\"\",\"account\":{\"account_type\":\"F\",\"person_id\":\"PERSON_ID_1\",\"broker_id\":\"F002000\",\"account_id\":\"ACCOUNT_ID_1\",\"signed\":true,\"username\":\"USERNAME_1\"},\"ca\":\"\",\"octype\":\"Auto\"},\"status\":{\"id\":\"003683\",\"status\":\"Filled\",\"status_code\":\"00\",\"web_id\":\"\",\"order_ts\":1791435321.519017,\"msg\":\"\",\"modified_ts\":1791435321.606591,\"modified_price\":0.0,\"order_quantity\":1,\"deal_quantity\":1,\"cancel_quantity\":0,\"deals\":[{\"seq\":\"000001\",\"price\":49585.0,\"quantity\":1,\"ts\":1791435321.617605}]}},{\"contract\":{\"security_type\":\"FUT\",\"region\":\"TW\",\"exchange\":\"TAIFEX\",\"code\":\"TMFJ6\",\"target_code\":\"\"},\"order\":{\"id\":\"003686\",\"seqno\":\"003686\",\"ordno\":\"15906D\",\"action\":\"Sell\",\"price\":47469.0,\"quantity\":1,\"order_type\":\"ROD\",\"price_type\":\"LMT\",\"custom_field\":\"\",\"account\":{\"account_type\":\"F\",\"person_id\":\"PERSON_ID_1\",\"broker_id\":\"F002000\",\"account_id\":\"ACCOUNT_ID_1\",\"signed\":true,\"username\":\"USERNAME_1\"},\"ca\":\"\",\"octype\":\"Auto\"},\"status\":{\"id\":\"003686\",\"status\":\"Filled\",\"status_code\":\"00\",\"web_id\":\"\",\"order_ts\":1791435324.537889,\"msg\":\"\",\"modified_ts\":1791435325.711136,\"modified_price\":0.0,\"order_quantity\":1,\"deal_quantity\":1,\"cancel_quantity\":0,\"deals\":[{\"seq\":\"000001\",\"price\":49587.0,\"quantity\":1,\"ts\":1791435325.785935}]}}]"
+  }
+]

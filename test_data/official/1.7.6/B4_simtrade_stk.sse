@@ -1,0 +1,6 @@
+event:tick_stk
+data:{"code":"2330","date":"2026-10-07","time":"08:59:59.970557","open":"0","avg_price":"0","close":"2565","high":"0","low":"0","amount":"0","total_amount":"0","volume":2570,"total_volume":0,"tick_type":1,"chg_type":4,"price_chg":"-20","pct_chg":"-0.77","bid_side_total_vol":0,"ask_side_total_vol":0,"bid_side_total_cnt":0,"ask_side_total_cnt":0,"closing_oddlot_shares":0,"closing_oddlot_close":null,"closing_oddlot_amount":"0","closing_oddlot_bid_price":null,"closing_oddlot_ask_price":null,"fixed_trade_vol":0,"fixed_trade_amount":"0","suspend":false,"simtrade":true,"intraday_odd":false}
+
+event:tick_stk
+data:{"code":"2330","date":"2026-10-07","time":"09:00:09.398636","open":"2565","avg_price":"2565","close":"2565","high":"2565","low":"2565","amount":"6599745000","total_amount":"6599745000","volume":2573,"total_volume":2573,"tick_type":2,"chg_type":4,"price_chg":"-20","pct_chg":"-0.77","bid_side_total_vol":0,"ask_side_total_vol":2573,"bid_side_total_cnt":0,"ask_side_total_cnt":1,"closing_oddlot_shares":0,"closing_oddlot_close":null,"closing_oddlot_amount":"0","closing_oddlot_bid_price":null,"closing_oddlot_ask_price":null,"fixed_trade_vol":0,"fixed_trade_amount":"0","suspend":false,"simtrade":false,"intraday_odd":false}
+
