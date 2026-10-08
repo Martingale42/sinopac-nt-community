@@ -208,7 +208,7 @@ TMFJ6 = 35050
 [scrub]
 account_id_pointers = ["/account_id", "/username", "/person_id"]
 ca_pointers = ["/person_id"]
-account_id_keys = ["subaccount"]
+account_id_keys = ["subaccount", "event_id"]
 map_path = "../../results/p1/scrub-map.json"
 selection = "fixtures.toml"
 contract_doc = "../../docs/official-server-contract.md"

@@ -1,16 +1,16 @@
 event:contract_event
-data:{"event_id":"contract-TW-FUT-41dab177b024aa3f","action":"CHECK","region":"TW","security_type":"FUT","published_at":"2026-10-07T05:55:12.572890997+00:00","base_changed":true,"info_changed":true,"info_scope":"ALL","info_shards":null}
-id:contract-TW-FUT-41dab177b024aa3f
+data:{"event_id":"EVENT_ID_99","action":"CHECK","region":"TW","security_type":"FUT","published_at":"2026-10-07T05:55:12.572890997+00:00","base_changed":true,"info_changed":true,"info_scope":"ALL","info_shards":null}
+id:EVENT_ID_99
 
 event:contract_event
-data:{"event_id":"contract-TW-FUT-41dab1b663de91bc","action":"CHECK","region":"TW","security_type":"FUT","published_at":"2026-10-07T23:45:19.477644920+00:00","base_changed":true,"info_changed":true,"info_scope":"ALL","info_shards":null}
-id:contract-TW-FUT-41dab1b663de91bc
+data:{"event_id":"EVENT_ID_102","action":"CHECK","region":"TW","security_type":"FUT","published_at":"2026-10-07T23:45:19.477644920+00:00","base_changed":true,"info_changed":true,"info_scope":"ALL","info_shards":null}
+id:EVENT_ID_102
 
 event:contract_event
-data:{"event_id":"tw-opt-01a118c1-dcea-0d0b-b26d-cbcf79460bae","action":"CHECK","region":"TW","security_type":"OPT","published_at":"2026-10-07T23:45:20.197110891+00:00","base_changed":true,"info_changed":true,"info_scope":"SHARDS","info_shards":["CAO","CBO","CCO","CDA","CDO","CEO","CFO","CGO","CHO","CKO","CMO","CNO","CSO","CZO","DFO","DGO","DHO","DJO","DKO","DQO","DSO","DVO","DXO","HSO","IJO","IRO","NYO","OAO","OBO","OJO","OKO","OOO","OZO","TEO","TFO","TGO","TX1","TX2","TXO","TXV","TXX"]}
-id:tw-opt-01a118c1-dcea-0d0b-b26d-cbcf79460bae
+data:{"event_id":"EVENT_ID_103","action":"CHECK","region":"TW","security_type":"OPT","published_at":"2026-10-07T23:45:20.197110891+00:00","base_changed":true,"info_changed":true,"info_scope":"SHARDS","info_shards":["CAO","CBO","CCO","CDA","CDO","CEO","CFO","CGO","CHO","CKO","CMO","CNO","CSO","CZO","DFO","DGO","DHO","DJO","DKO","DQO","DSO","DVO","DXO","HSO","IJO","IRO","NYO","OAO","OBO","OJO","OKO","OOO","OZO","TEO","TFO","TGO","TX1","TX2","TXO","TXV","TXX"]}
+id:EVENT_ID_103
 
 event:contract_event
-data:{"event_id":"contract-TW-STK-41dab1b667dc6fbd","action":"CHECK","region":"TW","security_type":"STK","published_at":"2026-10-07T23:45:35.444319963+00:00","base_changed":true,"info_changed":true,"info_scope":"ALL","info_shards":null}
-id:contract-TW-STK-41dab1b667dc6fbd
+data:{"event_id":"EVENT_ID_104","action":"CHECK","region":"TW","security_type":"STK","published_at":"2026-10-07T23:45:35.444319963+00:00","base_changed":true,"info_changed":true,"info_scope":"ALL","info_shards":null}
+id:EVENT_ID_104
 
