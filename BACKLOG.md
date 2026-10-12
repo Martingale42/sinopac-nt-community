@@ -55,3 +55,10 @@
 | P1REC-37 | open | 原子寫入 JSON 有三份（`save_map`、`orders.py`、`watch.py`），`_is_ipv4`、私有目錄權限與 `_get_positive`／`_get_interval` 也各有重複 | `scrub/_map.py`、`orders.py`、`watch.py`、`config.py`、`rundir.py` | R2 review |
 | P1REC-38 | open | `watch.py` 約 880 行，同時有系統探測、交易日曆、檔尾讀取、狀態與 CLI；檔尾讀取移到 `records.py`、探測獨立成模組，`_check_*` 不再改寫傳入的狀態 | `watch.py` | R2 review |
 | P1REC-39 | open | `redaction_values`、`build_map` 的 `Sequence[str]` 也接受 `str`，改為 `tuple[str, ...]`；`_setup_logging` 每次呼叫都加 root handler；`probe_failed` 可由 `failed_probes` 推得 | `redact.py`、`scrub/_map.py`、`watch.py` | R1、R2 review |
+
+## OFFSRV — P2（官方 server 行為；選做）
+
+| ID | Status | Item | Where | Source |
+|---|---|---|---|---|
+| OFFSRV-1 | open | 查詢已有成交的委託時 server 記 `Conflicting reconciliation deal payload`，衝突的是哪個欄位未知；成交後同時取 `trades` 與 `order_event` 逐欄比對 | 官方 server `/order/trades` | P1 log sweep |
+| OFFSRV-2 | open | 期交所預備盤的清空委託簿 frame 有時帶空字串 `time` 而觸發 `Syntax("too_short")`，有時不送；原因未知 | 官方 server 行情解析 | P1 log sweep |

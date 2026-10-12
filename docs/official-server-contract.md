@@ -168,7 +168,7 @@ adapter v0.1.x 對舊 gateway 用到 11 個 HTTP endpoint 與 5 種 WebSocket �
 - B3 買賣各 5 檔，另有 `first_derived_*`、`diff_*_vol` 與總量；`date`、`time` 為台北本地字串、無時區（`B3_bidask_stk`、`B3_bidask_fop`）。
 - B4 tick 以 `simtrade` 布林標記試撮；10/7 的 2330 在 09:00:09 轉為一般 tick，0050 到 09:02:00 仍為 `true`；TXFJ6 在 08:45:00 轉換（`B4_simtrade_stk`、`B4_simtrade_fop`）。
 - B5 盤中零股以 `tick_stk` 送出並帶 `intraday_odd: true` 與 `closing_oddlot_*`；夜盤期貨與日盤同為 `tick_fop`、`bidask_fop`（`B5_odd_lot_quotes`、`B5_night_session_quotes`）。
-- B6 10/1（家用網路）每秒尖峰 859 frame，收到時間減交易所時間 p50 21.8 ms、p99 132.7 ms（`B6_data_stream_stats`）。09:00 開盤尖峰當日未錄到；固定 IP 主機錄到 10/7、10/8 的開盤，其統計在 Task 14 補入 §4，供 P2 參考。
+- B6 10/1（家用網路）每秒尖峰 859 frame，收到時間減交易所時間 p50 21.8 ms、p99 132.7 ms（`B6_data_stream_stats`）。09:00 開盤尖峰當日未錄到；固定 IP 主機的整段 soak 統計見 §4：p50 6.5 ms、p99 132 ms，每秒尖峰 2,182 frame。
 
 **C. 委託與成交**
 
@@ -203,6 +203,31 @@ adapter v0.1.x 對舊 gateway 用到 11 個 HTTP endpoint 與 5 種 WebSocket �
 
 - G1 ticks、kbars、snapshots 皆以 POST JSON 本體查詢；kbars 只有 1 分 K（2330 一日 266 根）；四筆查詢前後 `usage.bytes` 不變（`G1_kbars_2330`、`G1_snapshots`）。
 
+## 4. Soak 與 log sweep
+
+固定 IP 主機的 soak 從 10/6 16:44 錄到 10/12 16:54（計畫 R8），之後停止服務；結果是 P2 的參考，不改變 §5 的結論（設計 §9.3）。範圍包括 soak 與 harness 實例的 server log、15 個 `recorder.log`、兩個服務的 journald、`watch.jsonl`，以及 10/1–10/5 家用網路的 server log 與錄製器 log。
+
+**串流統計（`20261006T084434Z-stream`）**：兩個 client 各 6,498,899 個行情 frame，各類事件數相同；心跳間隔中位數 30.000 秒、最大 30.09 秒，沒有超過 60.1 秒的空白；唯一的斷線是 10/8 計畫內的重啟（1.03 秒重連）。收到時間減交易所時間 p50 6.5 ms、p99 132 ms、最大 5.0 秒；每秒尖峰 2,182 frame（10/8 15:00 夜盤開盤），期貨日盤 08:45 開盤約 1,250 frame。監看 1731 次檢查沒有任何異常；systemd 自動重啟 0 次、OOM 0 次、主機重開機 0 次。
+
+**session 過期**：token 在下一次每日維護的時刻到期，維護時無條件重新登入，所以重新登入的週期就是維護的週期，24 小時 ±1 秒。固定 IP 主機 6 次維護全部第一次即成功，維護以外的重新登入 0 次；家用網路的機制相同（08:15:17，3 次成功、10/5 因白名單失敗）。P2 watchdog 的依據：`next_maintenance` 過後幾分鐘仍未換到新 token，或出現第一行 `Daily maintenance failed`，即告警；重試序列在 65 分鐘後結束，之後 server 不會自行恢復。
+
+| 類別（已遮蔽的樣板） | 次數（固定 IP ／家用） | 處置：說明 |
+|---|---|---|
+| WARN `No legacy contracts loaded after client replacement` | 6 ／ 3 | 接受：每次維護成功換新 client 時記一次，之後訂閱全數重放 |
+| ERROR `Syntax("too_short")` | 2 ／ 2 | 契約發現：期交所預備盤（08:30:05、14:50:05）送出的清空委託簿 frame 帶空字串 `time`，解析失敗；不保證每次送出，價格 `"0"` 的檔位應視為空檔 |
+| WARN `<op>: simulation mode, returning default` | 3 ／ 3 | 契約發現：模擬模式的帳務查詢回 0（P1REC-26） |
+| WARN `Conflicting reconciliation deal payload` | 3 ／ 854 | 契約發現：查詢已有成交的委託時，server 保留事件確認的版本；對帳兩次皆 0 差異，隨 `trades` 查詢次數增加，監看不應告警 |
+| ERROR 登入或維護 `not allow`（含重試用盡） | 0 ／ 12 | 接受：家用對外 IP 不在白名單；契約發現：維護失敗後重試 10 次再等到隔日，P2 需要固定 IP 與 watchdog |
+| WARN `Solace SDK is reconnecting` 與 SDK NOTICE | 0 ／ 6 | 接受：10/5 家用 IP 變動時行情通道斷線，24 秒後自行重連，不需重新登入 |
+| ERROR `Failed to start HTTP server: … is required for environment bootstrap` | 1 ／ 0 | 契約發現：`all` 模式需要 harness 密鑰（§2 的 10/8 紀錄） |
+| WARNING `skipping scheduled unsubscribe … had passed at startup` | 1 ／ 1 | 接受：啟動時跳過已過期的排程動作 |
+| WARNING `SSE … disconnected: … incomplete chunked read` | 6 ／ 0 | 接受：10/8 計畫內重啟；契約發現：server 停止時不正常結束 chunked 回應，adapter 要當成可重連的斷線 |
+| ERROR `insufficient stock funds`、`insufficient futures margin` | 2 ／ 0 | 接受：P1REC-26 的下游結果 |
+| ERROR `subscribe_trade … failed: HTTP 401／500` | 0 ／ 2 | 接受：session 已失效時的重送；契約發現：401、500 都代表 session 失效 |
+
+- server 把 HTTP 4xx、5xx 記為 INFO：家用網路 10/5 有 500 ×741、503 ×8；只看 WARN、ERROR 的監看會漏掉。
+- 沒有原因不明的類別。`Conflicting reconciliation deal payload` 衝突的欄位，以及預備盤清空 frame 只在部分日子帶空 `time` 的原因，只推論到觸發條件，列為 P2 的選做待辦（`BACKLOG.md` OFFSRV-1、OFFSRV-2）。
+
 ## 5. go/no-go
 
 依設計 §8，2026-10-08 判定。
@@ -230,4 +255,4 @@ P2 必須處理的發現：
 - **正式環境能否讓程式自動下單**：官方文件說正式環境的自動下單須使用者明確選擇並經原生授權，只有正式帳戶量得到，列為 P2 第一個驗證項目。
 - 正式環境才看得到的行為：CA 是否真的簽章（F4）、資金不足拒單（C6）、IOC、FOK 是否自動取消（C6）、`update_qty` 的數量語意與股票部位的 `unit`（§1.1）。
 - 速率上限未知（F1），adapter 需要自己的節流。
-- soak 的 log sweep 與固定 IP 主機的串流統計在 10/12 完成，結果是 P2 的參考，不改變本結論（設計 §9.3）。
+- soak 的 log sweep 與固定 IP 主機的串流統計見 §4，結果是 P2 的參考，不改變本結論（設計 §9.3）。
