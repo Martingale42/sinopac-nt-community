@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use subagent-driven-development (recommended) or executing-plans to implement this plan task-by-task.
 
+**狀態（2026-10-12）：** R1–R8 全部完成：離線部分合併於 `5f44a83`，R4 `521a24f`、R5 `1001979`、R7 `a62ca32`、R8 `9b4d0d9`；soak 為 10/6 16:44 至 10/12 16:54。
+
 **Goal:** 在 AWS 台北固定 IP 主機（VPS）上重跑原計畫 Task 12 soak 起點、Task 13、Task 14，並補上 VPS 執行所需的程式與維運檔案。
 
 **Architecture:** 離線部分擴充 `p1rec`：secrets 可帶多個出口 IP、掃描擋下 IPv4 字面值、新增不建立 run 目錄的 `p1watch` 監看入口，以及 `deploy/` 下的 systemd 檔。live 部分照設計 §4 的時程在 VPS 上執行，家用主機負責輪詢告警、取回與分析。

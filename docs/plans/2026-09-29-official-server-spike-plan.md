@@ -975,6 +975,8 @@ git commit -m "Rehearse the full recorder pipeline against a stub server"
 
 ### Task 12（live，週四）：preflight、soak 起點、行情、下單與歷史
 
+**狀態：** 完成。10/1 的下單、歷史與校準見契約文件 §2；soak 起點改由 `2026-10-06-soak-rehost-plan.md` R4 在固定 IP 主機完成（`521a24f`）。
+
 **Files:**
 - Modify: `tools/p1-official-server/p1.toml`、`docs/official-server-contract.md`（§2 執行紀錄）
 
@@ -1021,6 +1023,8 @@ git commit -m "Calibrate recorder settings from the first live session"
 
 ### Task 13（live，週一 10/5）：多 client、harness 實例、重啟與對帳
 
+**狀態：** 完成，由 `2026-10-06-soak-rehost-plan.md` R7 於 10/8 執行（`a62ca32`，harness 依使用者決定以文件作答 `bd5df28`）。
+
 **Files:**
 - Modify: `docs/official-server-contract.md`（§2 執行紀錄）
 
@@ -1066,6 +1070,8 @@ git commit -m "Record multi-client, harness and restart runs"
 
 ### Task 14（live，下週二 09:30）：soak 結束與 log sweep
 
+**狀態：** 完成，由 `2026-10-06-soak-rehost-plan.md` R8 於 10/12 執行（`9b4d0d9`）。
+
 **Files:**
 - Modify: `docs/official-server-contract.md`（新增 §4 log sweep）
 
@@ -1096,6 +1102,8 @@ git commit -m "Classify every warning and error class from the soak"
 ---
 
 ### Task 15：語料、契約文件、go/no-go 與決策紀錄
+
+**狀態：** 完成，結論 GO（`ec9cd86`、`4436093`、`8811e53`）。
 
 **Files:**
 - Modify: `tools/p1-official-server/fixtures.toml`、`docs/official-server-contract.md`、`ROADMAP.md`、`docs/adr/0004-order-tag-reserves-node-id.md`（`status: superseded by ADR-0005`）
